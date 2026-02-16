@@ -1,0 +1,11 @@
+{
+  "max_messages": 1544,
+  "paths": [
+    "apps",
+    "checks",
+    "services",
+    "pipeline",
+    "infra",
+    "contracts"
+  ]
+}
