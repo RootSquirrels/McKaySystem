@@ -16,7 +16,7 @@ help:
 	@echo "  make ci-backend                 - Run backend release checks"
 	@echo "  make ci-worker                  - Run worker release checks"
 	@echo "  make production-gate            - Run install/import/ruff/guardrail tests/pylint ratchet"
-	@echo "  make pylint-ratchet             - Ensure pylint message count does not regress"
+	@echo "  make pylint-ratchet             - Ensure pylint total/symbol/path debt does not regress"
 	@echo "  make sparse-worker              - Apply CloudShell sparse checkout profile (worker)"
 	@echo "  make sparse-backend             - Apply CloudShell sparse checkout profile (backend)"
 
