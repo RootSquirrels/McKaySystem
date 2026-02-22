@@ -10,6 +10,7 @@ from typing import Any
 from flask import Blueprint, request
 
 from apps.backend.db import db_conn, execute_conn, fetch_all_dict_conn, fetch_one_dict_conn
+from apps.flask_api.auth_middleware import require_permission
 from apps.flask_api.utils import (
     _MISSING,
     _coerce_optional_text,
@@ -333,6 +334,7 @@ def _apply_finding_sla_extension(
 
 
 @findings_bp.route("/api/findings", methods=["GET"])
+@require_permission("findings:read")
 def api_findings() -> Any:
     """Query findings with filters and pagination.
 
@@ -449,6 +451,7 @@ def api_findings() -> Any:
 
 
 @findings_bp.route("/api/findings/sla/breached", methods=["GET"])
+@require_permission("findings:read")
 def api_findings_sla_breached() -> Any:
     """List findings currently in breached SLA state.
 
@@ -538,6 +541,7 @@ def api_findings_sla_breached() -> Any:
 
 
 @findings_bp.route("/api/findings/aging", methods=["GET"])
+@require_permission("findings:read")
 def api_findings_aging() -> Any:
     """List findings filtered by aging clock (open or detected age).
 
@@ -653,6 +657,7 @@ def api_findings_aging() -> Any:
 
 
 @findings_bp.route("/api/findings/aggregates", methods=["GET"])
+@require_permission("findings:read")
 def api_findings_aggregates() -> Any:
     """Get aggregated statistics about findings.
 
@@ -770,6 +775,7 @@ def api_findings_aggregates() -> Any:
 
 
 @findings_bp.route("/api/findings/<fingerprint>/owner", methods=["PUT"])
+@require_permission("findings:update")
 def api_finding_set_owner(fingerprint: str) -> Any:
     """Assign or clear finding owner governance fields."""
     try:
@@ -840,6 +846,7 @@ def api_finding_set_owner(fingerprint: str) -> Any:
 
 
 @findings_bp.route("/api/findings/<fingerprint>/team", methods=["PUT"])
+@require_permission("findings:update")
 def api_finding_set_team(fingerprint: str) -> Any:
     """Assign or clear finding team governance field."""
     try:
@@ -906,6 +913,7 @@ def api_finding_set_team(fingerprint: str) -> Any:
 
 
 @findings_bp.route("/api/findings/<fingerprint>/sla/extend", methods=["POST"])
+@require_permission("findings:update")
 def api_finding_extend_sla(fingerprint: str) -> Any:
     """Extend finding SLA by a positive day count."""
     try:

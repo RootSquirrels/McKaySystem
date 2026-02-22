@@ -6,7 +6,8 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-import apps.flask_api.flask_app as flask_app
+from apps.flask_api import auth_middleware, flask_app
+from services.rbac_service import AuthContext
 
 
 class _DummyConn:
@@ -28,6 +29,20 @@ def _disable_runtime_guards(monkeypatch) -> None:  # type: ignore[no-untyped-def
     monkeypatch.setattr(flask_app, "_schema_gate_checked", True)
     monkeypatch.setattr(flask_app, "_API_BEARER_TOKEN", "")
     monkeypatch.setattr(flask_app, "db_conn", lambda: _DummyConn())
+    monkeypatch.setattr(
+        auth_middleware,
+        "authenticate_request",
+        lambda: AuthContext(
+            tenant_id="acme",
+            workspace="prod",
+            user_id="u-test",
+            email="tester@acme.io",
+            full_name="RBAC Test",
+            is_superadmin=False,
+            auth_method="session",
+            permissions=frozenset({"admin:full"}),
+        ),
+    )
 
 
 def test_findings_query_uses_finding_current_only(monkeypatch) -> None:  # type: ignore[no-untyped-def]
