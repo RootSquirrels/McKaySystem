@@ -5,6 +5,7 @@ import { useEffect } from "react";
 
 import { useAuth } from "@/hooks/useAuth";
 import { useFindings } from "@/hooks/useFindings";
+import { ApiError } from "@/lib/api/client";
 import { getStoredScope } from "@/lib/scope";
 
 function formatMoney(value: number | null): string {
@@ -16,6 +17,17 @@ function formatMoney(value: number | null): string {
     currency: "USD",
     maximumFractionDigits: 2,
   }).format(value);
+}
+
+function findingsErrorMessage(error: unknown): string {
+  if (error instanceof ApiError) {
+    const code = error.code ? ` (${error.code})` : "";
+    return `Failed to load findings [${error.status}${code}]: ${error.message}`;
+  }
+  if (error instanceof Error) {
+    return `Failed to load findings: ${error.message}`;
+  }
+  return "Failed to load findings.";
 }
 
 export default function FindingsPage() {
@@ -61,7 +73,20 @@ export default function FindingsPage() {
       </header>
 
       {findings.isLoading ? <p>Loading findings...</p> : null}
-      {findings.error ? <p className="text-sm text-red-600">Failed to load findings.</p> : null}
+      {findings.error ? (
+        <div className="mb-4 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+          <p>{findingsErrorMessage(findings.error)}</p>
+          <button
+            type="button"
+            className="mt-2 rounded border border-red-300 px-2 py-1 text-xs"
+            onClick={() => {
+              void findings.refetch();
+            }}
+          >
+            Retry
+          </button>
+        </div>
+      ) : null}
 
       {!findings.isLoading && findings.data ? (
         <div className="overflow-x-auto rounded border border-zinc-200">

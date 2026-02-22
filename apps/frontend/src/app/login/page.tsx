@@ -7,6 +7,17 @@ import { ApiError } from "@/lib/api/client";
 import { getStoredScope } from "@/lib/scope";
 import { useAuth } from "@/hooks/useAuth";
 
+function loginErrorMessage(error: unknown): string {
+  if (error instanceof ApiError) {
+    const code = error.code ? ` (${error.code})` : "";
+    return `Login failed [${error.status}${code}]: ${error.message}`;
+  }
+  if (error instanceof Error) {
+    return `Login failed: ${error.message}`;
+  }
+  return "Login failed.";
+}
+
 export default function LoginPage() {
   const router = useRouter();
   const { login, isLoading } = useAuth();
@@ -31,11 +42,7 @@ export default function LoginPage() {
       });
       router.push("/findings");
     } catch (error) {
-      if (error instanceof ApiError) {
-        setSubmitError(error.message);
-      } else {
-        setSubmitError("Login failed");
-      }
+      setSubmitError(loginErrorMessage(error));
     } finally {
       setIsSubmitting(false);
     }

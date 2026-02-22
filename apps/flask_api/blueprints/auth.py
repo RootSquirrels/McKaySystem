@@ -175,7 +175,7 @@ def _response_with_session_cookie(
         expires=expires_at,
         httponly=True,
         secure=bool(request.is_secure),
-        samesite="Lax",
+        samesite="None",
         path="/",
     )
     return response
