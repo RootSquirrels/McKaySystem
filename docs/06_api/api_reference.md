@@ -1,7 +1,7 @@
 # API Reference
 
 Status: Derived  
-Last reviewed: 2026-02-15
+Last reviewed: 2026-02-22
 
 This document describes the HTTP API implemented in the Flask application using a modular Blueprint architecture.
 
@@ -42,6 +42,7 @@ Source code:
   - Session token (`session_token` cookie or compatibility query/body)
   - API key (`Authorization: Bearer <api-key>`)
 - Permission mapping is documented in `docs/06_api/rbac_permissions.md`.
+- User/role operational flow is documented in `docs/06_api/rbac_user_role_guide.md`.
 - A global bearer gate (`API_BEARER_TOKEN`) may still apply operationally to non-public routes, but RBAC checks are enforced per endpoint.
 
 ## Scope rules

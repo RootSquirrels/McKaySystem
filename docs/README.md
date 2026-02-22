@@ -1,7 +1,7 @@
 # Docs
 
 Status: Canonical  
-Last reviewed: 2026-02-01
+Last reviewed: 2026-02-22
 
 ## Quick navigation
 
@@ -15,6 +15,7 @@ Last reviewed: 2026-02-01
 - **Operations**: `05_operations/running.md`
 - **API**: `06_api/api_reference.md`
 - **RBAC matrix**: `06_api/rbac_permissions.md`
+- **RBAC user/role guide**: `06_api/rbac_user_role_guide.md`
 
 ## Structure
 
