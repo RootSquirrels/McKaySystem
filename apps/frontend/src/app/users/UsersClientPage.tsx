@@ -47,6 +47,16 @@ function formatDateTime(value: string | null): string {
   return parsed.toLocaleString();
 }
 
+function userStatusBadgeClass(user: UserItem): string {
+  if (user.is_superadmin) {
+    return "border-fuchsia-300 bg-fuchsia-50 text-fuchsia-800";
+  }
+  if (user.is_active) {
+    return "border-emerald-300 bg-emerald-50 text-emerald-800";
+  }
+  return "border-zinc-300 bg-zinc-100 text-zinc-700";
+}
+
 export function UsersClientPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -150,6 +160,9 @@ export function UsersClientPage() {
   const canNext = page < totalPages;
   const pageStart = total === 0 ? 0 : offset + 1;
   const pageEnd = total === 0 ? 0 : Math.min(offset + (users.data?.items.length ?? 0), total);
+  const activeCount = (users.data?.items ?? []).filter((item) => item.is_active).length;
+  const superadminCount = (users.data?.items ?? []).filter((item) => item.is_superadmin).length;
+  const assignedRoleCount = (users.data?.items ?? []).filter((item) => Boolean(item.role_id)).length;
 
   function pushWithParams(updates: Record<string, string | null>) {
     const params = new URLSearchParams(searchParams.toString());
@@ -257,63 +270,92 @@ export function UsersClientPage() {
   }
 
   return (
-    <main className="mx-auto min-h-screen w-full max-w-6xl px-6 py-8">
-      <header className="mb-6 flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold">Users & Roles</h1>
-          <p className="text-sm text-zinc-600">
-            Tenant: <span className="font-medium">{activeScope.tenantId}</span> | Workspace:{" "}
-            <span className="font-medium">{activeScope.workspace}</span>
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          {canReadFindings ? (
+    <main className="finops-shell relative overflow-hidden">
+      <div className="finops-orb finops-orb--one" />
+      <div className="finops-orb finops-orb--two" />
+      <div className="finops-orb finops-orb--three" />
+
+      <div className="relative z-10 mx-auto min-h-screen w-full max-w-7xl px-6 py-6">
+        <header className="finops-panel mb-4 flex flex-wrap items-start justify-between gap-3 rounded-2xl p-4">
+          <div>
+            <p className="inline-flex rounded-full border border-cyan-300/70 bg-cyan-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-700">
+              Access Governance
+            </p>
+            <h1 className="font-display mt-2 text-2xl font-semibold tracking-tight text-slate-900 md:text-3xl">
+              Users and Roles
+            </h1>
+            <p className="mt-1 text-sm text-slate-600">
+              Tenant: <span className="font-medium">{activeScope.tenantId}</span> | Workspace:{" "}
+              <span className="font-medium">{activeScope.workspace}</span>
+            </p>
+          </div>
+          <div className="flex items-center gap-2 self-start">
+            {canReadFindings ? (
+              <button
+                type="button"
+                className="finops-toolbar-btn rounded-lg px-3 py-2 text-sm font-medium transition"
+                onClick={() => {
+                  router.push("/findings");
+                }}
+              >
+                Findings
+              </button>
+            ) : null}
+            {canReadFindings ? (
+              <button
+                type="button"
+                className="finops-toolbar-btn rounded-lg px-3 py-2 text-sm font-medium transition"
+                onClick={() => {
+                  router.push("/recommendations");
+                }}
+              >
+                Recommendations
+              </button>
+            ) : null}
             <button
               type="button"
-              className="rounded border border-zinc-300 px-3 py-2 text-sm"
-              onClick={() => {
-                router.push("/findings");
+              className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-700 transition hover:border-rose-400 hover:bg-rose-100"
+              onClick={async () => {
+                await auth.logout();
+                router.push("/login");
               }}
             >
-              Findings
+              Logout
             </button>
-          ) : null}
-          {canReadFindings ? (
-            <button
-              type="button"
-              className="rounded border border-zinc-300 px-3 py-2 text-sm"
-              onClick={() => {
-                router.push("/recommendations");
-              }}
-            >
-              Recommendations
-            </button>
-          ) : null}
-          <button
-            type="button"
-            className="rounded border border-zinc-300 px-3 py-2 text-sm"
-            onClick={async () => {
-              await auth.logout();
-              router.push("/login");
-            }}
-          >
-            Logout
-          </button>
-        </div>
-      </header>
+          </div>
+        </header>
+
+      <section className="mb-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        <article className="rounded-xl border border-cyan-300/35 bg-slate-900/45 p-3">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-cyan-100/85">Total Users</p>
+          <p className="font-display mt-1 text-2xl font-semibold text-white">{total}</p>
+        </article>
+        <article className="rounded-xl border border-cyan-300/35 bg-slate-900/45 p-3">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-cyan-100/85">Active (page)</p>
+          <p className="font-display mt-1 text-2xl font-semibold text-white">{activeCount}</p>
+        </article>
+        <article className="rounded-xl border border-cyan-300/35 bg-slate-900/45 p-3">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-cyan-100/85">Assigned Role</p>
+          <p className="font-display mt-1 text-2xl font-semibold text-white">{assignedRoleCount}</p>
+        </article>
+        <article className="rounded-xl border border-cyan-300/35 bg-slate-900/45 p-3">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-cyan-100/85">Superadmins</p>
+          <p className="font-display mt-1 text-2xl font-semibold text-white">{superadminCount}</p>
+        </article>
+      </section>
 
       {!canReadUsers ? (
-        <div className="rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">
+        <div className="mb-4 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">
           Missing permission `users:read` to list users in this workspace.
         </div>
       ) : null}
 
       {canReadUsers ? (
         <>
-          <section className="mb-4 rounded border border-zinc-200 bg-zinc-50 p-3 text-sm">
+          <section className="finops-panel mb-3 rounded-2xl p-4 text-sm">
             <div className="grid gap-3 md:grid-cols-4">
               <label className="block md:col-span-2">
-                <span className="mb-1 block text-xs font-medium uppercase text-zinc-600">
+                <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">
                   Search users
                 </span>
                 <form
@@ -324,7 +366,7 @@ export function UsersClientPage() {
                   }}
                 >
                   <input
-                    className="w-full rounded border border-zinc-300 bg-white px-2 py-1.5"
+                    className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
                     value={searchInput}
                     onChange={(event) => {
                       setSearchInput(event.target.value);
@@ -333,7 +375,7 @@ export function UsersClientPage() {
                   />
                   <button
                     type="submit"
-                    className="rounded border border-zinc-300 bg-white px-3 py-1.5 text-xs"
+                    className="rounded-lg border border-cyan-300 bg-cyan-50 px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-cyan-800 transition hover:border-cyan-400 hover:bg-cyan-100"
                   >
                     Apply
                   </button>
@@ -341,11 +383,11 @@ export function UsersClientPage() {
               </label>
 
               <label className="block">
-                <span className="mb-1 block text-xs font-medium uppercase text-zinc-600">
+                <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">
                   Page size
                 </span>
                 <select
-                  className="w-full rounded border border-zinc-300 bg-white px-2 py-1.5"
+                  className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
                   value={String(limit)}
                   onChange={(event) => {
                     pushWithParams({ limit: event.target.value, page: "1" });
@@ -369,20 +411,20 @@ export function UsersClientPage() {
                     });
                   }}
                 />
-                <span className="ml-2 text-sm text-zinc-700">Include inactive users</span>
+                <span className="ml-2 text-sm text-slate-700">Include inactive users</span>
               </label>
             </div>
           </section>
 
-          <section className="mb-4 rounded border border-zinc-200 p-3">
+          <section className="finops-panel mb-4 rounded-2xl p-4">
             <div className="flex items-center justify-between">
-              <h2 className="text-sm font-semibold uppercase tracking-wide text-zinc-700">
+              <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-700">
                 User Management
               </h2>
               {canCreateUsers ? (
                 <button
                   type="button"
-                  className="rounded border border-zinc-300 px-3 py-1.5 text-xs"
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-slate-700 transition hover:bg-slate-100"
                   onClick={() => {
                     setShowCreate((prev) => !prev);
                     setCreateError(null);
@@ -397,51 +439,51 @@ export function UsersClientPage() {
             {showCreate ? (
               <form className="mt-3 grid gap-3 md:grid-cols-2" onSubmit={submitCreate}>
                 <label className="block text-sm">
-                  <span className="mb-1 block text-xs font-medium uppercase text-zinc-600">
+                  <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">
                     User ID
                   </span>
                   <input
                     name="user_id"
-                    className="w-full rounded border border-zinc-300 px-2 py-1.5"
+                    className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
                     required
                   />
                 </label>
                 <label className="block text-sm">
-                  <span className="mb-1 block text-xs font-medium uppercase text-zinc-600">
+                  <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Email
                   </span>
                   <input
                     type="email"
                     name="email"
-                    className="w-full rounded border border-zinc-300 px-2 py-1.5"
+                    className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
                     required
                   />
                 </label>
                 <label className="block text-sm">
-                  <span className="mb-1 block text-xs font-medium uppercase text-zinc-600">
+                  <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Full name
                   </span>
-                  <input name="full_name" className="w-full rounded border border-zinc-300 px-2 py-1.5" />
+                  <input name="full_name" className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200" />
                 </label>
                 <label className="block text-sm">
-                  <span className="mb-1 block text-xs font-medium uppercase text-zinc-600">
+                  <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">
                     Password (optional)
                   </span>
                   <input
                     type="password"
                     name="password"
-                    className="w-full rounded border border-zinc-300 px-2 py-1.5"
+                    className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
                   />
                 </label>
                 <label className="flex items-center text-sm">
                   <input type="checkbox" name="is_superadmin" />
-                  <span className="ml-2">Superadmin</span>
+                  <span className="ml-2 text-slate-700">Superadmin</span>
                 </label>
                 <div className="flex items-center justify-end">
                   <button
                     type="submit"
                     disabled={mutations.createUser.isPending}
-                    className="rounded border border-zinc-300 bg-white px-3 py-1.5 text-xs disabled:opacity-50"
+                    className="rounded-lg border border-cyan-300 bg-cyan-50 px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-cyan-800 transition hover:bg-cyan-100 disabled:opacity-50"
                   >
                     {mutations.createUser.isPending ? "Creating..." : "Create"}
                   </button>
@@ -461,13 +503,13 @@ export function UsersClientPage() {
             ) : null}
           </section>
 
-          {users.isLoading ? <p>Loading users...</p> : null}
+          {users.isLoading ? <p className="rounded-xl bg-white/80 px-3 py-2 text-sm text-slate-700">Loading users...</p> : null}
           {users.error ? (
-            <div className="mb-4 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+            <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">
               <p>{apiErrorMessage("Failed to load users", users.error)}</p>
               <button
                 type="button"
-                className="mt-2 rounded border border-red-300 px-2 py-1 text-xs"
+                className="mt-2 rounded-lg border border-red-300 bg-white px-2.5 py-1.5 text-xs font-medium"
                 onClick={() => {
                   void users.refetch();
                 }}
@@ -479,9 +521,9 @@ export function UsersClientPage() {
 
           {!users.isLoading && users.data ? (
             <>
-              <div className="overflow-x-auto rounded border border-zinc-200">
-                <table className="min-w-full text-left text-sm">
-                  <thead className="bg-zinc-50 text-xs uppercase tracking-wide text-zinc-600">
+              <div className="finops-panel overflow-x-auto rounded-2xl">
+                <table className="min-w-full text-left text-sm text-slate-700">
+                  <thead className="finops-table-head text-xs uppercase tracking-wide text-slate-600">
                     <tr>
                       <th className="px-3 py-2">Email</th>
                       <th className="px-3 py-2">User ID</th>
@@ -497,7 +539,7 @@ export function UsersClientPage() {
                     {users.data.items.map((user) => (
                       <tr
                         key={user.user_id}
-                        className={`border-t border-zinc-100 ${selectedUserId === user.user_id ? "bg-cyan-50" : ""}`}
+                        className={`border-t border-slate-100 transition ${selectedUserId === user.user_id ? "bg-cyan-50/70" : "hover:bg-slate-50/70"}`}
                       >
                         <td className="px-3 py-2">{user.email}</td>
                         <td className="px-3 py-2">{user.user_id}</td>
@@ -516,15 +558,17 @@ export function UsersClientPage() {
                         </td>
                         <td className="px-3 py-2">{formatDateTime(user.last_login_at)}</td>
                         <td className="px-3 py-2">
-                          {user.is_active ? "Active" : "Inactive"}
-                          {user.is_superadmin ? " / Superadmin" : ""}
+                          <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium ${userStatusBadgeClass(user)}`}>
+                            {user.is_active ? "Active" : "Inactive"}
+                            {user.is_superadmin ? " / Superadmin" : ""}
+                          </span>
                         </td>
                         <td className="px-3 py-2">
                           <div className="flex flex-wrap gap-2">
                             {canManageRoles ? (
                               <button
                                 type="button"
-                                className="rounded border border-zinc-300 bg-white px-2 py-1 text-xs"
+                                className="rounded-lg border border-cyan-300 bg-cyan-50 px-2.5 py-1 text-xs font-semibold uppercase tracking-wide text-cyan-800 transition hover:bg-cyan-100"
                                 onClick={() => {
                                   setSelectedUserId(user.user_id);
                                   setRoleError(null);
@@ -538,7 +582,7 @@ export function UsersClientPage() {
                             {canDeleteUsers && user.is_active ? (
                               <button
                                 type="button"
-                                className="rounded border border-zinc-300 bg-white px-2 py-1 text-xs"
+                                className="rounded-lg border border-rose-300 bg-rose-50 px-2.5 py-1 text-xs font-semibold uppercase tracking-wide text-rose-700 transition hover:bg-rose-100"
                                 onClick={() => {
                                   void deactivateUser(user);
                                 }}
@@ -555,17 +599,17 @@ export function UsersClientPage() {
               </div>
 
               {users.data.items.length === 0 ? (
-                <p className="mt-3 text-sm text-zinc-600">No users match the current filters.</p>
+                <p className="mt-3 rounded-xl bg-white/80 px-3 py-2 text-sm text-slate-600">No users match the current filters.</p>
               ) : null}
 
               <div className="mt-4 flex items-center justify-between text-sm">
-                <p className="text-zinc-600">
+                <p className="text-cyan-50/95">
                   Showing {pageStart}-{pageEnd} of {total}
                 </p>
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    className="rounded border border-zinc-300 px-2 py-1 disabled:opacity-50"
+                    className="rounded-lg border border-sky-200/80 bg-white/90 px-3 py-1.5 font-medium text-slate-800 transition hover:bg-white disabled:opacity-50"
                     onClick={() => {
                       pushWithParams({ page: String(Math.max(1, page - 1)) });
                     }}
@@ -573,12 +617,12 @@ export function UsersClientPage() {
                   >
                     Previous
                   </button>
-                  <span className="text-zinc-700">
+                  <span className="rounded-md bg-slate-900/25 px-2 py-1 text-cyan-50">
                     Page {page} / {totalPages}
                   </span>
                   <button
                     type="button"
-                    className="rounded border border-zinc-300 px-2 py-1 disabled:opacity-50"
+                    className="rounded-lg border border-sky-200/80 bg-white/90 px-3 py-1.5 font-medium text-slate-800 transition hover:bg-white disabled:opacity-50"
                     onClick={() => {
                       pushWithParams({ page: String(page + 1) });
                     }}
@@ -597,7 +641,7 @@ export function UsersClientPage() {
         <div className="fixed inset-0 z-50 flex">
           <button
             type="button"
-            className="h-full flex-1 bg-black/40"
+            className="h-full flex-1 bg-slate-950/55"
             aria-label="Close role drawer"
             onClick={() => {
               setSelectedUserId(null);
@@ -605,17 +649,17 @@ export function UsersClientPage() {
               setRoleFeedback(null);
             }}
           />
-          <aside className="h-full w-full max-w-xl overflow-y-auto border-l border-zinc-200 bg-white p-6 shadow-2xl">
+          <aside className="h-full w-full max-w-xl overflow-y-auto border-l border-slate-200 bg-white/95 p-6 shadow-2xl backdrop-blur">
             <div className="mb-4 flex items-start justify-between gap-4">
               <div>
-                <h2 className="text-xl font-semibold">Manage Role</h2>
-                <p className="mt-1 text-sm text-zinc-600">
+                <h2 className="text-xl font-semibold text-slate-900">Manage Role</h2>
+                <p className="mt-1 text-sm text-slate-600">
                   {selectedUser.email} ({selectedUser.user_id})
                 </p>
               </div>
               <button
                 type="button"
-                className="rounded border border-zinc-300 px-2 py-1 text-xs"
+                className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700"
                 onClick={() => {
                   setSelectedUserId(null);
                   setRoleError(null);
@@ -626,23 +670,25 @@ export function UsersClientPage() {
               </button>
             </div>
 
-            {role.isLoading ? <p className="text-sm">Loading role...</p> : null}
+            {role.isLoading ? <p className="text-sm text-slate-700">Loading role...</p> : null}
             {role.error ? (
               <p className="rounded border border-red-300 bg-red-50 px-2 py-1 text-xs text-red-700">
                 {apiErrorMessage("Failed to load role", role.error)}
               </p>
             ) : null}
 
-            <div className="mt-3 space-y-3">
+            <div className="mt-3 space-y-3 text-slate-700">
               <label className="block text-sm">
-                <span className="mb-1 block text-xs font-medium uppercase text-zinc-600">Role ID</span>
+                <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">
+                  Role ID
+                </span>
                 {rolesCatalog.data?.items && rolesCatalog.data.items.length > 0 ? (
                   <select
                     value={roleIdInput}
                     onChange={(event) => {
                       setRoleIdInput(event.target.value);
                     }}
-                    className="w-full rounded border border-zinc-300 px-2 py-1.5"
+                    className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
                     disabled={!canManageRoles}
                   >
                     {rolesCatalog.data.items.map((item) => (
@@ -657,7 +703,7 @@ export function UsersClientPage() {
                     onChange={(event) => {
                       setRoleIdInput(event.target.value);
                     }}
-                    className="w-full rounded border border-zinc-300 px-2 py-1.5"
+                    className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
                     disabled={!canManageRoles}
                     placeholder="viewer"
                   />
@@ -670,7 +716,7 @@ export function UsersClientPage() {
               ) : null}
 
               <label className="block text-sm">
-                <span className="mb-1 block text-xs font-medium uppercase text-zinc-600">
+                <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">
                   Granted by (optional)
                 </span>
                 <input
@@ -678,7 +724,7 @@ export function UsersClientPage() {
                   onChange={(event) => {
                     setGrantedByInput(event.target.value);
                   }}
-                  className="w-full rounded border border-zinc-300 px-2 py-1.5"
+                  className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
                   disabled={!canManageRoles}
                   placeholder={auth.user?.email ?? "admin@tenant.io"}
                 />
@@ -699,12 +745,12 @@ export function UsersClientPage() {
               </label>
 
               {role.data?.role ? (
-                <section className="rounded border border-zinc-200 bg-zinc-50 p-3">
-                  <h3 className="text-sm font-semibold">Current Role</h3>
-                  <p className="mt-1 text-xs text-zinc-700">
+                <section className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                  <h3 className="text-sm font-semibold text-slate-900">Current Role</h3>
+                  <p className="mt-1 text-xs text-slate-700">
                     {role.data.role.role_id} {role.data.role.name ? `(${role.data.role.name})` : ""}
                   </p>
-                  <p className="mt-1 text-xs text-zinc-600">
+                  <p className="mt-1 text-xs text-slate-600">
                     Granted by: {role.data.role.granted_by ?? "-"} | Granted at:{" "}
                     {formatDateTime(role.data.role.granted_at)}
                   </p>
@@ -713,18 +759,18 @@ export function UsersClientPage() {
                       role.data.role.permissions.map((permission) => (
                         <span
                           key={permission}
-                          className="rounded border border-zinc-300 bg-white px-2 py-0.5 text-[11px]"
+                          className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px]"
                         >
                           {permission}
                         </span>
                       ))
                     ) : (
-                      <span className="text-xs text-zinc-500">No permissions returned.</span>
+                      <span className="text-xs text-slate-500">No permissions returned.</span>
                     )}
                   </div>
                 </section>
               ) : (
-                <p className="text-xs text-zinc-600">No role assignment in this workspace.</p>
+                <p className="text-xs text-slate-600">No role assignment in this workspace.</p>
               )}
 
               {roleError ? (
@@ -741,7 +787,7 @@ export function UsersClientPage() {
               <div className="flex items-center justify-end">
                 <button
                   type="button"
-                  className="rounded border border-zinc-300 bg-white px-3 py-1.5 text-xs disabled:opacity-50"
+                  className="rounded-lg border border-cyan-300 bg-cyan-50 px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-cyan-800 transition hover:border-cyan-400 hover:bg-cyan-100 disabled:opacity-50"
                   disabled={
                     !canManageRoles || mutations.setUserRole.isPending || mutations.setTenantRole.isPending
                   }
@@ -758,6 +804,7 @@ export function UsersClientPage() {
           </aside>
         </div>
       ) : null}
+      </div>
     </main>
   );
 }

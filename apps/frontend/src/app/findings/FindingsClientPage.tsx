@@ -5,7 +5,13 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 
 import { useAuth } from "@/hooks/useAuth";
 import { useFindingLifecycle } from "@/hooks/useFindingLifecycle";
-import { FindingItem, findingsQueryKey, useFindings } from "@/hooks/useFindings";
+import {
+  FindingItem,
+  findingsQueryKey,
+  groupedFindingsCategoryQueryKey,
+  useFindings,
+  useFindingsGroupedCategory,
+} from "@/hooks/useFindings";
 import { RunLatestItem, useRunsLatest } from "@/hooks/useRunsLatest";
 import { ApiError } from "@/lib/api/client";
 import { getStoredScope } from "@/lib/scope";
@@ -177,6 +183,40 @@ function runDateSummary(items: FindingItem[], latestRun: RunLatestItem | null): 
   };
 }
 
+function severityBadgeClass(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "critical") {
+    return "border-rose-300 bg-rose-50 text-rose-800";
+  }
+  if (normalized === "high") {
+    return "border-orange-300 bg-orange-50 text-orange-800";
+  }
+  if (normalized === "medium") {
+    return "border-amber-300 bg-amber-50 text-amber-800";
+  }
+  if (normalized === "low") {
+    return "border-emerald-300 bg-emerald-50 text-emerald-800";
+  }
+  return "border-zinc-300 bg-zinc-100 text-zinc-700";
+}
+
+function stateBadgeClass(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "open") {
+    return "border-cyan-300 bg-cyan-50 text-cyan-800";
+  }
+  if (normalized === "snoozed") {
+    return "border-amber-300 bg-amber-50 text-amber-800";
+  }
+  if (normalized === "resolved") {
+    return "border-emerald-300 bg-emerald-50 text-emerald-800";
+  }
+  if (normalized === "ignored") {
+    return "border-zinc-300 bg-zinc-100 text-zinc-700";
+  }
+  return "border-zinc-300 bg-zinc-100 text-zinc-700";
+}
+
 export function FindingsClientPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -203,7 +243,18 @@ export function FindingsClientPage() {
     setSearchInput(queryFilter);
   }, [queryFilter]);
 
-  const queryKey = findingsQueryKey(
+  const findingsListQueryKey = findingsQueryKey(
+    { tenantId: scope?.tenantId, workspace: scope?.workspace },
+    {
+      limit: limitFilter,
+      offset,
+      state: stateFilter,
+      severity: severityFilter,
+      q: queryFilter,
+      order: orderFilter,
+    },
+  );
+  const groupedCategoryQueryKey = groupedFindingsCategoryQueryKey(
     { tenantId: scope?.tenantId, workspace: scope?.workspace },
     {
       limit: limitFilter,
@@ -222,8 +273,21 @@ export function FindingsClientPage() {
     severity: severityFilter,
     order: orderFilter,
     q: queryFilter,
+    enabled: groupByFilter !== "category",
   });
-  const lifecycle = useFindingLifecycle({ queryKey });
+  const groupedFindings = useFindingsGroupedCategory({
+    limit: limitFilter,
+    offset,
+    state: stateFilter,
+    severity: severityFilter,
+    order: orderFilter,
+    q: queryFilter,
+    enabled: groupByFilter === "category",
+  });
+  const activeFindings = groupByFilter === "category" ? groupedFindings : findings;
+  const lifecycleQueryKey =
+    groupByFilter === "category" ? groupedCategoryQueryKey : findingsListQueryKey;
+  const lifecycle = useFindingLifecycle({ queryKey: lifecycleQueryKey });
   const permissions = useMemo(() => new Set(auth.user?.permissions ?? []), [auth.user?.permissions]);
   const canReadRuns = permissions.has("admin:full") || permissions.has("runs:read");
   const latestRun = useRunsLatest(canReadRuns);
@@ -242,18 +306,18 @@ export function FindingsClientPage() {
     if (!selectedFingerprint) {
       return;
     }
-    const exists = findings.data?.items.some((item) => item.fingerprint === selectedFingerprint);
+    const exists = activeFindings.data?.items.some((item) => item.fingerprint === selectedFingerprint);
     if (!exists) {
       setSelectedFingerprint(null);
       setActionReason("");
       setActionError(null);
       setActionFeedback(null);
     }
-  }, [findings.data?.items, selectedFingerprint]);
+  }, [activeFindings.data?.items, selectedFingerprint]);
 
   const runSummary = useMemo(
-    () => runDateSummary(findings.data?.items ?? [], latestRun.data ?? null),
-    [findings.data?.items, latestRun.data],
+    () => runDateSummary(activeFindings.data?.items ?? [], latestRun.data ?? null),
+    [activeFindings.data?.items, latestRun.data],
   );
 
   const groupedItems = useMemo(() => {
@@ -261,7 +325,7 @@ export function FindingsClientPage() {
       return [];
     }
     const buckets = new Map<string, FindingItem[]>();
-    for (const item of findings.data?.items ?? []) {
+    for (const item of activeFindings.data?.items ?? []) {
       const key = String(item.category ?? "").trim() || "uncategorized";
       const current = buckets.get(key);
       if (current) {
@@ -271,7 +335,31 @@ export function FindingsClientPage() {
       }
     }
     return Array.from(buckets.entries()).map(([category, items]) => ({ category, items }));
-  }, [findings.data?.items, groupByFilter]);
+  }, [activeFindings.data?.items, groupByFilter]);
+
+  const categoryCountsByName = useMemo(() => {
+    const out = new Map<string, number>();
+    for (const item of groupedFindings.data?.category_totals ?? []) {
+      const key = String(item.category ?? "").trim() || "uncategorized";
+      out.set(key, Number(item.finding_count ?? 0));
+    }
+    return out;
+  }, [groupedFindings.data?.category_totals]);
+  const pageSavings = useMemo(
+    () =>
+      (activeFindings.data?.items ?? []).reduce(
+        (acc, item) => acc + (item.estimated_monthly_savings ?? 0),
+        0,
+      ),
+    [activeFindings.data?.items],
+  );
+  const visibleCategoryCount = useMemo(() => {
+    const categories = new Set<string>();
+    for (const item of activeFindings.data?.items ?? []) {
+      categories.add(String(item.category ?? "").trim() || "uncategorized");
+    }
+    return categories.size;
+  }, [activeFindings.data?.items]);
 
   if (!scope) {
     return null;
@@ -279,16 +367,20 @@ export function FindingsClientPage() {
 
   const activeScope = scope;
   const selectedFinding =
-    findings.data?.items.find((item) => item.fingerprint === selectedFingerprint) ?? null;
+    activeFindings.data?.items.find((item) => item.fingerprint === selectedFingerprint) ?? null;
   const canTriage = permissions.has("admin:full") || permissions.has("findings:update");
   const canReadRecommendations = permissions.has("admin:full") || permissions.has("findings:read");
   const canReadUsers = permissions.has("admin:full") || permissions.has("users:read");
-  const total = findings.data?.total ?? 0;
+  const total = activeFindings.data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / limitFilter));
   const canPrev = page > 1;
   const canNext = page < totalPages;
   const pageStart = total === 0 ? 0 : offset + 1;
-  const pageEnd = total === 0 ? 0 : Math.min(offset + (findings.data?.items.length ?? 0), total);
+  const pageEnd = total === 0 ? 0 : Math.min(offset + (activeFindings.data?.items.length ?? 0), total);
+  const categoryCount =
+    groupByFilter === "category"
+      ? groupedFindings.data?.category_totals?.length ?? visibleCategoryCount
+      : visibleCategoryCount;
 
   function pushWithParams(updates: Record<string, string | null>) {
     const params = new URLSearchParams(searchParams.toString());
@@ -348,20 +440,24 @@ export function FindingsClientPage() {
     return (
       <tr
         key={item.fingerprint}
-        className={`border-t border-zinc-100 ${selectedFingerprint === item.fingerprint ? "bg-cyan-50" : ""}`}
+        className={`border-t border-slate-100 transition ${selectedFingerprint === item.fingerprint ? "bg-cyan-50/70" : "hover:bg-slate-50/70"}`}
       >
-        <td className="px-3 py-2">{item.severity}</td>
-        <td className="px-3 py-2">{item.category ?? "-"}</td>
-        <td className="px-3 py-2">{item.service}</td>
         <td className="px-3 py-2">
-          <span className="block max-w-[16rem] truncate" title={resource}>
+          <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-semibold uppercase ${severityBadgeClass(item.severity)}`}>
+            {item.severity}
+          </span>
+        </td>
+        <td className="px-3 py-2 text-slate-700">{item.category ?? "-"}</td>
+        <td className="px-3 py-2 text-slate-700">{item.service}</td>
+        <td className="px-3 py-2">
+          <span className="block max-w-[16rem] truncate font-medium text-slate-700" title={resource}>
             {resource}
           </span>
         </td>
         <td className="px-3 py-2">
           <button
             type="button"
-            className="text-left text-cyan-700 underline-offset-2 hover:underline"
+            className="text-left font-medium text-cyan-700 underline-offset-2 transition hover:text-cyan-900 hover:underline"
             onClick={() => {
               openFinding(item);
             }}
@@ -369,33 +465,47 @@ export function FindingsClientPage() {
             {item.title}
           </button>
         </td>
-        <td className="px-3 py-2">{formatMoney(item.estimated_monthly_savings)}</td>
-        <td className="px-3 py-2">{item.effective_state}</td>
-        <td className="px-3 py-2">{item.region ?? "-"}</td>
+        <td className="px-3 py-2 font-medium text-slate-700">{formatMoney(item.estimated_monthly_savings)}</td>
+        <td className="px-3 py-2">
+          <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium ${stateBadgeClass(item.effective_state)}`}>
+            {item.effective_state}
+          </span>
+        </td>
+        <td className="px-3 py-2 text-slate-700">{item.region ?? "-"}</td>
       </tr>
     );
   }
 
   return (
-    <main className="mx-auto min-h-screen w-full max-w-6xl px-6 py-8">
-      <header className="mb-6 flex items-start justify-between">
+    <main className="finops-shell relative overflow-hidden">
+      <div className="finops-orb finops-orb--one" />
+      <div className="finops-orb finops-orb--two" />
+      <div className="finops-orb finops-orb--three" />
+
+      <div className="relative z-10 mx-auto min-h-screen w-full max-w-7xl px-6 py-6">
+      <header className="finops-panel mb-4 flex flex-wrap items-start justify-between gap-3 rounded-2xl p-4">
         <div>
-          <h1 className="text-2xl font-semibold">Findings</h1>
-          <p className="text-sm text-zinc-600">
+          <p className="inline-flex rounded-full border border-cyan-300/70 bg-cyan-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-700">
+            FinOps Findings
+          </p>
+          <h1 className="font-display mt-2 text-2xl font-semibold tracking-tight text-slate-900 md:text-3xl">
+            Findings Control Center
+          </h1>
+          <p className="mt-1 text-sm text-slate-600">
             Tenant: <span className="font-medium">{activeScope.tenantId}</span> | Workspace:{" "}
             <span className="font-medium">{activeScope.workspace}</span>
           </p>
-          <p className="text-sm text-zinc-600">
+          <p className="text-sm text-slate-600">
             Run date: <span className="font-medium">{runSummary.runDateLabel}</span> | Run ID:{" "}
             <span className="font-medium">{runSummary.runIdLabel}</span>{" "}
-            <span className="text-xs">({runSummary.sourceLabel})</span>
+            <span className="text-xs text-slate-500">({runSummary.sourceLabel})</span>
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 self-start">
           {canReadRecommendations ? (
             <button
               type="button"
-              className="rounded border border-zinc-300 px-3 py-2 text-sm"
+              className="finops-toolbar-btn rounded-lg px-3 py-2 text-sm font-medium transition"
               onClick={() => {
                 router.push("/recommendations");
               }}
@@ -406,7 +516,7 @@ export function FindingsClientPage() {
           {canReadUsers ? (
             <button
               type="button"
-              className="rounded border border-zinc-300 px-3 py-2 text-sm"
+              className="finops-toolbar-btn rounded-lg px-3 py-2 text-sm font-medium transition"
               onClick={() => {
                 router.push("/users");
               }}
@@ -416,7 +526,7 @@ export function FindingsClientPage() {
           ) : null}
           <button
             type="button"
-            className="rounded border border-zinc-300 px-3 py-2 text-sm"
+            className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-700 transition hover:border-rose-400 hover:bg-rose-100"
             onClick={async () => {
               await auth.logout();
               router.push("/login");
@@ -427,12 +537,31 @@ export function FindingsClientPage() {
         </div>
       </header>
 
-      <section className="mb-4 rounded border border-zinc-200 bg-zinc-50 p-3 text-sm">
+      <section className="mb-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        <article className="rounded-xl border border-cyan-300/35 bg-slate-900/45 p-3">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-cyan-100/85">Total Findings</p>
+          <p className="font-display mt-1 text-2xl font-semibold text-white">{total}</p>
+        </article>
+        <article className="rounded-xl border border-cyan-300/35 bg-slate-900/45 p-3">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-cyan-100/85">Current Page</p>
+          <p className="font-display mt-1 text-2xl font-semibold text-white">{pageStart}-{pageEnd}</p>
+        </article>
+        <article className="rounded-xl border border-cyan-300/35 bg-slate-900/45 p-3">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-cyan-100/85">Page Savings</p>
+          <p className="font-display mt-1 text-2xl font-semibold text-white">{formatMoney(pageSavings)}</p>
+        </article>
+        <article className="rounded-xl border border-cyan-300/35 bg-slate-900/45 p-3">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-cyan-100/85">Categories</p>
+          <p className="font-display mt-1 text-2xl font-semibold text-white">{categoryCount}</p>
+        </article>
+      </section>
+
+      <section className="finops-panel mb-3 rounded-2xl p-4 text-sm">
         <div className="grid gap-3 md:grid-cols-6">
           <label className="block">
-            <span className="mb-1 block text-xs font-medium uppercase text-zinc-600">State</span>
+            <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">State</span>
             <select
-              className="w-full rounded border border-zinc-300 bg-white px-2 py-1.5"
+              className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
               value={stateFilter}
               onChange={(event) => {
                 pushWithParams({ state: event.target.value || null, page: "1" });
@@ -447,9 +576,9 @@ export function FindingsClientPage() {
           </label>
 
           <label className="block">
-            <span className="mb-1 block text-xs font-medium uppercase text-zinc-600">Severity</span>
+            <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">Severity</span>
             <select
-              className="w-full rounded border border-zinc-300 bg-white px-2 py-1.5"
+              className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
               value={severityFilter}
               onChange={(event) => {
                 pushWithParams({ severity: event.target.value || null, page: "1" });
@@ -465,9 +594,9 @@ export function FindingsClientPage() {
           </label>
 
           <label className="block">
-            <span className="mb-1 block text-xs font-medium uppercase text-zinc-600">Sort</span>
+            <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">Sort</span>
             <select
-              className="w-full rounded border border-zinc-300 bg-white px-2 py-1.5"
+              className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
               value={orderFilter}
               onChange={(event) => {
                 pushWithParams({ order: event.target.value || null, page: "1" });
@@ -479,23 +608,23 @@ export function FindingsClientPage() {
           </label>
 
           <label className="block">
-            <span className="mb-1 block text-xs font-medium uppercase text-zinc-600">Group by</span>
+            <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">Group by</span>
             <select
-              className="w-full rounded border border-zinc-300 bg-white px-2 py-1.5"
+              className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
               value={groupByFilter}
               onChange={(event) => {
                 pushWithParams({ group_by: event.target.value === "category" ? "category" : null, page: "1" });
               }}
             >
               <option value="none">None</option>
-              <option value="category">Category (current page)</option>
+              <option value="category">Category (server-side)</option>
             </select>
           </label>
 
           <label className="block">
-            <span className="mb-1 block text-xs font-medium uppercase text-zinc-600">Page size</span>
+            <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">Page size</span>
             <select
-              className="w-full rounded border border-zinc-300 bg-white px-2 py-1.5"
+              className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
               value={String(limitFilter)}
               onChange={(event) => {
                 pushWithParams({
@@ -517,10 +646,10 @@ export function FindingsClientPage() {
               pushWithParams({ q: searchInput.trim() || null, page: "1" });
             }}
           >
-            <span className="mb-1 block text-xs font-medium uppercase text-zinc-600">Search</span>
+            <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">Search</span>
             <div className="flex gap-2">
               <input
-                className="w-full rounded border border-zinc-300 px-2 py-1.5"
+                className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
                 value={searchInput}
                 onChange={(event) => {
                   setSearchInput(event.target.value);
@@ -529,7 +658,7 @@ export function FindingsClientPage() {
               />
               <button
                 type="submit"
-                className="rounded border border-zinc-300 bg-white px-2 py-1.5 text-xs"
+                className="rounded-lg border border-cyan-300 bg-cyan-50 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-cyan-800 transition hover:border-cyan-400 hover:bg-cyan-100"
               >
                 Apply
               </button>
@@ -538,15 +667,15 @@ export function FindingsClientPage() {
         </div>
       </section>
 
-      {findings.isLoading ? <p>Loading findings...</p> : null}
-      {findings.error ? (
-        <div className="mb-4 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-          <p>{findingsErrorMessage(findings.error)}</p>
+      {activeFindings.isLoading ? <p className="rounded-xl bg-white/80 px-3 py-2 text-sm text-slate-700">Loading findings...</p> : null}
+      {activeFindings.error ? (
+        <div className="mb-4 rounded-xl border border-red-200 bg-red-50/95 p-3 text-sm text-red-700">
+          <p>{findingsErrorMessage(activeFindings.error)}</p>
           <button
             type="button"
-            className="mt-2 rounded border border-red-300 px-2 py-1 text-xs"
+            className="mt-2 rounded-lg border border-red-300 bg-white px-2.5 py-1.5 text-xs font-medium"
             onClick={() => {
-              void findings.refetch();
+              void activeFindings.refetch();
             }}
           >
             Retry
@@ -554,11 +683,11 @@ export function FindingsClientPage() {
         </div>
       ) : null}
 
-      {!findings.isLoading && findings.data ? (
+      {!activeFindings.isLoading && activeFindings.data ? (
         <>
-          <div className="overflow-x-auto rounded border border-zinc-200">
-            <table className="min-w-full text-left text-sm">
-              <thead className="bg-zinc-50 text-xs uppercase tracking-wide text-zinc-600">
+          <div className="finops-panel overflow-x-auto rounded-2xl">
+            <table className="min-w-full text-left text-sm text-slate-700">
+              <thead className="finops-table-head text-xs uppercase tracking-wide text-slate-600">
                 <tr>
                   <th className="px-3 py-2">Severity</th>
                   <th className="px-3 py-2">Category</th>
@@ -574,31 +703,31 @@ export function FindingsClientPage() {
                 {groupByFilter === "category"
                   ? groupedItems.map((group) => (
                       <Fragment key={`group:${group.category}`}>
-                        <tr className="border-t border-zinc-200 bg-zinc-100/80">
-                          <td className="px-3 py-2 text-xs font-semibold uppercase tracking-wide text-zinc-700" colSpan={8}>
-                            Category: {group.category} ({group.items.length})
+                        <tr className="border-t border-slate-200 bg-slate-100/75">
+                          <td className="px-3 py-2 text-xs font-semibold uppercase tracking-wide text-slate-700" colSpan={8}>
+                            Category: {group.category} ({categoryCountsByName.get(group.category) ?? group.items.length})
                           </td>
                         </tr>
                         {group.items.map((item) => renderFindingRow(item))}
                       </Fragment>
                     ))
-                  : findings.data.items.map((item) => renderFindingRow(item))}
+                  : activeFindings.data.items.map((item) => renderFindingRow(item))}
               </tbody>
             </table>
           </div>
 
-          {findings.data.items.length === 0 ? (
-            <p className="mt-3 text-sm text-zinc-600">No findings match the current filters.</p>
+          {activeFindings.data.items.length === 0 ? (
+            <p className="mt-3 rounded-xl bg-white/80 px-3 py-2 text-sm text-slate-600">No findings match the current filters.</p>
           ) : null}
 
           <div className="mt-4 flex items-center justify-between text-sm">
-            <p className="text-zinc-600">
+            <p className="text-cyan-50/95">
               Showing {pageStart}-{pageEnd} of {total}
             </p>
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                className="rounded border border-zinc-300 px-2 py-1 disabled:opacity-50"
+                className="rounded-lg border border-sky-200/80 bg-white/90 px-3 py-1.5 font-medium text-slate-800 transition hover:bg-white disabled:opacity-50"
                 onClick={() => {
                   setPage(page - 1);
                 }}
@@ -606,12 +735,12 @@ export function FindingsClientPage() {
               >
                 Previous
               </button>
-              <span className="text-zinc-700">
+              <span className="rounded-md bg-slate-900/25 px-2 py-1 text-cyan-50">
                 Page {page} / {totalPages}
               </span>
               <button
                 type="button"
-                className="rounded border border-zinc-300 px-2 py-1 disabled:opacity-50"
+                className="rounded-lg border border-sky-200/80 bg-white/90 px-3 py-1.5 font-medium text-slate-800 transition hover:bg-white disabled:opacity-50"
                 onClick={() => {
                   setPage(page + 1);
                 }}
@@ -628,7 +757,7 @@ export function FindingsClientPage() {
         <div className="fixed inset-0 z-50 flex">
           <button
             type="button"
-            className="h-full flex-1 bg-black/40"
+            className="h-full flex-1 bg-slate-950/55"
             aria-label="Close detail drawer"
             onClick={() => {
               setSelectedFingerprint(null);
@@ -636,15 +765,15 @@ export function FindingsClientPage() {
               setActionFeedback(null);
             }}
           />
-          <aside className="h-full w-full max-w-2xl overflow-y-auto border-l border-zinc-200 bg-white p-6 shadow-2xl">
+          <aside className="h-full w-full max-w-2xl overflow-y-auto border-l border-slate-200 bg-white/95 p-6 shadow-2xl backdrop-blur">
             <div className="mb-4 flex items-start justify-between gap-4">
               <div>
-                <h2 className="text-xl font-semibold">{selectedFinding.title}</h2>
-                <p className="mt-1 text-xs text-zinc-600">{selectedFinding.fingerprint}</p>
+                <h2 className="text-xl font-semibold text-slate-900">{selectedFinding.title}</h2>
+                <p className="mt-1 text-xs text-slate-600">{selectedFinding.fingerprint}</p>
               </div>
               <button
                 type="button"
-                className="rounded border border-zinc-300 px-2 py-1 text-xs"
+                className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700"
                 onClick={() => {
                   setSelectedFingerprint(null);
                   setActionError(null);
@@ -655,7 +784,7 @@ export function FindingsClientPage() {
               </button>
             </div>
 
-            <div className="grid gap-3 text-sm md:grid-cols-2">
+            <div className="grid gap-3 text-sm text-slate-700 md:grid-cols-2">
               <p><span className="font-medium">Check:</span> {selectedFinding.check_id}</p>
               <p><span className="font-medium">Category:</span> {selectedFinding.category ?? "-"}</p>
               <p><span className="font-medium">Run ID:</span> {selectedFinding.run_id ?? "-"}</p>
@@ -672,25 +801,25 @@ export function FindingsClientPage() {
               <p><span className="font-medium">Owner:</span> {selectedFinding.owner_email ?? "-"}</p>
             </div>
 
-            <section className="mt-4 rounded border border-zinc-200 bg-zinc-50 p-3">
-              <h3 className="text-sm font-semibold">Checker Advice</h3>
-              <p className="mt-1 text-sm text-zinc-700">
+            <section className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <h3 className="text-sm font-semibold text-slate-900">Checker Advice</h3>
+              <p className="mt-1 text-sm text-slate-700">
                 {findingAdvice(selectedFinding.payload) ?? "-"}
               </p>
             </section>
 
-            <section className="mt-5 rounded border border-zinc-200 bg-zinc-50 p-3">
-              <h3 className="text-sm font-semibold">Lifecycle Actions</h3>
-              <p className="mt-1 text-xs text-zinc-600">
+            <section className="mt-5 rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <h3 className="text-sm font-semibold text-slate-900">Lifecycle Actions</h3>
+              <p className="mt-1 text-xs text-slate-600">
                 {canTriage
                   ? "State updates are applied optimistically and synced with backend."
                   : "Missing permission: findings:update"}
               </p>
 
-              <label className="mt-3 block text-xs font-medium uppercase tracking-wide text-zinc-600">
+              <label className="mt-3 block text-xs font-medium uppercase tracking-wide text-slate-600">
                 Reason (optional)
                 <textarea
-                  className="mt-1 h-20 w-full rounded border border-zinc-300 bg-white px-2 py-1.5 text-sm"
+                  className="mt-1 h-20 w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-sm text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
                   value={actionReason}
                   onChange={(event) => {
                     setActionReason(event.target.value);
@@ -713,7 +842,7 @@ export function FindingsClientPage() {
               <div className="mt-3 flex flex-wrap gap-2">
                 <button
                   type="button"
-                  className="rounded border border-zinc-300 bg-white px-3 py-1.5 text-xs disabled:opacity-50"
+                  className="rounded-lg border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-emerald-800 transition hover:bg-emerald-100 disabled:opacity-50"
                   disabled={!canTriage || lifecycle.isPending}
                   onClick={() => {
                     void runAction({ action: "resolve", label: "Resolved" });
@@ -723,7 +852,7 @@ export function FindingsClientPage() {
                 </button>
                 <button
                   type="button"
-                  className="rounded border border-zinc-300 bg-white px-3 py-1.5 text-xs disabled:opacity-50"
+                  className="rounded-lg border border-slate-300 bg-slate-100 px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-slate-800 transition hover:bg-slate-200 disabled:opacity-50"
                   disabled={!canTriage || lifecycle.isPending}
                   onClick={() => {
                     void runAction({ action: "ignore", label: "Ignored" });
@@ -733,7 +862,7 @@ export function FindingsClientPage() {
                 </button>
                 <button
                   type="button"
-                  className="rounded border border-zinc-300 bg-white px-3 py-1.5 text-xs disabled:opacity-50"
+                  className="rounded-lg border border-cyan-300 bg-cyan-50 px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-cyan-800 transition hover:bg-cyan-100 disabled:opacity-50"
                   disabled={!canTriage || lifecycle.isPending}
                   onClick={() => {
                     void runAction({ action: "snooze", label: "Snoozed", snoozeDays: 7 });
@@ -743,7 +872,7 @@ export function FindingsClientPage() {
                 </button>
                 <button
                   type="button"
-                  className="rounded border border-zinc-300 bg-white px-3 py-1.5 text-xs disabled:opacity-50"
+                  className="rounded-lg border border-cyan-300 bg-cyan-50 px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-cyan-800 transition hover:bg-cyan-100 disabled:opacity-50"
                   disabled={!canTriage || lifecycle.isPending}
                   onClick={() => {
                     void runAction({ action: "snooze", label: "Snoozed", snoozeDays: 14 });
@@ -753,7 +882,7 @@ export function FindingsClientPage() {
                 </button>
                 <button
                   type="button"
-                  className="rounded border border-zinc-300 bg-white px-3 py-1.5 text-xs disabled:opacity-50"
+                  className="rounded-lg border border-cyan-300 bg-cyan-50 px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-cyan-800 transition hover:bg-cyan-100 disabled:opacity-50"
                   disabled={!canTriage || lifecycle.isPending}
                   onClick={() => {
                     void runAction({ action: "snooze", label: "Snoozed", snoozeDays: 30 });
@@ -765,14 +894,16 @@ export function FindingsClientPage() {
             </section>
 
             <section className="mt-5">
-              <h3 className="mb-2 text-sm font-semibold">Raw Payload</h3>
-              <pre className="max-h-72 overflow-auto rounded border border-zinc-200 bg-zinc-950 p-3 text-xs text-zinc-100">
+              <h3 className="mb-2 text-sm font-semibold text-slate-900">Raw Payload</h3>
+              <pre className="max-h-72 overflow-auto rounded-xl border border-slate-900/30 bg-slate-950 p-3 text-xs text-slate-100">
                 {JSON.stringify(selectedFinding.payload ?? {}, null, 2)}
               </pre>
             </section>
           </aside>
         </div>
       ) : null}
+      </div>
     </main>
   );
 }
+

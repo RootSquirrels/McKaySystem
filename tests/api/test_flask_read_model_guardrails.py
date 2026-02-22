@@ -101,6 +101,41 @@ def test_findings_query_supports_governance_filters(monkeypatch) -> None:  # typ
     assert "sla_status = any(%s)" in sql_blob
 
 
+def test_findings_grouped_category_query_uses_finding_current(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """`/api/findings/grouped/category` must query finding_current with category rollups."""
+    _disable_runtime_guards(monkeypatch)
+    captured_sql: list[str] = []
+
+    def _fake_fetch_all(_conn: object, sql: str, params: Optional[Sequence[Any]] = None) -> list[dict[str, Any]]:
+        _ = params
+        captured_sql.append(sql)
+        return []
+
+    def _fake_fetch_one(_conn: object, sql: str, params: Optional[Sequence[Any]] = None) -> dict[str, Any]:
+        _ = params
+        captured_sql.append(sql)
+        return {"n": 0}
+
+    monkeypatch.setattr(flask_app, "fetch_all_dict_conn", _fake_fetch_all)
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+
+    client = flask_app.app.test_client()
+    resp = client.get("/api/findings/grouped/category?tenant_id=acme&workspace=prod&state=open")
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 200
+    assert payload.get("ok") is True
+    assert payload.get("group_by") == "category"
+    assert isinstance(payload.get("category_totals"), list)
+
+    sql_blob = "\n".join(captured_sql).lower()
+    assert "from finding_current" in sql_blob
+    assert "coalesce(category, 'uncategorized')" in sql_blob
+    assert "group by coalesce(category, 'uncategorized')" in sql_blob
+    assert "tenant_id = %s" in sql_blob
+    assert "workspace = %s" in sql_blob
+
+
 def test_sla_breached_query_uses_finding_current(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """`/api/findings/sla/breached` must query finding_current with breached status."""
     _disable_runtime_guards(monkeypatch)

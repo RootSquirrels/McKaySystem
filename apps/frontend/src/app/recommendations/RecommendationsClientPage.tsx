@@ -87,6 +87,23 @@ function confidenceBadgeClass(label: string): string {
   return "border-zinc-300 bg-zinc-100 text-zinc-700";
 }
 
+function stateBadgeClass(value: string): string {
+  const key = value.trim().toLowerCase();
+  if (key === "open") {
+    return "border-cyan-300 bg-cyan-50 text-cyan-800";
+  }
+  if (key === "snoozed") {
+    return "border-amber-300 bg-amber-50 text-amber-800";
+  }
+  if (key === "resolved") {
+    return "border-emerald-300 bg-emerald-50 text-emerald-800";
+  }
+  if (key === "ignored") {
+    return "border-zinc-300 bg-zinc-100 text-zinc-700";
+  }
+  return "border-zinc-300 bg-zinc-100 text-zinc-700";
+}
+
 export function RecommendationsClientPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -174,6 +191,13 @@ export function RecommendationsClientPage() {
   const canNext = page < totalPages;
   const pageStart = total === 0 ? 0 : offset + 1;
   const pageEnd = total === 0 ? 0 : Math.min(offset + (recommendations.data?.items.length ?? 0), total);
+  const pageSavings = (recommendations.data?.items ?? []).reduce(
+    (acc, item) => acc + (item.estimated_monthly_savings ?? 0),
+    0,
+  );
+  const approvalRequiredCount = (recommendations.data?.items ?? []).filter(
+    (item) => item.requires_approval,
+  ).length;
 
   function pushWithParams(updates: Record<string, string | null>) {
     const params = new URLSearchParams(searchParams.toString());
@@ -204,20 +228,30 @@ export function RecommendationsClientPage() {
   }
 
   return (
-    <main className="mx-auto min-h-screen w-full max-w-6xl px-6 py-8">
-      <header className="mb-6 flex flex-wrap items-start justify-between gap-3">
+    <main className="finops-shell relative overflow-hidden">
+      <div className="finops-orb finops-orb--one" />
+      <div className="finops-orb finops-orb--two" />
+      <div className="finops-orb finops-orb--three" />
+
+      <div className="relative z-10 mx-auto min-h-screen w-full max-w-7xl px-6 py-6">
+      <header className="finops-panel mb-4 flex flex-wrap items-start justify-between gap-3 rounded-2xl p-4">
         <div>
-          <h1 className="text-2xl font-semibold">Recommendations</h1>
-          <p className="text-sm text-zinc-600">
+          <p className="inline-flex rounded-full border border-cyan-300/70 bg-cyan-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-cyan-700">
+            FinOps Actions
+          </p>
+          <h1 className="font-display mt-2 text-2xl font-semibold tracking-tight text-slate-900 md:text-3xl">
+            Recommendations Studio
+          </h1>
+          <p className="mt-1 text-sm text-slate-600">
             Tenant: <span className="font-medium">{activeScope.tenantId}</span> | Workspace:{" "}
             <span className="font-medium">{activeScope.workspace}</span>
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 self-start">
           {canReadFindings ? (
             <button
               type="button"
-              className="rounded border border-zinc-300 px-3 py-2 text-sm"
+              className="finops-toolbar-btn rounded-lg px-3 py-2 text-sm font-medium transition"
               onClick={() => {
                 router.push("/findings");
               }}
@@ -228,7 +262,7 @@ export function RecommendationsClientPage() {
           {canReadUsers ? (
             <button
               type="button"
-              className="rounded border border-zinc-300 px-3 py-2 text-sm"
+              className="finops-toolbar-btn rounded-lg px-3 py-2 text-sm font-medium transition"
               onClick={() => {
                 router.push("/users");
               }}
@@ -238,7 +272,7 @@ export function RecommendationsClientPage() {
           ) : null}
           <button
             type="button"
-            className="rounded border border-zinc-300 px-3 py-2 text-sm"
+            className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-700 transition hover:border-rose-400 hover:bg-rose-100"
             onClick={async () => {
               await auth.logout();
               router.push("/login");
@@ -249,12 +283,31 @@ export function RecommendationsClientPage() {
         </div>
       </header>
 
-      <section className="mb-4 rounded border border-zinc-200 bg-zinc-50 p-3 text-sm">
+      <section className="mb-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        <article className="rounded-xl border border-cyan-300/35 bg-slate-900/45 p-3">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-cyan-100/85">Total</p>
+          <p className="font-display mt-1 text-2xl font-semibold text-white">{total}</p>
+        </article>
+        <article className="rounded-xl border border-cyan-300/35 bg-slate-900/45 p-3">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-cyan-100/85">Current Page</p>
+          <p className="font-display mt-1 text-2xl font-semibold text-white">{pageStart}-{pageEnd}</p>
+        </article>
+        <article className="rounded-xl border border-cyan-300/35 bg-slate-900/45 p-3">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-cyan-100/85">Page Savings</p>
+          <p className="font-display mt-1 text-2xl font-semibold text-white">{formatMoney(pageSavings)}</p>
+        </article>
+        <article className="rounded-xl border border-cyan-300/35 bg-slate-900/45 p-3">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-cyan-100/85">Needs Approval</p>
+          <p className="font-display mt-1 text-2xl font-semibold text-white">{approvalRequiredCount}</p>
+        </article>
+      </section>
+
+      <section className="finops-panel mb-3 rounded-2xl p-4 text-sm">
         <div className="grid gap-3 md:grid-cols-4">
           <label className="block">
-            <span className="mb-1 block text-xs font-medium uppercase text-zinc-600">State</span>
+            <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">State</span>
             <select
-              className="w-full rounded border border-zinc-300 bg-white px-2 py-1.5"
+              className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
               value={stateFilter}
               onChange={(event) => {
                 pushWithParams({ state: event.target.value, page: "1" });
@@ -269,9 +322,9 @@ export function RecommendationsClientPage() {
           </label>
 
           <label className="block">
-            <span className="mb-1 block text-xs font-medium uppercase text-zinc-600">Severity</span>
+            <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">Severity</span>
             <select
-              className="w-full rounded border border-zinc-300 bg-white px-2 py-1.5"
+              className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
               value={severityFilter}
               onChange={(event) => {
                 pushWithParams({ severity: event.target.value || null, page: "1" });
@@ -287,9 +340,9 @@ export function RecommendationsClientPage() {
           </label>
 
           <label className="block">
-            <span className="mb-1 block text-xs font-medium uppercase text-zinc-600">Sort</span>
+            <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">Sort</span>
             <select
-              className="w-full rounded border border-zinc-300 bg-white px-2 py-1.5"
+              className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
               value={orderFilter}
               onChange={(event) => {
                 pushWithParams({ order: event.target.value || null, page: "1" });
@@ -301,9 +354,9 @@ export function RecommendationsClientPage() {
           </label>
 
           <label className="block">
-            <span className="mb-1 block text-xs font-medium uppercase text-zinc-600">Page size</span>
+            <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">Page size</span>
             <select
-              className="w-full rounded border border-zinc-300 bg-white px-2 py-1.5"
+              className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
               value={String(limitFilter)}
               onChange={(event) => {
                 pushWithParams({
@@ -327,9 +380,9 @@ export function RecommendationsClientPage() {
           }}
         >
           <label className="block">
-            <span className="mb-1 block text-xs font-medium uppercase text-zinc-600">Search title</span>
+            <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">Search title</span>
             <input
-              className="w-full rounded border border-zinc-300 bg-white px-2 py-1.5"
+              className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
               value={searchInput}
               onChange={(event) => {
                 setSearchInput(event.target.value);
@@ -338,9 +391,9 @@ export function RecommendationsClientPage() {
             />
           </label>
           <label className="block">
-            <span className="mb-1 block text-xs font-medium uppercase text-zinc-600">Service</span>
+            <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">Service</span>
             <input
-              className="w-full rounded border border-zinc-300 bg-white px-2 py-1.5"
+              className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
               value={serviceInput}
               onChange={(event) => {
                 setServiceInput(event.target.value);
@@ -349,9 +402,9 @@ export function RecommendationsClientPage() {
             />
           </label>
           <label className="block">
-            <span className="mb-1 block text-xs font-medium uppercase text-zinc-600">Check ID</span>
+            <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">Check ID</span>
             <input
-              className="w-full rounded border border-zinc-300 bg-white px-2 py-1.5"
+              className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
               value={checkIdInput}
               onChange={(event) => {
                 setCheckIdInput(event.target.value);
@@ -364,7 +417,7 @@ export function RecommendationsClientPage() {
               Min monthly savings
             </span>
             <input
-              className="w-full rounded border border-zinc-300 bg-white px-2 py-1.5"
+              className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
               inputMode="decimal"
               value={minSavingsInput}
               onChange={(event) => {
@@ -374,12 +427,12 @@ export function RecommendationsClientPage() {
             />
           </label>
           <div className="md:col-span-4 flex flex-wrap items-center gap-2">
-            <button type="submit" className="rounded border border-zinc-300 bg-white px-3 py-1.5 text-xs">
+            <button type="submit" className="rounded-lg border border-cyan-300 bg-cyan-50 px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-cyan-800 transition hover:border-cyan-400 hover:bg-cyan-100">
               Apply
             </button>
             <button
               type="button"
-              className="rounded border border-zinc-300 bg-white px-3 py-1.5 text-xs"
+              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-slate-700 transition hover:bg-slate-100"
               onClick={() => {
                 setSearchInput("");
                 setServiceInput("");
@@ -400,13 +453,13 @@ export function RecommendationsClientPage() {
         </form>
       </section>
 
-      {recommendations.isLoading ? <p>Loading recommendations...</p> : null}
+      {recommendations.isLoading ? <p className="rounded-xl bg-white/80 px-3 py-2 text-sm text-slate-700">Loading recommendations...</p> : null}
       {recommendations.error ? (
-        <div className="mb-4 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+        <div className="mb-4 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">
           <p>{recommendationsErrorMessage(recommendations.error)}</p>
           <button
             type="button"
-            className="mt-2 rounded border border-red-300 px-2 py-1 text-xs"
+            className="mt-2 rounded-lg border border-red-300 bg-white px-2.5 py-1.5 text-xs font-medium"
             onClick={() => {
               void recommendations.refetch();
             }}
@@ -418,9 +471,9 @@ export function RecommendationsClientPage() {
 
       {!recommendations.isLoading && recommendations.data ? (
         <>
-          <div className="overflow-x-auto rounded border border-zinc-200">
-            <table className="min-w-full text-left text-sm">
-              <thead className="bg-zinc-50 text-xs uppercase tracking-wide text-zinc-600">
+          <div className="finops-panel overflow-x-auto rounded-2xl">
+            <table className="min-w-full text-left text-sm text-slate-700">
+              <thead className="finops-table-head text-xs uppercase tracking-wide text-slate-600">
                 <tr>
                   <th className="px-3 py-2">Priority</th>
                   <th className="px-3 py-2">Recommendation</th>
@@ -435,7 +488,7 @@ export function RecommendationsClientPage() {
                 {recommendations.data.items.map((item) => (
                   <tr
                     key={item.fingerprint}
-                    className={`border-t border-zinc-100 ${selectedFingerprint === item.fingerprint ? "bg-cyan-50" : ""}`}
+                    className={`border-t border-slate-100 transition ${selectedFingerprint === item.fingerprint ? "bg-cyan-50/70" : "hover:bg-slate-50/70"}`}
                   >
                     <td className="px-3 py-2">
                       <span
@@ -447,7 +500,7 @@ export function RecommendationsClientPage() {
                     <td className="px-3 py-2">
                       <button
                         type="button"
-                        className="text-left text-cyan-700 underline-offset-2 hover:underline"
+                        className="text-left font-medium text-cyan-700 underline-offset-2 transition hover:text-cyan-900 hover:underline"
                         onClick={() => {
                           openRecommendation(item);
                         }}
@@ -472,7 +525,11 @@ export function RecommendationsClientPage() {
                       </span>
                     </td>
                     <td className="px-3 py-2">{item.requires_approval ? "Required" : "No"}</td>
-                    <td className="px-3 py-2">{item.effective_state}</td>
+                    <td className="px-3 py-2">
+                      <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium ${stateBadgeClass(item.effective_state)}`}>
+                        {item.effective_state}
+                      </span>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -480,19 +537,19 @@ export function RecommendationsClientPage() {
           </div>
 
           {recommendations.data.items.length === 0 ? (
-            <p className="mt-3 text-sm text-zinc-600">
+            <p className="mt-3 rounded-xl bg-white/80 px-3 py-2 text-sm text-slate-600">
               No recommendations match the current filters.
             </p>
           ) : null}
 
           <div className="mt-4 flex items-center justify-between text-sm">
-            <p className="text-zinc-600">
+            <p className="text-cyan-50/95">
               Showing {pageStart}-{pageEnd} of {total}
             </p>
             <div className="flex items-center gap-2">
               <button
                 type="button"
-                className="rounded border border-zinc-300 px-2 py-1 disabled:opacity-50"
+                className="rounded-lg border border-sky-200/80 bg-white/90 px-3 py-1.5 font-medium text-slate-800 transition hover:bg-white disabled:opacity-50"
                 onClick={() => {
                   pushWithParams({ page: String(Math.max(1, page - 1)) });
                 }}
@@ -500,12 +557,12 @@ export function RecommendationsClientPage() {
               >
                 Previous
               </button>
-              <span className="text-zinc-700">
+              <span className="rounded-md bg-slate-900/25 px-2 py-1 text-cyan-50">
                 Page {page} / {totalPages}
               </span>
               <button
                 type="button"
-                className="rounded border border-zinc-300 px-2 py-1 disabled:opacity-50"
+                className="rounded-lg border border-sky-200/80 bg-white/90 px-3 py-1.5 font-medium text-slate-800 transition hover:bg-white disabled:opacity-50"
                 onClick={() => {
                   pushWithParams({ page: String(page + 1) });
                 }}
@@ -522,21 +579,21 @@ export function RecommendationsClientPage() {
         <div className="fixed inset-0 z-50 flex">
           <button
             type="button"
-            className="h-full flex-1 bg-black/40"
+            className="h-full flex-1 bg-slate-950/55"
             aria-label="Close recommendation drawer"
             onClick={() => {
               setSelectedFingerprint(null);
             }}
           />
-          <aside className="h-full w-full max-w-2xl overflow-y-auto border-l border-zinc-200 bg-white p-6 shadow-2xl">
+          <aside className="h-full w-full max-w-2xl overflow-y-auto border-l border-slate-200 bg-white/95 p-6 shadow-2xl backdrop-blur">
             <div className="mb-4 flex items-start justify-between gap-4">
               <div>
-                <h2 className="text-xl font-semibold">{selectedRecommendation.title}</h2>
-                <p className="mt-1 text-xs text-zinc-600">{selectedRecommendation.fingerprint}</p>
+                <h2 className="text-xl font-semibold text-slate-900">{selectedRecommendation.title}</h2>
+                <p className="mt-1 text-xs text-slate-600">{selectedRecommendation.fingerprint}</p>
               </div>
               <button
                 type="button"
-                className="rounded border border-zinc-300 px-2 py-1 text-xs"
+                className="rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700"
                 onClick={() => {
                   setSelectedFingerprint(null);
                 }}
@@ -545,7 +602,7 @@ export function RecommendationsClientPage() {
               </button>
             </div>
 
-            <div className="grid gap-3 text-sm md:grid-cols-2">
+            <div className="grid gap-3 text-sm text-slate-700 md:grid-cols-2">
               <p><span className="font-medium">Type:</span> {selectedRecommendation.recommendation_type}</p>
               <p><span className="font-medium">Priority:</span> {selectedRecommendation.priority.toUpperCase()}</p>
               <p><span className="font-medium">Action Type:</span> {selectedRecommendation.action_type}</p>
@@ -562,16 +619,16 @@ export function RecommendationsClientPage() {
               <p><span className="font-medium">Approval:</span> {selectedRecommendation.requires_approval ? "Required" : "Not required"}</p>
             </div>
 
-            <section className="mt-4 rounded border border-zinc-200 bg-zinc-50 p-3">
-              <h3 className="text-sm font-semibold">Why This Recommendation</h3>
-              <p className="mt-1 text-sm text-zinc-700">
+            <section className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <h3 className="text-sm font-semibold text-slate-900">Why This Recommendation</h3>
+              <p className="mt-1 text-sm text-slate-700">
                 {selectedRecommendation.checker_advice || "-"}
               </p>
             </section>
 
-            <section className="mt-4 rounded border border-zinc-200 bg-zinc-50 p-3">
-              <h3 className="text-sm font-semibold">Normalized Action Plan</h3>
-              <p className="mt-1 text-sm text-zinc-700">{selectedRecommendation.action}</p>
+            <section className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <h3 className="text-sm font-semibold text-slate-900">Normalized Action Plan</h3>
+              <p className="mt-1 text-sm text-slate-700">{selectedRecommendation.action}</p>
               <div className="mt-3 grid gap-2 text-sm md:grid-cols-2">
                 <p>
                   <span className="font-medium">Current:</span>{" "}
@@ -594,6 +651,7 @@ export function RecommendationsClientPage() {
           </aside>
         </div>
       ) : null}
+      </div>
     </main>
   );
 }
