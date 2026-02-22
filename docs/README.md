@@ -14,6 +14,7 @@ Last reviewed: 2026-02-01
 - **Finding schema**: `04_schemas/finding_schema.md`
 - **Operations**: `05_operations/running.md`
 - **API**: `06_api/api_reference.md`
+- **RBAC matrix**: `06_api/rbac_permissions.md`
 
 ## Structure
 

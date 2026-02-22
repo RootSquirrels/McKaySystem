@@ -38,9 +38,11 @@ Source code:
 - Public endpoints:
   - `GET /health`
   - `GET /api/health/db`
-- All other `/api/*` endpoints require bearer auth when `API_BEARER_TOKEN` is set:
-  - Missing `Authorization: Bearer ...` -> `401`
-  - Invalid token -> `403`
+- RBAC-authenticated endpoints resolve identity from:
+  - Session token (`session_token` cookie or compatibility query/body)
+  - API key (`Authorization: Bearer <api-key>`)
+- Permission mapping is documented in `docs/06_api/rbac_permissions.md`.
+- A global bearer gate (`API_BEARER_TOKEN`) may still apply operationally to non-public routes, but RBAC checks are enforced per endpoint.
 
 ## Scope rules
 
@@ -240,6 +242,38 @@ Errors:
 - `404` if finding missing
 - `409` if finding state is `resolved` or `ignored`
 - `400` if no SLA policy resolved or invalid payload
+
+## Users and workspace role assignment
+
+Users:
+- `GET /api/users`
+- `POST /api/users`
+- `GET /api/users/{user_id}`
+- `PUT /api/users/{user_id}`
+- `DELETE /api/users/{user_id}`
+
+Workspace role assignment:
+- `GET /api/users/{user_id}/role`
+- `PUT /api/users/{user_id}/role`
+
+### GET /api/users/{user_id}/role
+
+Scope query required: `tenant_id`, `workspace`
+
+Response:
+- `role = null` when no assignment exists
+- otherwise includes `role_id`, role metadata, `permissions`, `granted_by`, `granted_at`
+
+### PUT /api/users/{user_id}/role
+
+Body:
+- `tenant_id`, `workspace` required
+- `role_id` required
+- `granted_by` optional
+
+Errors:
+- `404` user not found
+- `404` role not found
 
 ## Groups
 

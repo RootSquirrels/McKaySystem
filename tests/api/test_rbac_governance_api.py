@@ -683,3 +683,64 @@ def test_lifecycle_group_ignore_success_with_permission(monkeypatch: Any) -> Non
     assert payload.get("ok") is True
     assert captured["group_key"] == "grp-1"
     assert captured["state"] == "ignored"
+
+
+def test_read_and_workflow_endpoints_forbidden_without_permissions(monkeypatch: Any) -> None:
+    """RBAC-gated read/workflow endpoints should return 403 without permissions."""
+    _disable_runtime_guards(monkeypatch)
+    monkeypatch.setattr(auth_middleware, "authenticate_request", _context_without_permissions)
+    client = flask_app.app.test_client()
+
+    get_cases = [
+        "/api/facets?tenant_id=acme&workspace=prod",
+        "/api/groups?tenant_id=acme&workspace=prod",
+        "/api/groups/grp-1?tenant_id=acme&workspace=prod",
+        "/api/recommendations?tenant_id=acme&workspace=prod",
+        "/api/recommendations/composite?tenant_id=acme&workspace=prod",
+        "/api/remediations?tenant_id=acme&workspace=prod",
+        "/api/remediations/impact?tenant_id=acme&workspace=prod",
+        "/api/teams?tenant_id=acme&workspace=prod",
+        "/api/teams/platform/members?tenant_id=acme&workspace=prod",
+        "/api/sla/policies?tenant_id=acme&workspace=prod",
+        "/api/sla/policies/overrides?tenant_id=acme&workspace=prod",
+    ]
+    post_cases = [
+        ("/api/recommendations/estimate", {"tenant_id": "acme", "workspace": "prod"}),
+        ("/api/recommendations/preview", {"tenant_id": "acme", "workspace": "prod"}),
+        (
+            "/api/remediations/request",
+            {"tenant_id": "acme", "workspace": "prod", "fingerprint": "fp-1"},
+        ),
+        (
+            "/api/remediations/approve",
+            {
+                "tenant_id": "acme",
+                "workspace": "prod",
+                "action_id": "act-1",
+                "approved_by": "admin@acme.io",
+            },
+        ),
+        (
+            "/api/remediations/reject",
+            {
+                "tenant_id": "acme",
+                "workspace": "prod",
+                "action_id": "act-1",
+                "rejected_by": "admin@acme.io",
+            },
+        ),
+    ]
+
+    for path in get_cases:
+        resp = client.get(path)
+        payload = resp.get_json() or {}
+        assert resp.status_code == 403
+        assert payload.get("ok") is False
+        assert payload.get("error") == "forbidden"
+
+    for path, body in post_cases:
+        resp = client.post(path, json=body)
+        payload = resp.get_json() or {}
+        assert resp.status_code == 403
+        assert payload.get("ok") is False
+        assert payload.get("error") == "forbidden"

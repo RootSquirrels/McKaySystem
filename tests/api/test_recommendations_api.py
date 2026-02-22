@@ -7,6 +7,8 @@ from typing import Any
 
 import apps.flask_api.blueprints.recommendations as recommendations_blueprint
 import apps.flask_api.flask_app as flask_app
+from apps.flask_api import auth_middleware
+from services.rbac_service import AuthContext
 
 
 class _DummyConn:
@@ -38,6 +40,20 @@ def _disable_runtime_guards(monkeypatch) -> None:  # type: ignore[no-untyped-def
         recommendations_blueprint,
         "fetch_one_dict_conn",
         lambda conn, sql, params=None: flask_app.fetch_one_dict_conn(conn, sql, params),  # type: ignore[no-untyped-def]
+    )
+    monkeypatch.setattr(
+        auth_middleware,
+        "authenticate_request",
+        lambda: AuthContext(
+            tenant_id="acme",
+            workspace="prod",
+            user_id="u-test",
+            email="tester@acme.io",
+            full_name="RBAC Test",
+            is_superadmin=False,
+            auth_method="session",
+            permissions=frozenset({"admin:full"}),
+        ),
     )
 
 

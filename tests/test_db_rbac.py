@@ -236,3 +236,59 @@ def test_check_permission_uses_scoped_join(monkeypatch: Any) -> None:
     assert "join role_permissions" in sql
     assert "uwr.tenant_id = %s" in sql
     assert "uwr.workspace = %s" in sql
+
+
+def test_get_role_by_id_includes_scope(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_fetch_one(
+        _conn: object, sql: str, params: Sequence[Any] | None = None
+    ) -> dict[str, Any]:
+        captured["sql"] = sql
+        captured["params"] = params
+        return {"role_id": "viewer"}
+
+    monkeypatch.setattr(db_rbac, "fetch_one_dict_conn", _fake_fetch_one)
+    row = db_rbac.get_role_by_id(
+        object(),
+        tenant_id="acme",
+        workspace="prod",
+        role_id="viewer",
+    )
+
+    assert row == {"role_id": "viewer"}
+    assert captured["params"] == ("acme", "prod", "viewer")
+    sql = str(captured["sql"]).lower()
+    assert "from roles" in sql
+    assert "tenant_id = %s" in sql
+    assert "workspace = %s" in sql
+
+
+def test_upsert_user_workspace_role_is_idempotent_and_scoped() -> None:
+    cursor = _FakeCursor(
+        row=("acme", "prod", "u-1", "editor"),
+        description=(("tenant_id",), ("workspace",), ("user_id",), ("role_id",)),
+    )
+    conn = _FakeConn(cursor)
+
+    row = db_rbac.upsert_user_workspace_role(
+        conn,
+        assignment=db_rbac.UserWorkspaceRoleUpsert(
+            tenant_id="acme",
+            workspace="prod",
+            user_id="u-1",
+            role_id="editor",
+            granted_by="admin@acme.io",
+        ),
+    )
+
+    assert row == {
+        "tenant_id": "acme",
+        "workspace": "prod",
+        "user_id": "u-1",
+        "role_id": "editor",
+    }
+    assert cursor.executed_params == ("acme", "prod", "u-1", "editor", "admin@acme.io")
+    sql = str(cursor.executed_sql).lower()
+    assert "insert into user_workspace_roles" in sql
+    assert "on conflict (tenant_id, workspace, user_id)" in sql

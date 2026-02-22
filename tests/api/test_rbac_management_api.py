@@ -184,6 +184,166 @@ def test_users_create_hashes_password(monkeypatch: Any) -> None:
     assert str(captured["password_hash"]).startswith("pbkdf2_sha256$")
 
 
+def test_users_role_forbidden_without_permission(monkeypatch: Any) -> None:
+    """`PUT /api/users/<id>/role` should return 403 without users:manage_roles."""
+    _disable_runtime_guards(monkeypatch)
+    monkeypatch.setattr(auth_middleware, "authenticate_request", _context_without_permissions)
+
+    client = flask_app.app.test_client()
+    resp = client.put(
+        "/api/users/u-1/role",
+        json={"tenant_id": "acme", "workspace": "prod", "role_id": "viewer"},
+    )
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 403
+    assert payload.get("ok") is False
+    assert payload.get("error") == "forbidden"
+
+
+def test_users_role_get_success(monkeypatch: Any) -> None:
+    """`GET /api/users/<id>/role` should return assigned role metadata when authorized."""
+    _disable_runtime_guards(monkeypatch)
+    monkeypatch.setattr(
+        auth_middleware,
+        "authenticate_request",
+        lambda: _context_with_permissions("users:manage_roles"),
+    )
+    monkeypatch.setattr(
+        users_blueprint.db_rbac,
+        "get_user_by_id",
+        lambda *_args, **_kwargs: {"user_id": "u-1", "tenant_id": "acme", "workspace": "prod"},
+    )
+    monkeypatch.setattr(
+        users_blueprint.db_rbac,
+        "get_user_workspace_role",
+        lambda *_args, **_kwargs: {
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "user_id": "u-1",
+            "role_id": "viewer",
+            "granted_by": "admin@acme.io",
+            "granted_at": "2026-02-22T00:00:00Z",
+        },
+    )
+    monkeypatch.setattr(
+        users_blueprint.db_rbac,
+        "get_role_by_id",
+        lambda *_args, **_kwargs: {
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "role_id": "viewer",
+            "name": "Viewer",
+            "description": "Read only",
+            "is_system": True,
+        },
+    )
+    monkeypatch.setattr(
+        users_blueprint.db_rbac,
+        "get_role_permissions",
+        lambda *_args, **_kwargs: ["findings:read", "runs:read"],
+    )
+
+    client = flask_app.app.test_client()
+    resp = client.get("/api/users/u-1/role?tenant_id=acme&workspace=prod")
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 200
+    assert payload.get("ok") is True
+    role = payload.get("role") or {}
+    assert role.get("role_id") == "viewer"
+    assert role.get("permissions") == ["findings:read", "runs:read"]
+
+
+def test_users_role_set_success(monkeypatch: Any) -> None:
+    """`PUT /api/users/<id>/role` should upsert role assignment when authorized."""
+    _disable_runtime_guards(monkeypatch)
+    monkeypatch.setattr(
+        auth_middleware,
+        "authenticate_request",
+        lambda: _context_with_permissions("users:manage_roles"),
+    )
+    monkeypatch.setattr(
+        users_blueprint.db_rbac,
+        "get_user_by_id",
+        lambda *_args, **_kwargs: {"user_id": "u-1", "tenant_id": "acme", "workspace": "prod"},
+    )
+    monkeypatch.setattr(
+        users_blueprint.db_rbac,
+        "get_role_by_id",
+        lambda *_args, **_kwargs: {
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "role_id": "editor",
+            "name": "Editor",
+            "description": "Edit findings",
+            "is_system": True,
+        },
+    )
+    monkeypatch.setattr(
+        users_blueprint.db_rbac,
+        "upsert_user_workspace_role",
+        lambda *_args, **_kwargs: {
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "user_id": "u-1",
+            "role_id": "editor",
+            "granted_by": "admin@acme.io",
+            "granted_at": "2026-02-22T00:00:00Z",
+        },
+    )
+    monkeypatch.setattr(
+        users_blueprint.db_rbac,
+        "get_role_permissions",
+        lambda *_args, **_kwargs: ["findings:read", "findings:update"],
+    )
+
+    client = flask_app.app.test_client()
+    resp = client.put(
+        "/api/users/u-1/role",
+        json={
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "role_id": "editor",
+            "granted_by": "admin@acme.io",
+        },
+    )
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 200
+    assert payload.get("ok") is True
+    role = payload.get("role") or {}
+    assert role.get("role_id") == "editor"
+    assert role.get("permissions") == ["findings:read", "findings:update"]
+
+
+def test_users_role_set_returns_not_found_for_unknown_role(monkeypatch: Any) -> None:
+    """`PUT /api/users/<id>/role` should return 404 when role does not exist."""
+    _disable_runtime_guards(monkeypatch)
+    monkeypatch.setattr(
+        auth_middleware,
+        "authenticate_request",
+        lambda: _context_with_permissions("users:manage_roles"),
+    )
+    monkeypatch.setattr(
+        users_blueprint.db_rbac,
+        "get_user_by_id",
+        lambda *_args, **_kwargs: {"user_id": "u-1", "tenant_id": "acme", "workspace": "prod"},
+    )
+    monkeypatch.setattr(users_blueprint.db_rbac, "get_role_by_id", lambda *_args, **_kwargs: None)
+
+    client = flask_app.app.test_client()
+    resp = client.put(
+        "/api/users/u-1/role",
+        json={"tenant_id": "acme", "workspace": "prod", "role_id": "missing"},
+    )
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 404
+    assert payload.get("ok") is False
+    assert payload.get("error") == "not_found"
+
+
 def test_api_keys_create_returns_raw_key(monkeypatch: Any) -> None:
     """`POST /api/api-keys` should return raw key once and store hash."""
     _disable_runtime_guards(monkeypatch)

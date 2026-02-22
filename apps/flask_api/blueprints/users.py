@@ -319,3 +319,146 @@ def api_users_delete(user_id: str) -> Any:
         )
     except ValueError as exc:
         return _err("bad_request", str(exc), status=400)
+
+
+@users_bp.route("/api/users/<user_id>/role", methods=["GET"])
+@require_permission("users:manage_roles")
+def api_users_get_role(user_id: str) -> Any:
+    """Return one scoped user's workspace role assignment."""
+    try:
+        tenant_id, workspace = _require_scope_from_query()
+        uid = _coerce_optional_text(user_id)
+        if not uid:
+            raise ValueError("user_id is required")
+
+        with db_conn() as conn:
+            user = db_rbac.get_user_by_id(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                user_id=uid,
+            )
+            if user is None:
+                return _err("not_found", "user not found", status=404)
+
+            assignment = db_rbac.get_user_workspace_role(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                user_id=uid,
+            )
+            if assignment is None:
+                return _ok(
+                    {
+                        "tenant_id": tenant_id,
+                        "workspace": workspace,
+                        "user_id": uid,
+                        "role": None,
+                    }
+                )
+
+            role_id = str(assignment.get("role_id") or "")
+            role = db_rbac.get_role_by_id(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                role_id=role_id,
+            )
+            permissions = db_rbac.get_role_permissions(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                role_id=role_id,
+            )
+
+        return _ok(
+            {
+                "tenant_id": tenant_id,
+                "workspace": workspace,
+                "user_id": uid,
+                "role": {
+                    "role_id": role_id,
+                    "name": (role or {}).get("name"),
+                    "description": (role or {}).get("description"),
+                    "is_system": bool((role or {}).get("is_system")),
+                    "granted_by": assignment.get("granted_by"),
+                    "granted_at": assignment.get("granted_at"),
+                    "permissions": permissions,
+                },
+            }
+        )
+    except ValueError as exc:
+        return _err("bad_request", str(exc), status=400)
+
+
+@users_bp.route("/api/users/<user_id>/role", methods=["PUT"])
+@require_permission("users:manage_roles")
+def api_users_set_role(user_id: str) -> Any:
+    """Assign one workspace role to a user in tenant/workspace scope."""
+    try:
+        payload = request.get_json(force=True, silent=False) or {}
+        tenant_id, workspace = _require_scope_from_json(payload)
+        uid = _coerce_optional_text(user_id)
+        if not uid:
+            raise ValueError("user_id is required")
+
+        role_id = _coerce_optional_text(payload.get("role_id"))
+        if not role_id:
+            raise ValueError("role_id is required")
+        granted_by = _coerce_optional_text(payload.get("granted_by"))
+
+        with db_conn() as conn:
+            user = db_rbac.get_user_by_id(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                user_id=uid,
+            )
+            if user is None:
+                return _err("not_found", "user not found", status=404)
+
+            role = db_rbac.get_role_by_id(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                role_id=role_id,
+            )
+            if role is None:
+                return _err("not_found", "role not found", status=404)
+
+            assignment = db_rbac.upsert_user_workspace_role(
+                conn,
+                assignment=db_rbac.UserWorkspaceRoleUpsert(
+                    tenant_id=tenant_id,
+                    workspace=workspace,
+                    user_id=uid,
+                    role_id=role_id,
+                    granted_by=granted_by,
+                ),
+            )
+            permissions = db_rbac.get_role_permissions(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                role_id=role_id,
+            )
+            conn.commit()
+
+        return _ok(
+            {
+                "tenant_id": tenant_id,
+                "workspace": workspace,
+                "user_id": uid,
+                "role": {
+                    "role_id": role_id,
+                    "name": role.get("name"),
+                    "description": role.get("description"),
+                    "is_system": bool(role.get("is_system")),
+                    "granted_by": (assignment or {}).get("granted_by"),
+                    "granted_at": (assignment or {}).get("granted_at"),
+                    "permissions": permissions,
+                },
+            }
+        )
+    except ValueError as exc:
+        return _err("bad_request", str(exc), status=400)

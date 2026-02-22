@@ -150,6 +150,7 @@ def _audit_log_event(
 
 
 @teams_bp.route("/api/teams", methods=["GET"])
+@require_permission("teams:read")
 def api_teams() -> Any:
     """List teams in tenant/workspace scope.
 
@@ -438,6 +439,7 @@ def api_delete_team(team_id: str) -> Any:
 
 
 @teams_bp.route("/api/teams/<team_id>/members", methods=["GET"])
+@require_permission("teams:read")
 def api_team_members(team_id: str) -> Any:
     """List members for one team in tenant/workspace scope.
 

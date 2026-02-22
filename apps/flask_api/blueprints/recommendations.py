@@ -8,6 +8,7 @@ from typing import Any
 from flask import Blueprint, request
 
 from apps.backend.db import db_conn, fetch_all_dict_conn, fetch_one_dict_conn
+from apps.flask_api.auth_middleware import require_permission
 from apps.flask_api.utils import (
     _coerce_non_negative_int,
     _coerce_optional_float,
@@ -461,6 +462,7 @@ def _build_recommendation_item(row: dict[str, Any]) -> dict[str, Any]:
 
 
 @recommendations_bp.route("/api/recommendations", methods=["GET"])
+@require_permission("findings:read")
 def api_recommendations() -> Any:
     """List actionable recommendations derived from current scoped findings.
 
@@ -534,6 +536,7 @@ def api_recommendations() -> Any:
 
 
 @recommendations_bp.route("/api/recommendations/composite", methods=["GET"])
+@require_permission("findings:read")
 def api_recommendations_composite() -> Any:
     """Aggregate recommendation opportunities for portfolio-level prioritization.
 
@@ -627,6 +630,7 @@ def api_recommendations_composite() -> Any:
 
 @recommendations_bp.route("/api/recommendations/estimate", methods=["POST"])
 @recommendations_bp.route("/api/recommendations/preview", methods=["POST"])
+@require_permission("findings:read")
 def api_recommendations_estimate() -> Any:
     """Estimate cost/savings for a set of recommendations.
 

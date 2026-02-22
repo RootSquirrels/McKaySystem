@@ -157,6 +157,7 @@ def _audit_log_event(
 
 
 @sla_policies_bp.route("/api/sla/policies", methods=["GET"])
+@require_permission("sla:read")
 def api_sla_policies() -> Any:
     """List category SLA policies in tenant/workspace scope.
 
@@ -362,6 +363,7 @@ def api_update_sla_policy(category: str) -> Any:
 
 
 @sla_policies_bp.route("/api/sla/policies/overrides", methods=["GET"])
+@require_permission("sla:read")
 def api_sla_overrides() -> Any:
     """List check-level SLA overrides in tenant/workspace scope.
 

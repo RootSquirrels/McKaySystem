@@ -69,6 +69,17 @@ class SessionUpsert:
 
 
 @dataclass(frozen=True)
+class UserWorkspaceRoleUpsert:
+    """Input payload for idempotent user-workspace-role assignment operations."""
+
+    tenant_id: str
+    workspace: str
+    user_id: str
+    role_id: str
+    granted_by: str | None = None
+
+
+@dataclass(frozen=True)
 class UserListQuery:
     """Input payload for scoped user list queries."""
 
@@ -411,6 +422,77 @@ def get_user_workspace_role(
         """,
         (tenant_id, workspace, user_id),
     )
+
+
+def get_role_by_id(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    role_id: str,
+) -> dict[str, Any] | None:
+    """Return one scoped role row by identifier."""
+    return fetch_one_dict_conn(
+        conn,
+        """
+        SELECT
+          tenant_id,
+          workspace,
+          role_id,
+          name,
+          description,
+          is_system,
+          created_at,
+          updated_at
+        FROM roles
+        WHERE tenant_id = %s
+          AND workspace = %s
+          AND role_id = %s
+        """,
+        (tenant_id, workspace, role_id),
+    )
+
+
+def upsert_user_workspace_role(
+    conn: Any,
+    *,
+    assignment: UserWorkspaceRoleUpsert,
+) -> dict[str, Any] | None:
+    """Create or update one scoped user-to-role assignment row."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO user_workspace_roles (
+              tenant_id,
+              workspace,
+              user_id,
+              role_id,
+              granted_by,
+              granted_at
+            )
+            VALUES (%s, %s, %s, %s, %s, now())
+            ON CONFLICT (tenant_id, workspace, user_id)
+            DO UPDATE SET
+              role_id = EXCLUDED.role_id,
+              granted_by = EXCLUDED.granted_by,
+              granted_at = now()
+            RETURNING
+              tenant_id,
+              workspace,
+              user_id,
+              role_id,
+              granted_by,
+              granted_at
+            """,
+            (
+                assignment.tenant_id,
+                assignment.workspace,
+                assignment.user_id,
+                assignment.role_id,
+                assignment.granted_by,
+            ),
+        )
+        return _dict_from_cursor_row(cur, cur.fetchone())
 
 
 def get_role_permissions(conn: Any, *, tenant_id: str, workspace: str, role_id: str) -> list[str]:
