@@ -6,14 +6,13 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { useAuth } from "@/hooks/useAuth";
 import {
   UserItem,
+  useRolesCatalog,
   useUserRole,
   useUsers,
   useUsersAdminMutations,
 } from "@/hooks/useUsersAdmin";
 import { ApiError } from "@/lib/api/client";
 import { getStoredScope } from "@/lib/scope";
-
-const DEFAULT_ROLE_IDS = ["admin", "editor", "viewer"] as const;
 
 function parsePositiveInt(value: string | null, fallback: number): number {
   if (!value) {
@@ -97,6 +96,7 @@ export function UsersClientPage() {
     includeInactive,
     enabled: canReadUsers,
   });
+  const rolesCatalog = useRolesCatalog(canManageRoles);
   const role = useUserRole(selectedUserId, canManageRoles);
   const mutations = useUsersAdminMutations();
 
@@ -113,10 +113,28 @@ export function UsersClientPage() {
       setRoleIdInput(currentRoleId);
       return;
     }
+    const selectedUserRoleId = selectedUserId
+      ? users.data?.items.find((item) => item.user_id === selectedUserId)?.role_id
+      : null;
+    if (selectedUserRoleId) {
+      setRoleIdInput(selectedUserRoleId);
+      return;
+    }
     if (!role.data || role.data.role === null) {
       setRoleIdInput("viewer");
     }
-  }, [role.data]);
+  }, [role.data, selectedUserId, users.data?.items]);
+
+  useEffect(() => {
+    const catalogItems = rolesCatalog.data?.items ?? [];
+    if (catalogItems.length === 0) {
+      return;
+    }
+    const exists = catalogItems.some((item) => item.role_id === roleIdInput);
+    if (!exists) {
+      setRoleIdInput(catalogItems[0].role_id);
+    }
+  }, [roleIdInput, rolesCatalog.data?.items]);
 
   if (!scope) {
     return null;
@@ -455,6 +473,7 @@ export function UsersClientPage() {
                       <th className="px-3 py-2">User ID</th>
                       <th className="px-3 py-2">Full name</th>
                       <th className="px-3 py-2">Provider</th>
+                      <th className="px-3 py-2">Role</th>
                       <th className="px-3 py-2">Last login</th>
                       <th className="px-3 py-2">Status</th>
                       <th className="px-3 py-2">Actions</th>
@@ -470,6 +489,17 @@ export function UsersClientPage() {
                         <td className="px-3 py-2">{user.user_id}</td>
                         <td className="px-3 py-2">{user.full_name ?? "-"}</td>
                         <td className="px-3 py-2">{user.auth_provider ?? "-"}</td>
+                        <td className="px-3 py-2">
+                          {user.role_id ? (
+                            <span className="inline-flex items-center rounded border border-cyan-300 bg-cyan-50 px-2 py-0.5 text-xs font-medium text-cyan-800">
+                              {user.role_name ? `${user.role_name} (${user.role_id})` : user.role_id}
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center rounded border border-zinc-300 bg-zinc-100 px-2 py-0.5 text-xs text-zinc-600">
+                              Unassigned
+                            </span>
+                          )}
+                        </td>
                         <td className="px-3 py-2">{formatDateTime(user.last_login_at)}</td>
                         <td className="px-3 py-2">
                           {user.is_active ? "Active" : "Inactive"}
@@ -592,21 +622,38 @@ export function UsersClientPage() {
             <div className="mt-3 space-y-3">
               <label className="block text-sm">
                 <span className="mb-1 block text-xs font-medium uppercase text-zinc-600">Role ID</span>
-                <input
-                  list="default-role-ids"
-                  value={roleIdInput}
-                  onChange={(event) => {
-                    setRoleIdInput(event.target.value);
-                  }}
-                  className="w-full rounded border border-zinc-300 px-2 py-1.5"
-                  disabled={!canManageRoles}
-                />
-                <datalist id="default-role-ids">
-                  {DEFAULT_ROLE_IDS.map((roleId) => (
-                    <option key={roleId} value={roleId} />
-                  ))}
-                </datalist>
+                {rolesCatalog.data?.items && rolesCatalog.data.items.length > 0 ? (
+                  <select
+                    value={roleIdInput}
+                    onChange={(event) => {
+                      setRoleIdInput(event.target.value);
+                    }}
+                    className="w-full rounded border border-zinc-300 px-2 py-1.5"
+                    disabled={!canManageRoles}
+                  >
+                    {rolesCatalog.data.items.map((item) => (
+                      <option key={item.role_id} value={item.role_id}>
+                        {item.name ? `${item.name} (${item.role_id})` : item.role_id}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    value={roleIdInput}
+                    onChange={(event) => {
+                      setRoleIdInput(event.target.value);
+                    }}
+                    className="w-full rounded border border-zinc-300 px-2 py-1.5"
+                    disabled={!canManageRoles}
+                    placeholder="viewer"
+                  />
+                )}
               </label>
+              {rolesCatalog.error ? (
+                <p className="rounded border border-amber-300 bg-amber-50 px-2 py-1 text-xs text-amber-800">
+                  {apiErrorMessage("Failed to load roles catalog", rolesCatalog.error)}
+                </p>
+              ) : null}
 
               <label className="block text-sm">
                 <span className="mb-1 block text-xs font-medium uppercase text-zinc-600">

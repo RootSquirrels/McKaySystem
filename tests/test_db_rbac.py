@@ -145,6 +145,42 @@ def test_list_users_page_applies_scope_and_count(monkeypatch: Any) -> None:
     assert "count(*)::bigint" in str(captured["count_sql"]).lower()
 
 
+def test_list_roles_applies_scope_and_returns_permissions(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_fetch_all(
+        _conn: object, sql: str, params: Sequence[Any] | None = None
+    ) -> list[dict[str, Any]]:
+        captured["sql"] = sql
+        captured["params"] = params
+        return [
+            {
+                "tenant_id": "acme",
+                "workspace": "prod",
+                "role_id": "viewer",
+                "name": "Viewer",
+                "description": "Read-only",
+                "is_system": True,
+                "permissions": ["findings:read", "runs:read"],
+            }
+        ]
+
+    monkeypatch.setattr(db_rbac, "fetch_all_dict_conn", _fake_fetch_all)
+
+    rows = db_rbac.list_roles(
+        object(),
+        tenant_id="acme",
+        workspace="prod",
+    )
+
+    assert rows[0]["role_id"] == "viewer"
+    assert rows[0]["permissions"] == ["findings:read", "runs:read"]
+    assert captured["params"] == ("acme", "prod")
+    sql = str(captured["sql"]).lower()
+    assert "from roles r" in sql
+    assert "left join role_permissions" in sql
+
+
 def test_list_api_keys_applies_scope_and_active_filter(monkeypatch: Any) -> None:
     captured: dict[str, Any] = {}
 

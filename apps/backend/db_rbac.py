@@ -224,40 +224,108 @@ def create_user(conn: Any, *, user: UserUpsert) -> dict[str, Any] | None:
 
 def list_users_page(conn: Any, *, query: UserListQuery) -> tuple[list[dict[str, Any]], int]:
     """List users with deterministic paging and scoped total count."""
-    where = ["tenant_id = %s", "workspace = %s"]
+    where = ["u.tenant_id = %s", "u.workspace = %s"]
     params: list[Any] = [query.tenant_id, query.workspace]
 
     if not query.include_inactive:
-        where.append("is_active = TRUE")
+        where.append("u.is_active = TRUE")
     if query.query:
-        where.append("(user_id ILIKE %s OR email ILIKE %s OR COALESCE(full_name, '') ILIKE %s)")
+        where.append(
+            "(u.user_id ILIKE %s OR u.email ILIKE %s OR COALESCE(u.full_name, '') ILIKE %s)"
+        )
         pattern = f"%{query.query}%"
         params.extend([pattern, pattern, pattern])
 
     sql_items = f"""
         SELECT
-          tenant_id,
-          workspace,
-          user_id,
-          email,
-          full_name,
-          external_id,
-          auth_provider,
-          is_active,
-          is_superadmin,
-          last_login_at,
-          created_at,
-          updated_at
-        FROM users
+          u.tenant_id,
+          u.workspace,
+          u.user_id,
+          u.email,
+          u.full_name,
+          u.external_id,
+          u.auth_provider,
+          u.is_active,
+          u.is_superadmin,
+          u.last_login_at,
+          u.created_at,
+          u.updated_at,
+          uwr.role_id,
+          r.name AS role_name
+        FROM users u
+        LEFT JOIN user_workspace_roles uwr
+          ON uwr.tenant_id = u.tenant_id
+         AND uwr.workspace = u.workspace
+         AND uwr.user_id = u.user_id
+        LEFT JOIN roles r
+          ON r.tenant_id = uwr.tenant_id
+         AND r.workspace = uwr.workspace
+         AND r.role_id = uwr.role_id
         WHERE {" AND ".join(where)}
-        ORDER BY email ASC, user_id ASC
+        ORDER BY u.email ASC, u.user_id ASC
         LIMIT %s OFFSET %s
     """
-    sql_count = f"SELECT COUNT(*)::bigint AS n FROM users WHERE {' AND '.join(where)}"
+    sql_count = f"SELECT COUNT(*)::bigint AS n FROM users u WHERE {' AND '.join(where)}"
     rows = fetch_all_dict_conn(conn, sql_items, tuple(params + [query.limit, query.offset]))
     count_row = fetch_one_dict_conn(conn, sql_count, tuple(params))
     total = int((count_row or {}).get("n") or 0)
     return rows, total
+
+
+def list_roles(conn: Any, *, tenant_id: str, workspace: str) -> list[dict[str, Any]]:
+    """List scoped roles with deterministic ordering and aggregated permissions."""
+    rows = fetch_all_dict_conn(
+        conn,
+        """
+        SELECT
+          r.tenant_id,
+          r.workspace,
+          r.role_id,
+          r.name,
+          r.description,
+          r.is_system,
+          r.created_at,
+          r.updated_at,
+          COALESCE(
+            ARRAY_AGG(rp.permission_id ORDER BY rp.permission_id)
+              FILTER (WHERE rp.permission_id IS NOT NULL),
+            ARRAY[]::text[]
+          ) AS permissions
+        FROM roles r
+        LEFT JOIN role_permissions rp
+          ON rp.tenant_id = r.tenant_id
+         AND rp.workspace = r.workspace
+         AND rp.role_id = r.role_id
+        WHERE r.tenant_id = %s
+          AND r.workspace = %s
+        GROUP BY
+          r.tenant_id,
+          r.workspace,
+          r.role_id,
+          r.name,
+          r.description,
+          r.is_system,
+          r.created_at,
+          r.updated_at
+        ORDER BY r.role_id ASC
+        """,
+        (tenant_id, workspace),
+    )
+    normalized: list[dict[str, Any]] = []
+    for row in rows:
+        permissions_raw = row.get("permissions")
+        permissions = (
+            [str(item) for item in permissions_raw]
+            if isinstance(permissions_raw, list)
+            else []
+        )
+        normalized.append(
+            {
+                **row,
+                "permissions": permissions,
+            }
+        )
+    return normalized
 
 
 def set_user_active(

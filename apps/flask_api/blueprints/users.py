@@ -56,6 +56,32 @@ def _public_user(row: dict[str, Any] | None) -> dict[str, Any] | None:
         "last_login_at": row.get("last_login_at"),
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),
+        "role_id": row.get("role_id"),
+        "role_name": row.get("role_name"),
+    }
+
+
+def _public_role(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return public role payload with deterministic permissions list."""
+    if row is None:
+        return None
+    permissions_raw = row.get("permissions")
+    permissions = (
+        [str(item) for item in permissions_raw]
+        if isinstance(permissions_raw, Sequence)
+        and not isinstance(permissions_raw, (str, bytes, bytearray))
+        else []
+    )
+    return {
+        "tenant_id": row.get("tenant_id"),
+        "workspace": row.get("workspace"),
+        "role_id": row.get("role_id"),
+        "name": row.get("name"),
+        "description": row.get("description"),
+        "is_system": bool(row.get("is_system")),
+        "permissions": permissions,
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
     }
 
 
@@ -520,6 +546,30 @@ def api_users_create() -> Any:
             )
             conn.commit()
         return _ok({"user": _public_user(row)}, status=201)
+    except ValueError as exc:
+        return _err("bad_request", str(exc), status=400)
+
+
+@users_bp.route("/api/users/roles", methods=["GET"])
+@require_permission("users:manage_roles")
+def api_users_roles_catalog() -> Any:
+    """List available scoped roles for role assignment UI."""
+    try:
+        tenant_id, workspace = _require_scope_from_query()
+        with db_conn() as conn:
+            rows = db_rbac.list_roles(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+            )
+        return _ok(
+            {
+                "tenant_id": tenant_id,
+                "workspace": workspace,
+                "total": len(rows),
+                "items": [_public_role(row) for row in rows],
+            }
+        )
     except ValueError as exc:
         return _err("bad_request", str(exc), status=400)
 

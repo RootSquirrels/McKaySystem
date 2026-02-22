@@ -18,6 +18,8 @@ export interface UserItem {
   last_login_at: string | null;
   created_at: string | null;
   updated_at: string | null;
+  role_id: string | null;
+  role_name: string | null;
 }
 
 export interface UsersResponse {
@@ -46,6 +48,26 @@ export interface UserRoleResponse {
   workspace: string;
   user_id: string;
   role: UserRole | null;
+}
+
+export interface RoleCatalogItem {
+  tenant_id: string;
+  workspace: string;
+  role_id: string;
+  name: string | null;
+  description: string | null;
+  is_system: boolean;
+  permissions: string[];
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface RolesCatalogResponse {
+  ok: true;
+  tenant_id: string;
+  workspace: string;
+  total: number;
+  items: RoleCatalogItem[];
 }
 
 interface UseUsersOptions {
@@ -98,6 +120,10 @@ export function userRoleQueryKey(
   return ["users", "role", scope.tenantId, scope.workspace, userId ?? ""] as const;
 }
 
+export function rolesCatalogQueryKey(scope: { tenantId?: string; workspace?: string }) {
+  return ["users", "roles", scope.tenantId, scope.workspace] as const;
+}
+
 /**
  * Query scoped users with paging and search.
  */
@@ -139,6 +165,21 @@ export function useUserRole(userId: string | null, enabled = true) {
     enabled: Boolean(scope?.tenantId && scope?.workspace && userId && enabled),
     queryFn: async () => {
       return apiClient.get<UserRoleResponse>(`/users/${encodeURIComponent(String(userId))}/role`);
+    },
+  });
+}
+
+/**
+ * Query scoped roles catalog for role assignment options.
+ */
+export function useRolesCatalog(enabled = true) {
+  const scope = getStoredScope();
+
+  return useQuery({
+    queryKey: rolesCatalogQueryKey({ tenantId: scope?.tenantId, workspace: scope?.workspace }),
+    enabled: Boolean(scope?.tenantId && scope?.workspace && enabled),
+    queryFn: async () => {
+      return apiClient.get<RolesCatalogResponse>("/users/roles");
     },
   });
 }

@@ -131,6 +131,44 @@ def test_users_list_success(monkeypatch: Any) -> None:
     assert (payload.get("items") or [])[0].get("user_id") == "u-1"
 
 
+def test_users_roles_catalog_success(monkeypatch: Any) -> None:
+    """`GET /api/users/roles` should return scoped role catalog when authorized."""
+    _disable_runtime_guards(monkeypatch)
+    monkeypatch.setattr(
+        auth_middleware,
+        "authenticate_request",
+        lambda: _context_with_permissions("users:manage_roles"),
+    )
+    monkeypatch.setattr(
+        users_blueprint.db_rbac,
+        "list_roles",
+        lambda *_args, **_kwargs: [
+            {
+                "tenant_id": "acme",
+                "workspace": "prod",
+                "role_id": "viewer",
+                "name": "Viewer",
+                "description": "Read only",
+                "is_system": True,
+                "permissions": ["findings:read", "runs:read"],
+                "created_at": None,
+                "updated_at": None,
+            }
+        ],
+    )
+
+    client = flask_app.app.test_client()
+    resp = client.get("/api/users/roles?tenant_id=acme&workspace=prod")
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 200
+    assert payload.get("ok") is True
+    assert payload.get("total") == 1
+    items = payload.get("items") or []
+    assert items[0].get("role_id") == "viewer"
+    assert items[0].get("permissions") == ["findings:read", "runs:read"]
+
+
 def test_users_create_hashes_password(monkeypatch: Any) -> None:
     """`POST /api/users` should hash password before DB upsert."""
     _disable_runtime_guards(monkeypatch)
