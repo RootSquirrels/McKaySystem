@@ -106,6 +106,16 @@ def _rule_to_openapi_path(path: str) -> str:
 
 _API_DEBUG_ERRORS = bool(_SETTINGS.api.debug_errors)
 _API_LOG_LEVEL = str(_SETTINGS.api.log_level or "INFO").strip().upper()
+_API_CORS_ALLOWED_ORIGINS = tuple(
+    str(x).strip() for x in _SETTINGS.api.cors_allowed_origins if str(x).strip()
+)
+_API_CORS_ALLOW_CREDENTIALS = bool(_SETTINGS.api.cors_allow_credentials)
+_API_CORS_ALLOWED_HEADERS = (
+    "Content-Type, Authorization, X-Tenant-Id, X-Tenant, X-Workspace, X-WS, "
+    "X-Correlation-Id, X-Request-Id"
+)
+_API_CORS_ALLOWED_METHODS = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+_API_CORS_MAX_AGE_SECONDS = "600"
 
 _RATE_LIMIT_RPS = _SETTINGS.api.rate_limit_rps
 _RATE_LIMIT_BURST = _SETTINGS.api.rate_limit_burst
@@ -141,9 +151,64 @@ def _merge_vary_header(current: str | None, token: str) -> str:
     return ", ".join(items)
 
 
+def _cors_request_origin() -> str | None:
+    """Return normalized Origin header value when present."""
+    origin = str(request.headers.get("Origin") or "").strip()
+    return origin or None
+
+
+def _cors_origin_allowed(origin: str | None) -> bool:
+    """Return True when CORS origin is explicitly allowed by config."""
+    if not origin or not _API_CORS_ALLOWED_ORIGINS:
+        return False
+    if "*" in _API_CORS_ALLOWED_ORIGINS:
+        return True
+    return origin in _API_CORS_ALLOWED_ORIGINS
+
+
+def _cors_allow_origin_value(origin: str) -> str:
+    """Resolve Access-Control-Allow-Origin response value."""
+    if "*" in _API_CORS_ALLOWED_ORIGINS and not _API_CORS_ALLOW_CREDENTIALS:
+        return "*"
+    return origin
+
+
+def _apply_cors_headers(resp: Response) -> Response:
+    """Attach CORS headers for allowed API origins."""
+    path = _canonical_api_path(request.path or "")
+    if not path.startswith("/api/"):
+        return resp
+
+    origin = _cors_request_origin()
+    if not _cors_origin_allowed(origin):
+        return resp
+
+    assert origin is not None
+    resp.headers["Access-Control-Allow-Origin"] = _cors_allow_origin_value(origin)
+    resp.headers["Access-Control-Allow-Methods"] = _API_CORS_ALLOWED_METHODS
+    resp.headers["Access-Control-Allow-Headers"] = _API_CORS_ALLOWED_HEADERS
+    resp.headers["Access-Control-Max-Age"] = _API_CORS_MAX_AGE_SECONDS
+    resp.headers["Vary"] = _merge_vary_header(resp.headers.get("Vary"), "Origin")
+    if _API_CORS_ALLOW_CREDENTIALS:
+        resp.headers["Access-Control-Allow-Credentials"] = "true"
+    return resp
+
+
 @app.before_request
 def _start_timer() -> None:
     request.environ["_mckay_t0"] = time.monotonic()
+
+
+@app.before_request
+def _handle_cors_preflight() -> Response | None:
+    """Short-circuit API preflight requests for allowed CORS origins."""
+    path = _canonical_api_path(request.path or "")
+    if request.method != "OPTIONS" or not path.startswith("/api/"):
+        return None
+    origin = _cors_request_origin()
+    if not _cors_origin_allowed(origin):
+        return None
+    return _apply_cors_headers(Response(status=204))
 
 
 def _safe_scope_from_request() -> tuple[str | None, str | None]:
@@ -193,7 +258,7 @@ def _log_request(resp: Response) -> Response:
         resp.headers["Pragma"] = "no-cache"
         resp.headers["Expires"] = "0"
         resp.headers["Vary"] = _merge_vary_header(resp.headers.get("Vary"), "Authorization")
-    return resp
+    return _apply_cors_headers(resp)
 
 
 class _TokenBucket:
@@ -418,6 +483,8 @@ def _enforce_api_auth() -> None:
     """
     path = _canonical_api_path(request.path or "")
     if not path.startswith("/api/"):
+        return
+    if request.method == "OPTIONS":
         return
     if path in {"/api/health/db", "/api/auth/login"}:
         return

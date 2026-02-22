@@ -291,3 +291,43 @@ def test_auth_logout_invalidates_session(monkeypatch: Any) -> None:
         "workspace": "prod",
         "session_token": "token-xyz",
     }
+
+
+def test_api_preflight_allows_configured_cors_origin(monkeypatch: Any) -> None:
+    """API preflight should return CORS headers for configured origins."""
+    _disable_runtime_guards(monkeypatch)
+    monkeypatch.setattr(flask_app, "_API_CORS_ALLOWED_ORIGINS", ("http://localhost:3000",))
+    monkeypatch.setattr(flask_app, "_API_CORS_ALLOW_CREDENTIALS", True)
+
+    client = flask_app.app.test_client()
+    resp = client.options(
+        "/api/findings",
+        headers={
+            "Origin": "http://localhost:3000",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "Content-Type, X-Tenant-Id, X-Workspace",
+        },
+    )
+
+    assert resp.status_code == 204
+    assert resp.headers.get("Access-Control-Allow-Origin") == "http://localhost:3000"
+    assert resp.headers.get("Access-Control-Allow-Credentials") == "true"
+
+
+def test_api_cors_headers_omitted_for_unconfigured_origin(monkeypatch: Any) -> None:
+    """API CORS headers should be omitted when request origin is not allowed."""
+    _disable_runtime_guards(monkeypatch)
+    monkeypatch.setattr(flask_app, "_API_CORS_ALLOWED_ORIGINS", ("https://app.example.com",))
+    monkeypatch.setattr(flask_app, "_API_CORS_ALLOW_CREDENTIALS", True)
+
+    client = flask_app.app.test_client()
+    resp = client.options(
+        "/api/findings",
+        headers={
+            "Origin": "http://localhost:3000",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.headers.get("Access-Control-Allow-Origin") is None
