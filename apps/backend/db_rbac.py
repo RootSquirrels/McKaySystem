@@ -1,0 +1,376 @@
+"""Database helpers for RBAC data access.
+
+All queries are explicitly scoped by `tenant_id` and `workspace`.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Any
+
+from apps.backend.db import fetch_all_dict_conn, fetch_one_dict_conn
+
+
+def _dict_from_cursor_row(cursor: Any, row: Sequence[Any] | None) -> dict[str, Any] | None:
+    """Build a dict from a cursor row using cursor.description metadata."""
+    if row is None:
+        return None
+    columns = [str(desc[0]) for desc in (getattr(cursor, "description", None) or [])]
+    if not columns:
+        return None
+    return dict(zip(columns, row, strict=False))
+
+
+# Column-mapped DTOs intentionally mirror table schemas for explicitness.
+# pylint: disable=too-many-instance-attributes
+@dataclass(frozen=True)
+class UserUpsert:
+    """Input payload for idempotent user upsert operations."""
+
+    tenant_id: str
+    workspace: str
+    user_id: str
+    email: str
+    password_hash: str | None
+    full_name: str | None = None
+    external_id: str | None = None
+    auth_provider: str = "local"
+    is_active: bool = True
+    is_superadmin: bool = False
+
+
+@dataclass(frozen=True)
+class ApiKeyUpsert:
+    """Input payload for idempotent API key upsert operations."""
+
+    tenant_id: str
+    workspace: str
+    key_id: str
+    key_hash: str
+    name: str
+    description: str | None = None
+    user_id: str | None = None
+    key_type: str = "secret"
+    expires_at: Any | None = None
+
+
+# pylint: enable=too-many-instance-attributes
+
+
+def get_user_by_email(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    email: str,
+) -> dict[str, Any] | None:
+    """Return one user row by scoped email."""
+    return fetch_one_dict_conn(
+        conn,
+        """
+        SELECT
+          tenant_id,
+          workspace,
+          user_id,
+          email,
+          password_hash,
+          full_name,
+          external_id,
+          auth_provider,
+          is_active,
+          is_superadmin,
+          last_login_at,
+          created_at,
+          updated_at
+        FROM users
+        WHERE tenant_id = %s
+          AND workspace = %s
+          AND email = %s
+        """,
+        (tenant_id, workspace, email),
+    )
+
+
+def get_user_by_id(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    user_id: str,
+) -> dict[str, Any] | None:
+    """Return one user row by scoped user identifier."""
+    return fetch_one_dict_conn(
+        conn,
+        """
+        SELECT
+          tenant_id,
+          workspace,
+          user_id,
+          email,
+          password_hash,
+          full_name,
+          external_id,
+          auth_provider,
+          is_active,
+          is_superadmin,
+          last_login_at,
+          created_at,
+          updated_at
+        FROM users
+        WHERE tenant_id = %s
+          AND workspace = %s
+          AND user_id = %s
+        """,
+        (tenant_id, workspace, user_id),
+    )
+
+
+def create_user(conn: Any, *, user: UserUpsert) -> dict[str, Any] | None:
+    """Create or update a scoped user row in an idempotent way."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO users (
+              tenant_id,
+              workspace,
+              user_id,
+              email,
+              password_hash,
+              full_name,
+              external_id,
+              auth_provider,
+              is_active,
+              is_superadmin,
+              updated_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+            ON CONFLICT (tenant_id, workspace, user_id)
+            DO UPDATE SET
+              email = EXCLUDED.email,
+              password_hash = EXCLUDED.password_hash,
+              full_name = EXCLUDED.full_name,
+              external_id = EXCLUDED.external_id,
+              auth_provider = EXCLUDED.auth_provider,
+              is_active = EXCLUDED.is_active,
+              is_superadmin = EXCLUDED.is_superadmin,
+              updated_at = now()
+            RETURNING
+              tenant_id,
+              workspace,
+              user_id,
+              email,
+              password_hash,
+              full_name,
+              external_id,
+              auth_provider,
+              is_active,
+              is_superadmin,
+              last_login_at,
+              created_at,
+              updated_at
+            """,
+            (
+                user.tenant_id,
+                user.workspace,
+                user.user_id,
+                user.email,
+                user.password_hash,
+                user.full_name,
+                user.external_id,
+                user.auth_provider,
+                user.is_active,
+                user.is_superadmin,
+            ),
+        )
+        return _dict_from_cursor_row(cur, cur.fetchone())
+
+
+def list_api_keys(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    user_id: str | None = None,
+    include_inactive: bool = False,
+) -> list[dict[str, Any]]:
+    """List API keys for one tenant/workspace scope."""
+    where = ["tenant_id = %s", "workspace = %s"]
+    params: list[Any] = [tenant_id, workspace]
+
+    if user_id:
+        where.append("user_id = %s")
+        params.append(user_id)
+    if not include_inactive:
+        where.append("is_active = TRUE")
+
+    sql = f"""
+        SELECT
+          tenant_id,
+          workspace,
+          key_id,
+          key_hash,
+          key_type,
+          name,
+          description,
+          user_id,
+          last_used_at,
+          expires_at,
+          is_active,
+          created_at
+        FROM api_keys
+        WHERE {" AND ".join(where)}
+        ORDER BY created_at DESC, key_id ASC
+    """
+    return fetch_all_dict_conn(conn, sql, tuple(params))
+
+
+def create_api_key(conn: Any, *, api_key: ApiKeyUpsert) -> dict[str, Any] | None:
+    """Create or update an API key row in an idempotent way."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO api_keys (
+              tenant_id,
+              workspace,
+              key_id,
+              key_hash,
+              key_type,
+              name,
+              description,
+              user_id,
+              expires_at,
+              is_active
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+            ON CONFLICT (tenant_id, workspace, key_id)
+            DO UPDATE SET
+              key_hash = EXCLUDED.key_hash,
+              key_type = EXCLUDED.key_type,
+              name = EXCLUDED.name,
+              description = EXCLUDED.description,
+              user_id = EXCLUDED.user_id,
+              expires_at = EXCLUDED.expires_at,
+              is_active = TRUE
+            RETURNING
+              tenant_id,
+              workspace,
+              key_id,
+              key_hash,
+              key_type,
+              name,
+              description,
+              user_id,
+              last_used_at,
+              expires_at,
+              is_active,
+              created_at
+            """,
+            (
+                api_key.tenant_id,
+                api_key.workspace,
+                api_key.key_id,
+                api_key.key_hash,
+                api_key.key_type,
+                api_key.name,
+                api_key.description,
+                api_key.user_id,
+                api_key.expires_at,
+            ),
+        )
+        return _dict_from_cursor_row(cur, cur.fetchone())
+
+
+def revoke_api_key(conn: Any, *, tenant_id: str, workspace: str, key_id: str) -> bool:
+    """Disable one API key and report whether a row was updated."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE api_keys
+            SET is_active = FALSE
+            WHERE tenant_id = %s
+              AND workspace = %s
+              AND key_id = %s
+              AND is_active = TRUE
+            """,
+            (tenant_id, workspace, key_id),
+        )
+        return bool(cur.rowcount)
+
+
+def get_user_workspace_role(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    user_id: str,
+) -> dict[str, Any] | None:
+    """Return one scoped user-workspace-role mapping."""
+    return fetch_one_dict_conn(
+        conn,
+        """
+        SELECT
+          tenant_id,
+          workspace,
+          user_id,
+          role_id,
+          granted_by,
+          granted_at
+        FROM user_workspace_roles
+        WHERE tenant_id = %s
+          AND workspace = %s
+          AND user_id = %s
+        """,
+        (tenant_id, workspace, user_id),
+    )
+
+
+def get_role_permissions(conn: Any, *, tenant_id: str, workspace: str, role_id: str) -> list[str]:
+    """Return permission identifiers for one role in scope."""
+    rows = fetch_all_dict_conn(
+        conn,
+        """
+        SELECT rp.permission_id
+        FROM role_permissions rp
+        WHERE rp.tenant_id = %s
+          AND rp.workspace = %s
+          AND rp.role_id = %s
+        ORDER BY rp.permission_id ASC
+        """,
+        (tenant_id, workspace, role_id),
+    )
+    return [str(row["permission_id"]) for row in rows if row.get("permission_id")]
+
+
+def check_permission(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    user_id: str,
+    permission_id: str,
+) -> bool:
+    """Return True when a user has the requested permission in scope."""
+    row = fetch_one_dict_conn(
+        conn,
+        """
+        SELECT 1 AS allowed
+        FROM user_workspace_roles uwr
+        JOIN users u
+          ON u.tenant_id = uwr.tenant_id
+         AND u.workspace = uwr.workspace
+         AND u.user_id = uwr.user_id
+        JOIN role_permissions rp
+          ON rp.tenant_id = uwr.tenant_id
+         AND rp.workspace = uwr.workspace
+         AND rp.role_id = uwr.role_id
+        WHERE uwr.tenant_id = %s
+          AND uwr.workspace = %s
+          AND uwr.user_id = %s
+          AND rp.permission_id = %s
+          AND u.is_active = TRUE
+        LIMIT 1
+        """,
+        (tenant_id, workspace, user_id, permission_id),
+    )
+    return bool(row and row.get("allowed") == 1)

@@ -1,0 +1,178 @@
+"""Unit tests for RBAC database helper query contracts."""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import Any, Literal
+
+from apps.backend import db_rbac
+
+
+class _FakeCursor:
+    """Cursor test double for write helpers."""
+
+    def __init__(
+        self,
+        *,
+        row: Sequence[Any] | None = None,
+        description: Sequence[Sequence[Any]] | None = None,
+        rowcount: int = 1,
+    ) -> None:
+        self._row = row
+        self.description = description or []
+        self.rowcount = rowcount
+        self.executed_sql: str | None = None
+        self.executed_params: Sequence[Any] | None = None
+
+    def __enter__(self) -> _FakeCursor:
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> Literal[False]:  # type: ignore[no-untyped-def]
+        return False
+
+    def execute(self, sql: str, params: Sequence[Any] | None = None) -> None:
+        self.executed_sql = sql
+        self.executed_params = params
+
+    def fetchone(self) -> Sequence[Any] | None:
+        return self._row
+
+
+class _FakeConn:
+    """Connection test double that exposes one cursor instance."""
+
+    def __init__(self, cursor: _FakeCursor) -> None:
+        self._cursor = cursor
+
+    def cursor(self) -> _FakeCursor:
+        return self._cursor
+
+    def commit(self) -> None:
+        return
+
+
+def test_get_user_by_email_includes_tenant_and_workspace(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_fetch_one(
+        _conn: object, sql: str, params: Sequence[Any] | None = None
+    ) -> dict[str, Any]:
+        captured["sql"] = sql
+        captured["params"] = params
+        return {"user_id": "user-1"}
+
+    monkeypatch.setattr(db_rbac, "fetch_one_dict_conn", _fake_fetch_one)
+    row = db_rbac.get_user_by_email(
+        object(),
+        tenant_id="acme",
+        workspace="prod",
+        email="alice@acme.io",
+    )
+
+    assert row == {"user_id": "user-1"}
+    assert captured["params"] == ("acme", "prod", "alice@acme.io")
+    sql = str(captured["sql"]).lower()
+    assert "from users" in sql
+    assert "tenant_id = %s" in sql
+    assert "workspace = %s" in sql
+
+
+def test_create_user_is_idempotent_and_scoped() -> None:
+    cursor = _FakeCursor(
+        row=("acme", "prod", "user-1"),
+        description=(("tenant_id",), ("workspace",), ("user_id",)),
+    )
+    conn = _FakeConn(cursor)
+
+    row = db_rbac.create_user(
+        conn,
+        user=db_rbac.UserUpsert(
+            tenant_id="acme",
+            workspace="prod",
+            user_id="user-1",
+            email="alice@acme.io",
+            password_hash="hash",
+        ),
+    )
+
+    assert row == {"tenant_id": "acme", "workspace": "prod", "user_id": "user-1"}
+    assert cursor.executed_params is not None
+    assert tuple(cursor.executed_params)[0:3] == ("acme", "prod", "user-1")
+    sql = str(cursor.executed_sql).lower()
+    assert "insert into users" in sql
+    assert "on conflict (tenant_id, workspace, user_id)" in sql
+
+
+def test_list_api_keys_applies_scope_and_active_filter(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_fetch_all(
+        _conn: object, sql: str, params: Sequence[Any] | None = None
+    ) -> list[dict[str, Any]]:
+        captured["sql"] = sql
+        captured["params"] = params
+        return []
+
+    monkeypatch.setattr(db_rbac, "fetch_all_dict_conn", _fake_fetch_all)
+    rows = db_rbac.list_api_keys(
+        object(),
+        tenant_id="acme",
+        workspace="prod",
+        user_id="user-1",
+        include_inactive=False,
+    )
+
+    assert rows == []
+    assert captured["params"] == ("acme", "prod", "user-1")
+    sql = str(captured["sql"]).lower()
+    assert "from api_keys" in sql
+    assert "tenant_id = %s" in sql
+    assert "workspace = %s" in sql
+    assert "is_active = true" in sql
+
+
+def test_revoke_api_key_returns_false_when_no_rows_updated() -> None:
+    cursor = _FakeCursor(rowcount=0)
+    conn = _FakeConn(cursor)
+
+    changed = db_rbac.revoke_api_key(
+        conn,
+        tenant_id="acme",
+        workspace="prod",
+        key_id="key-1",
+    )
+
+    assert changed is False
+    assert cursor.executed_params == ("acme", "prod", "key-1")
+    sql = str(cursor.executed_sql).lower()
+    assert "update api_keys" in sql
+    assert "tenant_id = %s" in sql
+    assert "workspace = %s" in sql
+
+
+def test_check_permission_uses_scoped_join(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_fetch_one(
+        _conn: object, sql: str, params: Sequence[Any] | None = None
+    ) -> dict[str, Any]:
+        captured["sql"] = sql
+        captured["params"] = params
+        return {"allowed": 1}
+
+    monkeypatch.setattr(db_rbac, "fetch_one_dict_conn", _fake_fetch_one)
+    allowed = db_rbac.check_permission(
+        object(),
+        tenant_id="acme",
+        workspace="prod",
+        user_id="user-1",
+        permission_id="findings:read",
+    )
+
+    assert allowed is True
+    assert captured["params"] == ("acme", "prod", "user-1", "findings:read")
+    sql = str(captured["sql"]).lower()
+    assert "from user_workspace_roles" in sql
+    assert "join role_permissions" in sql
+    assert "uwr.tenant_id = %s" in sql
+    assert "uwr.workspace = %s" in sql
