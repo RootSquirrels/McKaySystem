@@ -9,6 +9,7 @@ Last reviewed: 2026-02-22
 - **Terms**: `00_overview/glossary.md`
 - **Architecture**: `01_architecture/architecture.md`
 - **Pipeline**: `02_pipeline/pipeline_overview.md`
+- **Recommendations build**: `02_pipeline/recommendations_build.md`
 - **Checkers contract**: `03_checkers/checker_contract.md`
 - **AWS checker catalog**: `03_checkers/aws/README.md`
 - **Finding schema**: `04_schemas/finding_schema.md`

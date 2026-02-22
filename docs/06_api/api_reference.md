@@ -165,6 +165,11 @@ Common optional filters:
 | POST | `/api/recommendations/estimate` | Estimate savings for selected recommendations |
 | POST | `/api/recommendations/preview` | Alias for /estimate |
 
+Notes:
+- Recommendations are derived from `finding_current` at read time (not a separate worker table yet).
+- Response items include normalized action-plan fields and `checker_advice` (from finding payload `advice`, with legacy fallback to payload `recommendation`).
+- Build flow reference: `docs/02_pipeline/recommendations_build.md`.
+
 Query/Body params for `/api/recommendations`:
 - Scope: `tenant_id`, `workspace` (required)
 - Filters: `state`, `severity`, `service`, `check_id`, `category`, `region`, `account_id`

@@ -107,6 +107,7 @@ def test_recommendations_response_is_enriched(monkeypatch) -> None:  # type: ign
                 "detected_at": "2026-02-14T00:00:00Z",
                 "effective_state": "open",
                 "payload": {
+                    "advice": "Downsize based on sustained utilization trend.",
                     "estimated": {
                         "confidence": 91,
                         "pricing_source": "snapshot",
@@ -138,6 +139,7 @@ def test_recommendations_response_is_enriched(monkeypatch) -> None:  # type: ign
     assert item.get("priority") == "p1"
     assert item.get("action_type") == "rightsize"
     assert item.get("action") == "Downsize EC2 instance from m5.2xlarge to m5.xlarge based on sustained utilization."
+    assert item.get("checker_advice") == "Downsize based on sustained utilization trend."
     assert (item.get("target") or {}).get("kind") == "instance_type"
     assert (item.get("target") or {}).get("value") == "m5.xlarge"
     assert (item.get("current") or {}).get("value") == "m5.2xlarge"
@@ -147,6 +149,47 @@ def test_recommendations_response_is_enriched(monkeypatch) -> None:  # type: ign
     assert item.get("pricing_version") == "aws_2026_02_01"
     assert item.get("estimated_monthly_savings") == 100.5
     assert item.get("estimated_annual_savings") == 1206.0
+
+
+def test_recommendations_checker_advice_falls_back_to_legacy_field(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """`checker_advice` should use payload.recommendation when payload.advice is missing."""
+    _disable_runtime_guards(monkeypatch)
+
+    def _fake_fetch_all(_conn: object, _sql: str, _params: Sequence[Any] | None = None) -> list[dict[str, Any]]:
+        return [
+            {
+                "fingerprint": "fp-legacy",
+                "check_id": "aws.ec2.instances.underutilized",
+                "service": "ec2",
+                "severity": "medium",
+                "category": "rightsizing",
+                "title": "EC2 instance underutilized",
+                "estimated_monthly_savings": 10.0,
+                "region": "us-east-1",
+                "account_id": "111111111111",
+                "detected_at": "2026-02-14T00:00:00Z",
+                "effective_state": "open",
+                "payload": {
+                    "recommendation": "Legacy checker recommendation text.",
+                    "estimated": {"confidence": 50},
+                    "dimensions": {},
+                },
+            }
+        ]
+
+    def _fake_fetch_one(_conn: object, _sql: str, _params: Sequence[Any] | None = None) -> dict[str, Any]:
+        return {"n": 1}
+
+    monkeypatch.setattr(flask_app, "fetch_all_dict_conn", _fake_fetch_all)
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+
+    client = flask_app.app.test_client()
+    resp = client.get("/api/recommendations?tenant_id=acme&workspace=prod")
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 200
+    item = (payload.get("items") or [])[0]
+    assert item.get("checker_advice") == "Legacy checker recommendation text."
 
 
 def test_recommendations_composite_uses_finding_current(monkeypatch) -> None:  # type: ignore[no-untyped-def]

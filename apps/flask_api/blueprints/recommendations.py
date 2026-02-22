@@ -187,6 +187,14 @@ _RECOMMENDATION_DEFAULT_RULE: dict[str, Any] = {
 }
 
 
+def _checker_advice(payload: dict[str, Any]) -> str:
+    """Return checker-authored guidance text from canonical/adaptive payload fields."""
+    advice = str(payload.get("advice") or "").strip()
+    if advice:
+        return advice
+    return str(payload.get("recommendation") or "").strip()
+
+
 def _build_recommendations_where_from_values(
     tenant_id: str,
     workspace: str,
@@ -443,6 +451,8 @@ def _build_recommendation_item(row: dict[str, Any]) -> dict[str, Any]:
             "kind": target_kind,
             "value": target_value,
         },
+        # Free text from checker for context, separate from normalized action plan.
+        "checker_advice": _checker_advice(payload),
         "current": {
             "kind": current_kind,
             "value": current_value,

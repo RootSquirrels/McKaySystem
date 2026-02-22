@@ -1,11 +1,12 @@
 "use client";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 
 import { useAuth } from "@/hooks/useAuth";
 import { useFindingLifecycle } from "@/hooks/useFindingLifecycle";
 import { FindingItem, findingsQueryKey, useFindings } from "@/hooks/useFindings";
+import { RunLatestItem, useRunsLatest } from "@/hooks/useRunsLatest";
 import { ApiError } from "@/lib/api/client";
 import { getStoredScope } from "@/lib/scope";
 
@@ -64,6 +65,118 @@ function lifecycleErrorMessage(error: unknown): string {
   return "Action failed.";
 }
 
+function findingAdvice(payload: Record<string, unknown> | null): string | null {
+  if (!payload) {
+    return null;
+  }
+  const advice = String(payload.advice ?? "").trim();
+  if (advice) {
+    return advice;
+  }
+  const legacy = String(payload.recommendation ?? "").trim();
+  return legacy || null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function firstNonEmptyText(...values: unknown[]): string | null {
+  for (const value of values) {
+    const normalized = String(value ?? "").trim();
+    if (normalized) {
+      return normalized;
+    }
+  }
+  return null;
+}
+
+function impactedResourceName(payload: Record<string, unknown> | null): string | null {
+  if (!payload) {
+    return null;
+  }
+  const scope = asRecord(payload.scope);
+  const dimensions = asRecord(payload.dimensions);
+  return firstNonEmptyText(
+    payload.resource_name,
+    payload.resource_id,
+    payload.resource_arn,
+    scope?.resource_name,
+    scope?.resource_id,
+    scope?.resource_arn,
+    dimensions?.resource_name,
+    dimensions?.resource_id,
+    dimensions?.resource_arn,
+    dimensions?.instance_id,
+    dimensions?.bucket,
+    dimensions?.bucket_name,
+    dimensions?.db_instance_identifier,
+    dimensions?.db_cluster_identifier,
+    dimensions?.nat_gateway_id,
+    dimensions?.function_name,
+    dimensions?.load_balancer_name,
+    dimensions?.load_balancer_arn,
+    dimensions?.distribution_id,
+    dimensions?.volume_id,
+    dimensions?.snapshot_id,
+    dimensions?.file_system_id,
+    dimensions?.vault_name,
+    dimensions?.plan_name,
+    dimensions?.cluster_name,
+    dimensions?.service_name,
+  );
+}
+
+function runDateSummary(items: FindingItem[], latestRun: RunLatestItem | null): {
+  runIdLabel: string;
+  runDateLabel: string;
+  sourceLabel: string;
+} {
+  if (latestRun?.run_id) {
+    return {
+      runIdLabel: latestRun.run_id,
+      runDateLabel: formatDateTime(latestRun.run_ts),
+      sourceLabel: "latest run metadata",
+    };
+  }
+
+  const runIds = new Set<string>();
+  let latestDetectedMs = Number.NEGATIVE_INFINITY;
+  let latestDetectedValue: string | null = null;
+
+  for (const item of items) {
+    const runId = String(item.run_id ?? "").trim();
+    if (runId) {
+      runIds.add(runId);
+    }
+    const detectedAt = String(item.detected_at ?? "").trim();
+    if (!detectedAt) {
+      continue;
+    }
+    const ms = new Date(detectedAt).getTime();
+    if (!Number.isNaN(ms) && ms >= latestDetectedMs) {
+      latestDetectedMs = ms;
+      latestDetectedValue = detectedAt;
+    }
+  }
+
+  let runIdLabel = "-";
+  if (runIds.size === 1) {
+    runIdLabel = Array.from(runIds)[0];
+  } else if (runIds.size > 1) {
+    runIdLabel = `${runIds.size} runs (mixed)`;
+  }
+
+  return {
+    runIdLabel,
+    runDateLabel: latestDetectedValue ? formatDateTime(latestDetectedValue) : "-",
+    sourceLabel: "derived from findings",
+  };
+}
+
 export function FindingsClientPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -75,6 +188,7 @@ export function FindingsClientPage() {
     searchParams.get("order") === "detected_desc"
       ? "detected_desc"
       : "savings_desc";
+  const groupByFilter = searchParams.get("group_by") === "category" ? "category" : "none";
   const queryFilter = searchParams.get("q") ?? "";
   const limitFilter = parsePositiveInt(searchParams.get("limit"), 50);
   const page = parsePositiveInt(searchParams.get("page"), 1);
@@ -110,6 +224,9 @@ export function FindingsClientPage() {
     q: queryFilter,
   });
   const lifecycle = useFindingLifecycle({ queryKey });
+  const permissions = useMemo(() => new Set(auth.user?.permissions ?? []), [auth.user?.permissions]);
+  const canReadRuns = permissions.has("admin:full") || permissions.has("runs:read");
+  const latestRun = useRunsLatest(canReadRuns);
 
   useEffect(() => {
     if (!scope) {
@@ -134,6 +251,28 @@ export function FindingsClientPage() {
     }
   }, [findings.data?.items, selectedFingerprint]);
 
+  const runSummary = useMemo(
+    () => runDateSummary(findings.data?.items ?? [], latestRun.data ?? null),
+    [findings.data?.items, latestRun.data],
+  );
+
+  const groupedItems = useMemo(() => {
+    if (groupByFilter !== "category") {
+      return [];
+    }
+    const buckets = new Map<string, FindingItem[]>();
+    for (const item of findings.data?.items ?? []) {
+      const key = String(item.category ?? "").trim() || "uncategorized";
+      const current = buckets.get(key);
+      if (current) {
+        current.push(item);
+      } else {
+        buckets.set(key, [item]);
+      }
+    }
+    return Array.from(buckets.entries()).map(([category, items]) => ({ category, items }));
+  }, [findings.data?.items, groupByFilter]);
+
   if (!scope) {
     return null;
   }
@@ -141,8 +280,8 @@ export function FindingsClientPage() {
   const activeScope = scope;
   const selectedFinding =
     findings.data?.items.find((item) => item.fingerprint === selectedFingerprint) ?? null;
-  const permissions = new Set(auth.user?.permissions ?? []);
   const canTriage = permissions.has("admin:full") || permissions.has("findings:update");
+  const canReadRecommendations = permissions.has("admin:full") || permissions.has("findings:read");
   const canReadUsers = permissions.has("admin:full") || permissions.has("users:read");
   const total = findings.data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / limitFilter));
@@ -204,6 +343,39 @@ export function FindingsClientPage() {
     setActionFeedback(null);
   }
 
+  function renderFindingRow(item: FindingItem) {
+    const resource = impactedResourceName(item.payload) ?? "-";
+    return (
+      <tr
+        key={item.fingerprint}
+        className={`border-t border-zinc-100 ${selectedFingerprint === item.fingerprint ? "bg-cyan-50" : ""}`}
+      >
+        <td className="px-3 py-2">{item.severity}</td>
+        <td className="px-3 py-2">{item.category ?? "-"}</td>
+        <td className="px-3 py-2">{item.service}</td>
+        <td className="px-3 py-2">
+          <span className="block max-w-[16rem] truncate" title={resource}>
+            {resource}
+          </span>
+        </td>
+        <td className="px-3 py-2">
+          <button
+            type="button"
+            className="text-left text-cyan-700 underline-offset-2 hover:underline"
+            onClick={() => {
+              openFinding(item);
+            }}
+          >
+            {item.title}
+          </button>
+        </td>
+        <td className="px-3 py-2">{formatMoney(item.estimated_monthly_savings)}</td>
+        <td className="px-3 py-2">{item.effective_state}</td>
+        <td className="px-3 py-2">{item.region ?? "-"}</td>
+      </tr>
+    );
+  }
+
   return (
     <main className="mx-auto min-h-screen w-full max-w-6xl px-6 py-8">
       <header className="mb-6 flex items-start justify-between">
@@ -213,8 +385,24 @@ export function FindingsClientPage() {
             Tenant: <span className="font-medium">{activeScope.tenantId}</span> | Workspace:{" "}
             <span className="font-medium">{activeScope.workspace}</span>
           </p>
+          <p className="text-sm text-zinc-600">
+            Run date: <span className="font-medium">{runSummary.runDateLabel}</span> | Run ID:{" "}
+            <span className="font-medium">{runSummary.runIdLabel}</span>{" "}
+            <span className="text-xs">({runSummary.sourceLabel})</span>
+          </p>
         </div>
         <div className="flex items-center gap-2">
+          {canReadRecommendations ? (
+            <button
+              type="button"
+              className="rounded border border-zinc-300 px-3 py-2 text-sm"
+              onClick={() => {
+                router.push("/recommendations");
+              }}
+            >
+              Recommendations
+            </button>
+          ) : null}
           {canReadUsers ? (
             <button
               type="button"
@@ -240,7 +428,7 @@ export function FindingsClientPage() {
       </header>
 
       <section className="mb-4 rounded border border-zinc-200 bg-zinc-50 p-3 text-sm">
-        <div className="grid gap-3 md:grid-cols-5">
+        <div className="grid gap-3 md:grid-cols-6">
           <label className="block">
             <span className="mb-1 block text-xs font-medium uppercase text-zinc-600">State</span>
             <select
@@ -287,6 +475,20 @@ export function FindingsClientPage() {
             >
               <option value="savings_desc">Savings desc</option>
               <option value="detected_desc">Detected desc</option>
+            </select>
+          </label>
+
+          <label className="block">
+            <span className="mb-1 block text-xs font-medium uppercase text-zinc-600">Group by</span>
+            <select
+              className="w-full rounded border border-zinc-300 bg-white px-2 py-1.5"
+              value={groupByFilter}
+              onChange={(event) => {
+                pushWithParams({ group_by: event.target.value === "category" ? "category" : null, page: "1" });
+              }}
+            >
+              <option value="none">None</option>
+              <option value="category">Category (current page)</option>
             </select>
           </label>
 
@@ -359,7 +561,9 @@ export function FindingsClientPage() {
               <thead className="bg-zinc-50 text-xs uppercase tracking-wide text-zinc-600">
                 <tr>
                   <th className="px-3 py-2">Severity</th>
+                  <th className="px-3 py-2">Category</th>
                   <th className="px-3 py-2">Service</th>
+                  <th className="px-3 py-2">Resource</th>
                   <th className="px-3 py-2">Title</th>
                   <th className="px-3 py-2">Savings</th>
                   <th className="px-3 py-2">State</th>
@@ -367,29 +571,18 @@ export function FindingsClientPage() {
                 </tr>
               </thead>
               <tbody>
-                {findings.data.items.map((item) => (
-                  <tr
-                    key={item.fingerprint}
-                    className={`border-t border-zinc-100 ${selectedFingerprint === item.fingerprint ? "bg-cyan-50" : ""}`}
-                  >
-                    <td className="px-3 py-2">{item.severity}</td>
-                    <td className="px-3 py-2">{item.service}</td>
-                    <td className="px-3 py-2">
-                      <button
-                        type="button"
-                        className="text-left text-cyan-700 underline-offset-2 hover:underline"
-                        onClick={() => {
-                          openFinding(item);
-                        }}
-                      >
-                        {item.title}
-                      </button>
-                    </td>
-                    <td className="px-3 py-2">{formatMoney(item.estimated_monthly_savings)}</td>
-                    <td className="px-3 py-2">{item.effective_state}</td>
-                    <td className="px-3 py-2">{item.region ?? "-"}</td>
-                  </tr>
-                ))}
+                {groupByFilter === "category"
+                  ? groupedItems.map((group) => (
+                      <Fragment key={`group:${group.category}`}>
+                        <tr className="border-t border-zinc-200 bg-zinc-100/80">
+                          <td className="px-3 py-2 text-xs font-semibold uppercase tracking-wide text-zinc-700" colSpan={8}>
+                            Category: {group.category} ({group.items.length})
+                          </td>
+                        </tr>
+                        {group.items.map((item) => renderFindingRow(item))}
+                      </Fragment>
+                    ))
+                  : findings.data.items.map((item) => renderFindingRow(item))}
               </tbody>
             </table>
           </div>
@@ -465,6 +658,8 @@ export function FindingsClientPage() {
             <div className="grid gap-3 text-sm md:grid-cols-2">
               <p><span className="font-medium">Check:</span> {selectedFinding.check_id}</p>
               <p><span className="font-medium">Category:</span> {selectedFinding.category ?? "-"}</p>
+              <p><span className="font-medium">Run ID:</span> {selectedFinding.run_id ?? "-"}</p>
+              <p><span className="font-medium">Resource:</span> {impactedResourceName(selectedFinding.payload) ?? "-"}</p>
               <p><span className="font-medium">Service:</span> {selectedFinding.service}</p>
               <p><span className="font-medium">Severity:</span> {selectedFinding.severity}</p>
               <p><span className="font-medium">State:</span> {selectedFinding.effective_state}</p>
@@ -476,6 +671,13 @@ export function FindingsClientPage() {
               <p><span className="font-medium">Snooze Until:</span> {formatDateTime(selectedFinding.snooze_until)}</p>
               <p><span className="font-medium">Owner:</span> {selectedFinding.owner_email ?? "-"}</p>
             </div>
+
+            <section className="mt-4 rounded border border-zinc-200 bg-zinc-50 p-3">
+              <h3 className="text-sm font-semibold">Checker Advice</h3>
+              <p className="mt-1 text-sm text-zinc-700">
+                {findingAdvice(selectedFinding.payload) ?? "-"}
+              </p>
+            </section>
 
             <section className="mt-5 rounded border border-zinc-200 bg-zinc-50 p-3">
               <h3 className="text-sm font-semibold">Lifecycle Actions</h3>

@@ -70,6 +70,7 @@ export function UsersClientPage() {
 
   const permissions = useMemo(() => new Set(auth.user?.permissions ?? []), [auth.user?.permissions]);
   const isAdminFull = permissions.has("admin:full");
+  const canReadFindings = isAdminFull || permissions.has("findings:read");
   const canReadUsers = isAdminFull || permissions.has("users:read");
   const canCreateUsers = isAdminFull || permissions.has("users:create");
   const canManageRoles = isAdminFull || permissions.has("users:manage_roles");
@@ -266,15 +267,28 @@ export function UsersClientPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <button
-            type="button"
-            className="rounded border border-zinc-300 px-3 py-2 text-sm"
-            onClick={() => {
-              router.push("/findings");
-            }}
-          >
-            Findings
-          </button>
+          {canReadFindings ? (
+            <button
+              type="button"
+              className="rounded border border-zinc-300 px-3 py-2 text-sm"
+              onClick={() => {
+                router.push("/findings");
+              }}
+            >
+              Findings
+            </button>
+          ) : null}
+          {canReadFindings ? (
+            <button
+              type="button"
+              className="rounded border border-zinc-300 px-3 py-2 text-sm"
+              onClick={() => {
+                router.push("/recommendations");
+              }}
+            >
+              Recommendations
+            </button>
+          ) : null}
           <button
             type="button"
             className="rounded border border-zinc-300 px-3 py-2 text-sm"
