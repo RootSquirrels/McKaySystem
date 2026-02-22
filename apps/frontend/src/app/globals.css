@@ -3,6 +3,12 @@
 :root {
   --background: #ffffff;
   --foreground: #171717;
+  --login-bg-start: #061223;
+  --login-bg-end: #0f3354;
+  --login-accent: #2dd4bf;
+  --login-accent-2: #7dd3fc;
+  --login-panel: #f8fbff;
+  --login-panel-border: #c8d6ea;
 }
 
 @theme inline {
@@ -22,5 +28,81 @@
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), "Segoe UI", sans-serif;
+}
+
+.login-shell {
+  background:
+    radial-gradient(1200px 420px at 20% -10%, rgba(45, 212, 191, 0.26), transparent 60%),
+    radial-gradient(900px 380px at 90% 0%, rgba(125, 211, 252, 0.18), transparent 62%),
+    linear-gradient(140deg, var(--login-bg-start), var(--login-bg-end));
+}
+
+.login-panel {
+  background: color-mix(in oklab, var(--login-panel) 92%, white 8%);
+  border: 1px solid color-mix(in oklab, var(--login-panel-border) 82%, white 18%);
+  box-shadow:
+    0 18px 60px rgba(2, 12, 27, 0.32),
+    0 2px 0 rgba(255, 255, 255, 0.55) inset;
+  backdrop-filter: blur(8px);
+}
+
+.login-orb {
+  position: absolute;
+  border-radius: 9999px;
+  filter: blur(20px);
+  opacity: 0.68;
+  animation: loginFloat 18s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.login-orb--one {
+  width: 240px;
+  height: 240px;
+  top: -70px;
+  left: -40px;
+  background: rgba(45, 212, 191, 0.34);
+}
+
+.login-orb--two {
+  width: 320px;
+  height: 320px;
+  top: 38%;
+  right: -120px;
+  background: rgba(125, 211, 252, 0.24);
+  animation-delay: -6s;
+}
+
+.login-orb--three {
+  width: 190px;
+  height: 190px;
+  bottom: -60px;
+  left: 30%;
+  background: rgba(110, 231, 183, 0.24);
+  animation-delay: -11s;
+}
+
+.login-reveal {
+  animation: loginReveal 520ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+@keyframes loginFloat {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(0, -18px, 0) scale(1.05);
+  }
+}
+
+@keyframes loginReveal {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }

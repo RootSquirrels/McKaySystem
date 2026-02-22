@@ -49,59 +49,124 @@ export default function LoginPage() {
   }
 
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-md items-center px-6">
-      <form className="w-full space-y-4 rounded border border-zinc-200 p-6" onSubmit={handleSubmit}>
-        <div>
-          <h1 className="text-2xl font-semibold">Sign in</h1>
-          <p className="text-sm text-zinc-600">Use your tenant/workspace credentials.</p>
-        </div>
-        <label className="block text-sm">
-          <span className="mb-1 block">Tenant ID</span>
-          <input
-            className="w-full rounded border border-zinc-300 px-3 py-2"
-            value={tenantId}
-            onChange={(event) => setTenantId(event.target.value)}
-            required
-          />
-        </label>
-        <label className="block text-sm">
-          <span className="mb-1 block">Workspace</span>
-          <input
-            className="w-full rounded border border-zinc-300 px-3 py-2"
-            value={workspace}
-            onChange={(event) => setWorkspace(event.target.value)}
-            required
-          />
-        </label>
-        <label className="block text-sm">
-          <span className="mb-1 block">Email</span>
-          <input
-            className="w-full rounded border border-zinc-300 px-3 py-2"
-            type="email"
-            value={email}
-            onChange={(event) => setEmail(event.target.value)}
-            required
-          />
-        </label>
-        <label className="block text-sm">
-          <span className="mb-1 block">Password</span>
-          <input
-            className="w-full rounded border border-zinc-300 px-3 py-2"
-            type="password"
-            value={password}
-            onChange={(event) => setPassword(event.target.value)}
-            required
-          />
-        </label>
-        {submitError ? <p className="text-sm text-red-600">{submitError}</p> : null}
-        <button
-          type="submit"
-          className="w-full rounded bg-zinc-900 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
-          disabled={isSubmitting || isLoading}
-        >
-          {isSubmitting ? "Signing in..." : "Sign in"}
-        </button>
-      </form>
+    <main className="login-shell relative overflow-hidden">
+      <div className="login-orb login-orb--one" />
+      <div className="login-orb login-orb--two" />
+      <div className="login-orb login-orb--three" />
+
+      <div className="relative z-10 mx-auto grid min-h-screen w-full max-w-6xl items-center gap-8 px-6 py-10 lg:grid-cols-[1.08fr_0.92fr]">
+        <section className="login-reveal text-white">
+          <p className="mb-3 inline-flex items-center rounded-full border border-cyan-300/35 bg-cyan-300/10 px-3 py-1 text-xs uppercase tracking-[0.24em] text-cyan-100">
+            FinOps Intelligence
+          </p>
+          <h1 className="max-w-xl text-4xl font-semibold leading-tight md:text-5xl">
+            SaaS-grade cloud cost governance, in real time.
+          </h1>
+          <p className="mt-4 max-w-lg text-sm text-cyan-100/85 md:text-base">
+            Detect waste, enforce policy, and execute remediations with deterministic,
+            tenant-safe operations.
+          </p>
+
+          <div className="mt-8 grid max-w-lg gap-3 sm:grid-cols-2">
+            <article className="rounded-lg border border-white/20 bg-white/8 p-3 backdrop-blur-sm">
+              <p className="text-xs uppercase tracking-[0.22em] text-cyan-100/90">Coverage</p>
+              <p className="mt-2 text-2xl font-semibold">100%</p>
+              <p className="mt-1 text-xs text-cyan-100/80">tenant/workspace scoped queries</p>
+            </article>
+            <article className="rounded-lg border border-white/20 bg-white/8 p-3 backdrop-blur-sm">
+              <p className="text-xs uppercase tracking-[0.22em] text-cyan-100/90">Determinism</p>
+              <p className="mt-2 text-2xl font-semibold">Stable</p>
+              <p className="mt-1 text-xs text-cyan-100/80">idempotent ingestion and actions</p>
+            </article>
+            <article className="rounded-lg border border-white/20 bg-white/8 p-3 backdrop-blur-sm sm:col-span-2">
+              <p className="text-xs uppercase tracking-[0.22em] text-cyan-100/90">Platform Signal</p>
+              <p className="mt-2 text-sm text-cyan-50/95">
+                Findings, recommendations, and remediation controls in one operational surface.
+              </p>
+            </article>
+          </div>
+        </section>
+
+        <form className="login-panel login-reveal w-full rounded-2xl p-7 md:p-8" onSubmit={handleSubmit}>
+          <div>
+            <h2 className="text-2xl font-semibold text-slate-900">Sign in</h2>
+            <p className="mt-1 text-sm text-slate-600">
+              Enter your tenant/workspace and account credentials.
+            </p>
+          </div>
+
+          <div className="mt-6 space-y-4">
+            <label className="block text-sm">
+              <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">
+                Tenant ID
+              </span>
+              <input
+                className="w-full rounded-md border border-slate-300 bg-white px-3 py-2.5 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
+                value={tenantId}
+                onChange={(event) => setTenantId(event.target.value)}
+                autoComplete="organization"
+                required
+              />
+            </label>
+            <label className="block text-sm">
+              <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">
+                Workspace
+              </span>
+              <input
+                className="w-full rounded-md border border-slate-300 bg-white px-3 py-2.5 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
+                value={workspace}
+                onChange={(event) => setWorkspace(event.target.value)}
+                autoComplete="off"
+                required
+              />
+            </label>
+            <label className="block text-sm">
+              <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">
+                Email
+              </span>
+              <input
+                className="w-full rounded-md border border-slate-300 bg-white px-3 py-2.5 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
+                type="email"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                autoComplete="username"
+                required
+              />
+            </label>
+            <label className="block text-sm">
+              <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">
+                Password
+              </span>
+              <input
+                className="w-full rounded-md border border-slate-300 bg-white px-3 py-2.5 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
+                type="password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                autoComplete="current-password"
+                required
+              />
+            </label>
+          </div>
+
+          {submitError ? (
+            <p className="mt-4 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">
+              {submitError}
+            </p>
+          ) : null}
+
+          <button
+            type="submit"
+            className="mt-5 w-full rounded-md bg-gradient-to-r from-cyan-500 to-sky-600 px-3 py-2.5 text-sm font-semibold text-white shadow-lg shadow-cyan-900/20 transition hover:brightness-105 disabled:opacity-50"
+            disabled={isSubmitting || isLoading}
+          >
+            {isSubmitting ? "Signing in..." : "Sign in"}
+          </button>
+
+          <p className="mt-3 text-xs text-slate-500">
+            Secure session cookie authentication with scoped tenant/workspace validation.
+          </p>
+        </form>
+      </div>
     </main>
   );
 }
