@@ -120,11 +120,9 @@ def graph_resource_key_from_payload(
         return None
 
     resolved_region = _first_non_empty_text(scope.get("region"), payload.get("region"), region) or ""
-    resource_arn = _first_non_empty_text(
+    primary_resource_arn = _first_non_empty_text(
         scope.get("resource_arn"),
         payload.get("resource_arn"),
-        dimensions.get("resource_arn"),
-        dimensions.get("load_balancer_arn"),
     )
     resource_id = _first_non_empty_text(
         scope.get("resource_id"),
@@ -146,11 +144,18 @@ def graph_resource_key_from_payload(
         dimensions.get("cluster_name"),
         dimensions.get("service_name"),
     )
-    native_id = resource_arn or resource_id
+    secondary_resource_arn = _first_non_empty_text(
+        dimensions.get("load_balancer_arn"),
+        dimensions.get("resource_arn"),
+    )
+    native_id = primary_resource_arn or resource_id or secondary_resource_arn
     if not native_id:
         return None
 
-    inferred_type, inferred_service = _infer_resource_kind(resource_id, resource_arn)
+    inferred_type, inferred_service = _infer_resource_kind(
+        resource_id,
+        primary_resource_arn or secondary_resource_arn,
+    )
     resolved_resource_type = _first_non_empty_text(
         scope.get("resource_type"),
         payload.get("resource_type"),

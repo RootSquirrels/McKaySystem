@@ -138,11 +138,9 @@ export function graphResourceKeyFromPayload(
   }
 
   const region = firstNonEmptyText(scope?.region, payload.region, fallback.region) ?? "";
-  const resourceArn = firstNonEmptyText(
+  const primaryResourceArn = firstNonEmptyText(
     scope?.resource_arn,
     payload.resource_arn,
-    dimensions?.resource_arn,
-    dimensions?.load_balancer_arn,
   );
   const resourceId = firstNonEmptyText(
     scope?.resource_id,
@@ -164,12 +162,16 @@ export function graphResourceKeyFromPayload(
     dimensions?.cluster_name,
     dimensions?.service_name,
   );
-  const nativeId = resourceArn ?? resourceId;
+  const secondaryResourceArn = firstNonEmptyText(
+    dimensions?.load_balancer_arn,
+    dimensions?.resource_arn,
+  );
+  const nativeId = primaryResourceArn ?? resourceId ?? secondaryResourceArn;
   if (!nativeId) {
     return null;
   }
 
-  const inferred = inferResourceKind(resourceId, resourceArn);
+  const inferred = inferResourceKind(resourceId, primaryResourceArn ?? secondaryResourceArn);
   const resourceType = normalizeResourceType(
     firstNonEmptyText(scope?.resource_type, payload.resource_type, inferred.resourceType),
   );
