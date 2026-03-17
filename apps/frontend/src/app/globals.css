@@ -3,6 +3,9 @@
 :root {
   --background: #ffffff;
   --foreground: #171717;
+  --font-geist-sans: "Aptos", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --font-geist-mono: "Cascadia Code", "Consolas", "SFMono-Regular", monospace;
+  --font-space-grotesk: "Bahnschrift", "Aptos Display", "Trebuchet MS", "Segoe UI", sans-serif;
   --login-bg-start: #061223;
   --login-bg-end: #0f3354;
   --login-accent: #2dd4bf;
