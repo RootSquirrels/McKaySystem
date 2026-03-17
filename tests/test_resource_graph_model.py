@@ -211,3 +211,45 @@ def test_build_graph_from_findings_normalizes_amazonec2_service_names() -> None:
     assert [item.resource_key for item in nodes] == [
         "aws:123456789012:eu-west-3:ec2:volume:vol-abcdef12"
     ]
+
+
+def test_build_graph_from_runner_records_uses_top_level_dimensions() -> None:
+    """Graph builder should derive relationships from runner-style records."""
+    findings = [
+        {
+            "title": "Stopped EC2 instance i-072b5b7b10c8debb1 has been stopped for 35 days",
+            "check_id": "aws.ec2.instances.stopped.long",
+            "severity": {"level": "low"},
+            "scope": {
+                "account_id": "288276694458",
+                "region": "eu-west-3",
+                "service": "ec2",
+                "resource_type": "instance",
+                "resource_id": "i-072b5b7b10c8debb1",
+                "resource_arn": "",
+            },
+            "dimensions": {
+                "subnet_id": "subnet-0123456789abcdef0",
+                "vpc_id": "vpc-0123456789abcdef0",
+                "security_group_ids": "sg-0123456789abcdef0",
+                "attached_volume_ids": "vol-0123456789abcdef0",
+            },
+        }
+    ]
+
+    nodes, edges = build_graph_from_findings(
+        findings,
+        tenant_id="acme",
+        workspace="prod",
+        run_id="run-5",
+    )
+
+    resource_keys = {item.resource_key for item in nodes}
+    edge_types = sorted(item.edge_type for item in edges)
+
+    assert "aws:288276694458:eu-west-3:ec2:instance:i-072b5b7b10c8debb1" in resource_keys
+    assert "aws:288276694458:eu-west-3:ec2:security_group:sg-0123456789abcdef0" in resource_keys
+    assert "aws:288276694458:eu-west-3:ec2:volume:vol-0123456789abcdef0" in resource_keys
+    assert "aws:288276694458:eu-west-3:vpc:subnet:subnet-0123456789abcdef0" in resource_keys
+    assert "aws:288276694458:eu-west-3:vpc:vpc:vpc-0123456789abcdef0" in resource_keys
+    assert edge_types == ["attached_to", "member_of", "member_of", "member_of", "secured_by"]

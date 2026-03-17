@@ -40,7 +40,12 @@ def build_graph_from_findings(
     for item in findings:
         scope = as_record(item.get("scope")) or {}
         payload = as_record(item.get("payload")) or {}
-        dimensions = as_record(payload.get("dimensions")) or {}
+        payload_dimensions = as_record(payload.get("dimensions")) or {}
+        top_level_dimensions = as_record(item.get("dimensions")) or {}
+        dimensions = {
+            **top_level_dimensions,
+            **payload_dimensions,
+        }
         issue_key = as_record(item.get("issue_key")) or {}
         account_id = non_empty_text(scope.get("account_id")) or non_empty_text(item.get("account_id")) or ""
         if not account_id:
