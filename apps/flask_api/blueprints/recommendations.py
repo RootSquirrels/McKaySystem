@@ -468,6 +468,7 @@ def _build_recommendation_item(row: dict[str, Any]) -> dict[str, Any]:
         "account_id": row.get("account_id"),
         "detected_at": row.get("detected_at"),
         "effective_state": row.get("effective_state"),
+        "payload": payload,
     }
 
 

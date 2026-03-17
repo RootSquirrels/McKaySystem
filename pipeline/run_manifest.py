@@ -50,6 +50,7 @@ class RunManifest:
     out_correlated: str | None = None
     out_enriched: str | None = None
     coverage_dir: str | None = None
+    graph_dir: str | None = None
     export_dir: str | None = None
 
     created_at: str = ""
@@ -77,6 +78,7 @@ class RunManifest:
             out_correlated=(str(payload.get("out_correlated") or "").strip() or None),
             out_enriched=(str(payload.get("out_enriched") or "").strip() or None),
             coverage_dir=(str(payload.get("coverage_dir") or "").strip() or None),
+            graph_dir=(str(payload.get("graph_dir") or "").strip() or None),
             export_dir=(str(payload.get("export_dir") or "").strip() or None),
             created_at=str(payload.get("created_at") or "").strip(),
         )

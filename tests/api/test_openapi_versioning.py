@@ -69,6 +69,96 @@ def test_versioned_findings_alias_works(monkeypatch) -> None:  # type: ignore[no
     assert body.get("total") == 0
 
 
+def test_versioned_finding_graph_context_alias_works(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """`/api/v1/findings/<fingerprint>/graph` should expose finding-linked graph context."""
+    _disable_runtime_guards(monkeypatch)
+
+    def _fake_fetch_one(
+        _conn: object, sql: str, params: Sequence[Any] | None = None
+    ) -> dict[str, Any] | None:
+        assert params is not None
+        if "FROM finding_current" in sql:
+            return {
+                "fingerprint": "fp-1",
+                "run_id": "run-1",
+                "service": "ec2",
+                "region": "eu-west-1",
+                "account_id": "123",
+                "payload": {
+                    "scope": {
+                        "account_id": "123",
+                        "region": "eu-west-1",
+                        "service": "ec2",
+                        "resource_type": "instance",
+                        "resource_id": "i-12345678",
+                    }
+                },
+            }
+        if "FROM resource_graph_nodes_current" in sql:
+            return {
+                "resource_key": "aws:123:eu-west-1:ec2:instance:i-12345678",
+                "provider": "aws",
+                "service": "ec2",
+                "resource_type": "instance",
+                "account_id": "123",
+                "region": "eu-west-1",
+                "resource_id": "i-12345678",
+                "resource_arn": None,
+                "resource_name": "batch-runner-1",
+                "parent_resource_key": None,
+                "state": "running",
+                "owner_hint": "finops",
+                "is_deleted": False,
+                "latest_run_id": "run-1",
+                "latest_run_ts": "2026-03-17T09:00:00Z",
+            }
+        return None
+
+    def _fake_fetch_all(
+        _conn: object, sql: str, params: Sequence[Any] | None = None
+    ) -> list[dict[str, Any]]:
+        assert params is not None
+        if "COUNT(*) AS count" in sql:
+            return [{"count": 1}]
+        return [
+            {
+                "edge_key": "edge-1",
+                "edge_type": "attached_to",
+                "direction": "incoming",
+                "directionality": "directed",
+                "confidence": "high",
+                "source_kind": "derived",
+                "edge_service": "ec2",
+                "edge_account_id": "123",
+                "edge_region": "eu-west-1",
+                "neighbor_resource_key": "aws:123:eu-west-1:ec2:volume:vol-12345678",
+                "neighbor_service": "ec2",
+                "neighbor_resource_type": "volume",
+                "neighbor_account_id": "123",
+                "neighbor_region": "eu-west-1",
+                "neighbor_resource_id": "vol-12345678",
+                "neighbor_resource_arn": None,
+                "neighbor_resource_name": "data-volume",
+                "neighbor_state": "available",
+                "neighbor_owner_hint": None,
+                "neighbor_is_deleted": False,
+            }
+        ]
+
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+    monkeypatch.setattr(flask_app, "fetch_all_dict_conn", _fake_fetch_all)
+
+    client = flask_app.app.test_client()
+    resp = client.get("/api/v1/findings/fp-1/graph?tenant_id=acme&workspace=prod")
+
+    assert resp.status_code == 200
+    body = resp.get_json() or {}
+    assert body.get("ok") is True
+    assert body.get("fingerprint") == "fp-1"
+    assert body.get("resource_key") == "aws:123:eu-west-1:ec2:instance:i-12345678"
+    assert body.get("total_neighbors") == 1
+
+
 def test_openapi_public_endpoint_contains_versioned_servers(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """OpenAPI spec should expose versioned + legacy API bases."""
     _disable_runtime_guards(monkeypatch)
@@ -349,6 +439,102 @@ def test_versioned_latest_run_coverage_alias_works(monkeypatch) -> None:  # type
     assert coverage.get("targets_total") == 10
     assert coverage.get("assessment_failed") == 2
     assert coverage.get("confidence") == "medium"
+
+
+def test_versioned_latest_run_graph_context_alias_works(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """`/api/v1/runs/latest/graph/context` should expose bounded resource graph context."""
+    _disable_runtime_guards(monkeypatch)
+
+    def _fake_fetch_one(
+        _conn: object, sql: str, params: Sequence[Any] | None = None
+    ) -> dict[str, Any] | None:
+        assert params is not None
+        if "FROM runs" in sql:
+            return {"run_id": "run-1", "run_ts": "2026-03-17T09:00:00Z"}
+        if "FROM resource_graph_nodes_current" in sql:
+            return {
+                "resource_key": "aws:123:eu-west-1:ec2:instance:i-12345678",
+                "provider": "aws",
+                "service": "ec2",
+                "resource_type": "instance",
+                "account_id": "123",
+                "region": "eu-west-1",
+                "resource_id": "i-12345678",
+                "resource_arn": None,
+                "resource_name": "batch-runner-1",
+                "parent_resource_key": None,
+                "state": "running",
+                "owner_hint": "finops",
+                "is_deleted": False,
+                "latest_run_id": "run-1",
+                "latest_run_ts": "2026-03-17T09:00:00Z",
+            }
+        return None
+
+    def _fake_fetch_all(
+        _conn: object, sql: str, params: Sequence[Any] | None = None
+    ) -> list[dict[str, Any]]:
+        assert params is not None
+        if "COUNT(*) AS count" in sql:
+            assert "resource_graph_edges_current" in sql
+            return [{"count": 1}]
+        assert "JOIN resource_graph_nodes_current" in sql
+        return [
+            {
+                "edge_key": "edge-1",
+                "edge_type": "attached_to",
+                "direction": "incoming",
+                "directionality": "directed",
+                "confidence": "high",
+                "source_kind": "derived",
+                "edge_service": "ec2",
+                "edge_account_id": "123",
+                "edge_region": "eu-west-1",
+                "neighbor_resource_key": "aws:123:eu-west-1:ec2:volume:vol-12345678",
+                "neighbor_service": "ec2",
+                "neighbor_resource_type": "volume",
+                "neighbor_account_id": "123",
+                "neighbor_region": "eu-west-1",
+                "neighbor_resource_id": "vol-12345678",
+                "neighbor_resource_arn": None,
+                "neighbor_resource_name": "data-volume",
+                "neighbor_state": "available",
+                "neighbor_owner_hint": None,
+                "neighbor_is_deleted": False,
+            }
+        ]
+
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+    monkeypatch.setattr(flask_app, "fetch_all_dict_conn", _fake_fetch_all)
+
+    client = flask_app.app.test_client()
+    resp = client.get(
+        "/api/v1/runs/latest/graph/context"
+        "?tenant_id=acme&workspace=prod"
+        "&resource_key=aws:123:eu-west-1:ec2:instance:i-12345678"
+    )
+
+    assert resp.status_code == 200
+    body = resp.get_json() or {}
+    assert body.get("ok") is True
+    assert body.get("total_neighbors") == 1
+    resource = body.get("resource") or {}
+    assert resource.get("resource_key") == "aws:123:eu-west-1:ec2:instance:i-12345678"
+    neighbors = body.get("neighbors") or []
+    assert len(neighbors) == 1
+    assert (neighbors[0].get("resource") or {}).get("resource_type") == "volume"
+
+
+def test_versioned_latest_run_graph_context_requires_resource_key(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Graph context endpoint should reject requests without a resource key."""
+    _disable_runtime_guards(monkeypatch)
+
+    client = flask_app.app.test_client()
+    resp = client.get("/api/v1/runs/latest/graph/context?tenant_id=acme&workspace=prod")
+
+    assert resp.status_code == 400
+    body = resp.get_json() or {}
+    assert body.get("error") == "bad_request"
 
 
 def test_versioned_latest_run_coverage_checkers_alias_works(monkeypatch) -> None:  # type: ignore[no-untyped-def]

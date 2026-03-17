@@ -11,6 +11,7 @@ from flask import Blueprint, request
 
 from apps.backend.db import db_conn, execute_conn, fetch_all_dict_conn, fetch_one_dict_conn
 from apps.flask_api.auth_middleware import require_permission
+from apps.flask_api.graph_context import graph_resource_key_from_payload, load_graph_context
 from apps.flask_api.utils import (
     _MISSING,
     _coerce_optional_text,
@@ -35,6 +36,14 @@ def _add_any_filter(where: list[str], params: list[Any], field: str, values: lis
         return
     where.append(f"{field} = ANY(%s)")
     params.append(values)
+
+
+def _graph_neighbor_limit() -> int:
+    """Parse the bounded neighbor limit used by graph context endpoints."""
+    raw = _q("neighbor_limit")
+    if raw in (None, ""):
+        return 25
+    return min(_coerce_positive_int(raw, field_name="neighbor_limit"), 100)
 
 
 def _audit_log_event(
@@ -444,6 +453,85 @@ def api_findings() -> Any:
                 "offset": offset,
                 "total": int((count_row or {}).get("n") or 0),
                 "items": rows,
+            }
+        )
+    except ValueError as exc:
+        return _err("bad_request", str(exc), status=400)
+
+
+@findings_bp.route("/api/findings/<fingerprint>/graph", methods=["GET"])
+@require_permission("findings:read")
+def api_finding_graph_context(fingerprint: str) -> Any:
+    """Get bounded graph context for one finding fingerprint."""
+    try:
+        tenant_id, workspace = _require_scope_from_query()
+        neighbor_limit = _graph_neighbor_limit()
+
+        with db_conn() as conn:
+            finding = fetch_one_dict_conn(
+                conn,
+                """
+                SELECT fingerprint, run_id, service, region, account_id, payload
+                FROM finding_current
+                WHERE tenant_id = %s AND workspace = %s AND fingerprint = %s
+                """,
+                (tenant_id, workspace, fingerprint),
+            )
+            if not finding:
+                return _ok(
+                    {
+                        "tenant_id": tenant_id,
+                        "workspace": workspace,
+                        "fingerprint": fingerprint,
+                        "run_id": None,
+                        "resource_key": None,
+                        "resource": None,
+                        "neighbors": [],
+                        "total_neighbors": 0,
+                        "neighbor_limit": neighbor_limit,
+                    }
+                )
+
+            resource_key = graph_resource_key_from_payload(
+                finding.get("payload"),
+                account_id=str(finding.get("account_id") or "").strip() or None,
+                region=str(finding.get("region") or "").strip() or None,
+                service=str(finding.get("service") or "").strip() or None,
+            )
+            if not resource_key:
+                return _ok(
+                    {
+                        "tenant_id": tenant_id,
+                        "workspace": workspace,
+                        "fingerprint": fingerprint,
+                        "run_id": finding.get("run_id"),
+                        "resource_key": None,
+                        "resource": None,
+                        "neighbors": [],
+                        "total_neighbors": 0,
+                        "neighbor_limit": neighbor_limit,
+                    }
+                )
+
+            resource, neighbors, total_neighbors = load_graph_context(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                resource_key=resource_key,
+                neighbor_limit=neighbor_limit,
+            )
+
+        return _ok(
+            {
+                "tenant_id": tenant_id,
+                "workspace": workspace,
+                "fingerprint": fingerprint,
+                "run_id": finding.get("run_id"),
+                "resource_key": resource_key,
+                "resource": resource,
+                "neighbors": neighbors,
+                "total_neighbors": total_neighbors,
+                "neighbor_limit": neighbor_limit,
             }
         )
     except ValueError as exc:

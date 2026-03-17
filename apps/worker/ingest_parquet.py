@@ -23,6 +23,7 @@ import pyarrow.dataset as ds
 
 from apps.backend.db import db_conn, execute, execute_many, fetch_one
 from apps.worker.coverage_model import CoverageIssue, CoverageResult, load_coverage_bundle
+from apps.worker.resource_graph_model import ResourceGraphEdge, ResourceGraphNode, load_graph_bundle
 from apps.backend.run_state import (
     STATE_READY,
     acquire_run_lock,
@@ -340,6 +341,8 @@ class IngestStats:
     latest_rows: int
     coverage_rows: int = 0
     coverage_issue_rows: int = 0
+    graph_node_rows: int = 0
+    graph_edge_rows: int = 0
 
 
 @dataclass(frozen=True)
@@ -609,6 +612,14 @@ def _load_run_coverage(manifest: Any) -> tuple[list[CoverageResult], list[Covera
     return load_coverage_bundle(coverage_dir)
 
 
+def _load_run_graph(manifest: Any) -> tuple[list[ResourceGraphNode], list[ResourceGraphEdge]]:
+    """Load graph artifacts when available for the manifest."""
+    graph_dir = str(getattr(manifest, "graph_dir", "") or "").strip()
+    if not graph_dir:
+        return [], []
+    return load_graph_bundle(graph_dir)
+
+
 def _coverage_summary(results: Sequence[CoverageResult]) -> CoverageSummary:
     """Compute deterministic summary counters from coverage rows."""
     targets_total = len(results)
@@ -708,6 +719,353 @@ def _coverage_issue_rows(
         )
         for item in issues
     ]
+
+
+def _graph_node_rows(
+    nodes: Sequence[ResourceGraphNode],
+) -> list[tuple[Any, ...]]:
+    """Convert graph nodes to DB insert rows."""
+    return [
+        (
+            item.tenant_id,
+            item.workspace,
+            item.run_id,
+            item.resource_key,
+            item.provider,
+            item.service,
+            item.resource_type,
+            item.account_id,
+            item.region,
+            item.resource_id,
+            item.resource_arn,
+            item.resource_name,
+            item.parent_resource_key,
+            item.state,
+            json.dumps(item.tags_json or {}, ensure_ascii=False, default=_json_default),
+            json.dumps(item.attributes_json or {}, ensure_ascii=False, default=_json_default),
+            item.owner_hint,
+            item.is_deleted,
+            item.first_seen_in_run,
+        )
+        for item in nodes
+    ]
+
+
+def _graph_edge_rows(
+    edges: Sequence[ResourceGraphEdge],
+) -> list[tuple[Any, ...]]:
+    """Convert graph edges to DB insert rows."""
+    return [
+        (
+            item.tenant_id,
+            item.workspace,
+            item.run_id,
+            item.edge_key,
+            item.from_resource_key,
+            item.to_resource_key,
+            item.edge_type,
+            item.service,
+            item.account_id,
+            item.region,
+            item.directionality,
+            item.confidence,
+            item.source_kind,
+            json.dumps(item.attributes_json or {}, ensure_ascii=False, default=_json_default),
+        )
+        for item in edges
+    ]
+
+
+def _graph_node_current_row(
+    row: Sequence[Any],
+    *,
+    latest_run_id: str,
+    latest_run_ts: datetime,
+) -> tuple[Any, ...]:
+    """Convert one run-scoped node row to the current-table shape."""
+    return (
+        row[0],
+        row[1],
+        row[3],
+        row[4],
+        row[5],
+        row[6],
+        row[7],
+        row[8],
+        row[9],
+        row[10],
+        row[11],
+        row[12],
+        row[13],
+        row[14],
+        row[15],
+        row[16],
+        row[17],
+        latest_run_id,
+        latest_run_ts,
+    )
+
+
+def _graph_edge_current_row(
+    row: Sequence[Any],
+    *,
+    latest_run_id: str,
+    latest_run_ts: datetime,
+) -> tuple[Any, ...]:
+    """Convert one run-scoped edge row to the current-table shape."""
+    return (
+        row[0],
+        row[1],
+        row[3],
+        row[4],
+        row[5],
+        row[6],
+        row[7],
+        row[8],
+        row[9],
+        row[10],
+        row[11],
+        row[12],
+        row[13],
+        latest_run_id,
+        latest_run_ts,
+    )
+
+
+def _persist_graph_with_api(
+    api: DbApi,
+    *,
+    manifest: Any,
+    nodes: Sequence[ResourceGraphNode],
+    edges: Sequence[ResourceGraphEdge],
+) -> None:
+    """Persist graph nodes and edges using the DbApi abstraction."""
+    api.execute(
+        "DELETE FROM resource_graph_edges_run WHERE tenant_id=%s AND workspace=%s AND run_id=%s",
+        (manifest.tenant_id, manifest.workspace, manifest.run_id),
+    )
+    api.execute(
+        "DELETE FROM resource_graph_nodes_run WHERE tenant_id=%s AND workspace=%s AND run_id=%s",
+        (manifest.tenant_id, manifest.workspace, manifest.run_id),
+    )
+    node_rows = _graph_node_rows(nodes)
+    if node_rows:
+        api.execute_many(
+            """
+            INSERT INTO resource_graph_nodes_run
+              (tenant_id, workspace, run_id, resource_key, provider, service, resource_type,
+               account_id, region, resource_id, resource_arn, resource_name, parent_resource_key,
+               state, tags_json, attributes_json, owner_hint, is_deleted, first_seen_in_run)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            node_rows,
+        )
+    edge_rows = _graph_edge_rows(edges)
+    if edge_rows:
+        api.execute_many(
+            """
+            INSERT INTO resource_graph_edges_run
+              (tenant_id, workspace, run_id, edge_key, from_resource_key, to_resource_key,
+               edge_type, service, account_id, region, directionality, confidence,
+               source_kind, attributes_json)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            edge_rows,
+        )
+
+    run_ts = _manifest_run_ts(manifest.run_ts)
+    api.execute(
+        "DELETE FROM resource_graph_nodes_current WHERE tenant_id=%s AND workspace=%s AND latest_run_id=%s",
+        (manifest.tenant_id, manifest.workspace, manifest.run_id),
+    )
+    api.execute(
+        "DELETE FROM resource_graph_edges_current WHERE tenant_id=%s AND workspace=%s AND latest_run_id=%s",
+        (manifest.tenant_id, manifest.workspace, manifest.run_id),
+    )
+    for row in node_rows:
+        current_row = _graph_node_current_row(
+            row,
+            latest_run_id=manifest.run_id,
+            latest_run_ts=run_ts,
+        )
+        api.execute(
+            """
+            INSERT INTO resource_graph_nodes_current
+              (tenant_id, workspace, resource_key, provider, service, resource_type, account_id,
+               region, resource_id, resource_arn, resource_name, parent_resource_key, state,
+               tags_json, attributes_json, owner_hint, is_deleted, latest_run_id, latest_run_ts)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (tenant_id, workspace, resource_key) DO UPDATE SET
+              provider=EXCLUDED.provider,
+              service=EXCLUDED.service,
+              resource_type=EXCLUDED.resource_type,
+              account_id=EXCLUDED.account_id,
+              region=EXCLUDED.region,
+              resource_id=EXCLUDED.resource_id,
+              resource_arn=EXCLUDED.resource_arn,
+              resource_name=EXCLUDED.resource_name,
+              parent_resource_key=EXCLUDED.parent_resource_key,
+              state=EXCLUDED.state,
+              tags_json=EXCLUDED.tags_json,
+              attributes_json=EXCLUDED.attributes_json,
+              owner_hint=EXCLUDED.owner_hint,
+              is_deleted=EXCLUDED.is_deleted,
+              latest_run_id=EXCLUDED.latest_run_id,
+              latest_run_ts=EXCLUDED.latest_run_ts
+            WHERE resource_graph_nodes_current.latest_run_ts <= EXCLUDED.latest_run_ts
+            """,
+            current_row,
+        )
+    for row in edge_rows:
+        current_row = _graph_edge_current_row(
+            row,
+            latest_run_id=manifest.run_id,
+            latest_run_ts=run_ts,
+        )
+        api.execute(
+            """
+            INSERT INTO resource_graph_edges_current
+              (tenant_id, workspace, edge_key, from_resource_key, to_resource_key, edge_type,
+               service, account_id, region, directionality, confidence, source_kind,
+               attributes_json, latest_run_id, latest_run_ts)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (tenant_id, workspace, edge_key) DO UPDATE SET
+              from_resource_key=EXCLUDED.from_resource_key,
+              to_resource_key=EXCLUDED.to_resource_key,
+              edge_type=EXCLUDED.edge_type,
+              service=EXCLUDED.service,
+              account_id=EXCLUDED.account_id,
+              region=EXCLUDED.region,
+              directionality=EXCLUDED.directionality,
+              confidence=EXCLUDED.confidence,
+              source_kind=EXCLUDED.source_kind,
+              attributes_json=EXCLUDED.attributes_json,
+              latest_run_id=EXCLUDED.latest_run_id,
+              latest_run_ts=EXCLUDED.latest_run_ts
+            WHERE resource_graph_edges_current.latest_run_ts <= EXCLUDED.latest_run_ts
+            """,
+            current_row,
+        )
+
+
+def _persist_graph_with_cursor(
+    cur: Any,
+    *,
+    manifest: Any,
+    nodes: Sequence[ResourceGraphNode],
+    edges: Sequence[ResourceGraphEdge],
+) -> None:
+    """Persist graph nodes and edges inside an existing transaction."""
+    cur.execute(
+        "DELETE FROM resource_graph_edges_run WHERE tenant_id=%s AND workspace=%s AND run_id=%s",
+        (manifest.tenant_id, manifest.workspace, manifest.run_id),
+    )
+    cur.execute(
+        "DELETE FROM resource_graph_nodes_run WHERE tenant_id=%s AND workspace=%s AND run_id=%s",
+        (manifest.tenant_id, manifest.workspace, manifest.run_id),
+    )
+
+    node_rows = _graph_node_rows(nodes)
+    if node_rows:
+        cur.executemany(
+            """
+            INSERT INTO resource_graph_nodes_run
+              (tenant_id, workspace, run_id, resource_key, provider, service, resource_type,
+               account_id, region, resource_id, resource_arn, resource_name, parent_resource_key,
+               state, tags_json, attributes_json, owner_hint, is_deleted, first_seen_in_run)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            node_rows,
+        )
+
+    edge_rows = _graph_edge_rows(edges)
+    if edge_rows:
+        cur.executemany(
+            """
+            INSERT INTO resource_graph_edges_run
+              (tenant_id, workspace, run_id, edge_key, from_resource_key, to_resource_key,
+               edge_type, service, account_id, region, directionality, confidence,
+               source_kind, attributes_json)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            edge_rows,
+        )
+
+    run_ts = _manifest_run_ts(manifest.run_ts)
+    cur.execute(
+        "DELETE FROM resource_graph_nodes_current WHERE tenant_id=%s AND workspace=%s AND latest_run_id=%s",
+        (manifest.tenant_id, manifest.workspace, manifest.run_id),
+    )
+    cur.execute(
+        "DELETE FROM resource_graph_edges_current WHERE tenant_id=%s AND workspace=%s AND latest_run_id=%s",
+        (manifest.tenant_id, manifest.workspace, manifest.run_id),
+    )
+
+    for row in node_rows:
+        current_row = _graph_node_current_row(
+            row,
+            latest_run_id=manifest.run_id,
+            latest_run_ts=run_ts,
+        )
+        cur.execute(
+            """
+            INSERT INTO resource_graph_nodes_current
+              (tenant_id, workspace, resource_key, provider, service, resource_type, account_id,
+               region, resource_id, resource_arn, resource_name, parent_resource_key, state,
+               tags_json, attributes_json, owner_hint, is_deleted, latest_run_id, latest_run_ts)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (tenant_id, workspace, resource_key) DO UPDATE SET
+              provider=EXCLUDED.provider,
+              service=EXCLUDED.service,
+              resource_type=EXCLUDED.resource_type,
+              account_id=EXCLUDED.account_id,
+              region=EXCLUDED.region,
+              resource_id=EXCLUDED.resource_id,
+              resource_arn=EXCLUDED.resource_arn,
+              resource_name=EXCLUDED.resource_name,
+              parent_resource_key=EXCLUDED.parent_resource_key,
+              state=EXCLUDED.state,
+              tags_json=EXCLUDED.tags_json,
+              attributes_json=EXCLUDED.attributes_json,
+              owner_hint=EXCLUDED.owner_hint,
+              is_deleted=EXCLUDED.is_deleted,
+              latest_run_id=EXCLUDED.latest_run_id,
+              latest_run_ts=EXCLUDED.latest_run_ts
+            WHERE resource_graph_nodes_current.latest_run_ts <= EXCLUDED.latest_run_ts
+            """,
+            current_row,
+        )
+
+    for row in edge_rows:
+        current_row = _graph_edge_current_row(
+            row,
+            latest_run_id=manifest.run_id,
+            latest_run_ts=run_ts,
+        )
+        cur.execute(
+            """
+            INSERT INTO resource_graph_edges_current
+              (tenant_id, workspace, edge_key, from_resource_key, to_resource_key, edge_type,
+               service, account_id, region, directionality, confidence, source_kind,
+               attributes_json, latest_run_id, latest_run_ts)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (tenant_id, workspace, edge_key) DO UPDATE SET
+              from_resource_key=EXCLUDED.from_resource_key,
+              to_resource_key=EXCLUDED.to_resource_key,
+              edge_type=EXCLUDED.edge_type,
+              service=EXCLUDED.service,
+              account_id=EXCLUDED.account_id,
+              region=EXCLUDED.region,
+              directionality=EXCLUDED.directionality,
+              confidence=EXCLUDED.confidence,
+              source_kind=EXCLUDED.source_kind,
+              attributes_json=EXCLUDED.attributes_json,
+              latest_run_id=EXCLUDED.latest_run_id,
+              latest_run_ts=EXCLUDED.latest_run_ts
+            WHERE resource_graph_edges_current.latest_run_ts <= EXCLUDED.latest_run_ts
+            """,
+            current_row,
+        )
 
 
 def _persist_coverage_with_api(
@@ -963,6 +1321,7 @@ def ingest_from_manifest(
 
     manifest = load_manifest(manifest_path)
     coverage_results, coverage_issues = _load_run_coverage(manifest)
+    graph_nodes, graph_edges = _load_run_graph(manifest)
     expected_schema = int(SCHEMA_VERSION)
     if manifest.schema_version is not None:
         try:
@@ -1030,6 +1389,10 @@ def ingest_from_manifest(
             enriched_present=enriched_present,
             presence_rows=0,
             latest_rows=0,
+            coverage_rows=len(coverage_results),
+            coverage_issue_rows=len(coverage_issues),
+            graph_node_rows=len(graph_nodes),
+            graph_edge_rows=len(graph_edges),
         )
 
     try:
@@ -1040,6 +1403,12 @@ def ingest_from_manifest(
             run_id=manifest.run_id,
             results=coverage_results,
             issues=coverage_issues,
+        )
+        _persist_graph_with_api(
+            api,
+            manifest=manifest,
+            nodes=graph_nodes,
+            edges=graph_edges,
         )
         api.execute(
             """
@@ -1317,6 +1686,8 @@ def ingest_from_manifest(
         latest_rows=total_latest,
         coverage_rows=len(coverage_results),
         coverage_issue_rows=len(coverage_issues),
+        graph_node_rows=len(graph_nodes),
+        graph_edge_rows=len(graph_edges),
     )
 
 
@@ -1335,6 +1706,7 @@ def _ingest_with_copy(
     """Ingest using COPY into temp tables for scale."""
     run_ts = _manifest_run_ts(manifest.run_ts)
     coverage_results, coverage_issues = _load_run_coverage(manifest)
+    graph_nodes, graph_edges = _load_run_graph(manifest)
 
     parquet_files = _list_parquet_files_for_paths(dataset_paths)
     if not parquet_files:
@@ -1465,6 +1837,10 @@ def _ingest_with_copy(
                     enriched_present=enriched_present,
                     presence_rows=0,
                     latest_rows=0,
+                    coverage_rows=len(coverage_results),
+                    coverage_issue_rows=len(coverage_issues),
+                    graph_node_rows=len(graph_nodes),
+                    graph_edge_rows=len(graph_edges),
                 )
 
             with conn.cursor() as cur:
@@ -1631,6 +2007,12 @@ def _ingest_with_copy(
                     results=coverage_results,
                     issues=coverage_issues,
                 )
+                _persist_graph_with_cursor(
+                    cur,
+                    manifest=manifest,
+                    nodes=graph_nodes,
+                    edges=graph_edges,
+                )
                 _assert_post_ingest_invariants_with_cursor(
                     cur,
                     tenant_id=manifest.tenant_id,
@@ -1771,6 +2153,8 @@ def _ingest_with_copy(
         latest_rows=total_latest,
         coverage_rows=len(coverage_results),
         coverage_issue_rows=len(coverage_issues),
+        graph_node_rows=len(graph_nodes),
+        graph_edge_rows=len(graph_edges),
     )
 
 

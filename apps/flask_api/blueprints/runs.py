@@ -10,6 +10,7 @@ from flask import Blueprint, jsonify
 
 from apps.backend.db import db_conn, fetch_all_dict_conn, fetch_one_dict_conn
 from apps.flask_api.auth_middleware import require_permission
+from apps.flask_api.graph_context import load_graph_context
 from apps.flask_api.utils import (
     _coerce_non_negative_int,
     _coerce_optional_text,
@@ -66,6 +67,19 @@ def _coverage_history_filters() -> dict[str, Any]:
         "date_from": _parse_iso8601_dt(_q("date_from"), field_name="date_from"),
         "date_to": _parse_iso8601_dt(_q("date_to"), field_name="date_to"),
         "limit": limit,
+    }
+
+
+def _graph_query_filters() -> dict[str, Any]:
+    """Parse supported graph context query filters from request args."""
+    limit_raw = _q("neighbor_limit")
+    neighbor_limit = 25 if limit_raw in (None, "") else _coerce_positive_int(
+        limit_raw,
+        field_name="neighbor_limit",
+    )
+    return {
+        "resource_key": _coerce_optional_text(_q("resource_key")),
+        "neighbor_limit": min(neighbor_limit, 100),
     }
 
 
@@ -213,6 +227,62 @@ def api_runs_latest_coverage() -> Any:
         return _json({"error": "bad_request", "message": str(exc)}, status=400)
 
 
+@runs_bp.route("/api/runs/latest/graph/context", methods=["GET"])
+@require_permission("runs:read")
+def api_runs_latest_graph_context() -> Any:
+    """Get bounded graph context for one resource from the latest graph snapshot."""
+    try:
+        tenant_id, workspace = _require_scope_from_query()
+        filters = _graph_query_filters()
+        resource_key = filters["resource_key"]
+        if not resource_key:
+            return _json(
+                {
+                    "error": "bad_request",
+                    "message": "resource_key is required",
+                },
+                status=400,
+            )
+
+        with db_conn() as conn:
+            latest_run = _latest_run_ref(conn, tenant_id, workspace)
+            resource, neighbors, total_neighbors = load_graph_context(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                resource_key=resource_key,
+                neighbor_limit=filters["neighbor_limit"],
+            )
+            if not resource:
+                return _json(
+                    {
+                        "ok": True,
+                        "tenant_id": tenant_id,
+                        "workspace": workspace,
+                        "run": latest_run,
+                        "resource": None,
+                        "neighbors": neighbors,
+                        "total_neighbors": total_neighbors,
+                        "neighbor_limit": filters["neighbor_limit"],
+                    }
+                )
+
+        return _json(
+            {
+                "ok": True,
+                "tenant_id": tenant_id,
+                "workspace": workspace,
+                "run": latest_run,
+                "resource": resource,
+                "neighbors": neighbors,
+                "total_neighbors": total_neighbors,
+                "neighbor_limit": filters["neighbor_limit"],
+            }
+        )
+    except ValueError as exc:
+        return _json({"error": "bad_request", "message": str(exc)}, status=400)
+
+
 @runs_bp.route("/api/runs/latest/coverage/checkers", methods=["GET"])
 @require_permission("runs:read")
 def api_runs_latest_coverage_checkers() -> Any:
@@ -245,11 +315,12 @@ def api_runs_latest_coverage_checkers() -> Any:
             _append_filter(where, params, column_sql="checker_id", value=filters["checker_id"])
             where_sql = " AND ".join(where)
 
-            total_row = fetch_one_dict_conn(
+            total_rows = fetch_all_dict_conn(
                 conn,
                 f"SELECT COUNT(*) AS count FROM run_checker_coverage WHERE {where_sql}",
                 tuple(params),
-            ) or {"count": 0}
+            )
+            total_row = total_rows[0] if total_rows else {"count": 0}
 
             rows_params = [*params, filters["limit"], filters["offset"]]
             rows = fetch_all_dict_conn(
@@ -365,11 +436,12 @@ def api_runs_latest_coverage_issues() -> Any:
             _append_filter(where, params, column_sql="issue_type", value=filters["issue_type"])
             where_sql = " AND ".join(where)
 
-            total_row = fetch_one_dict_conn(
+            total_rows = fetch_all_dict_conn(
                 conn,
                 f"SELECT COUNT(*) AS count FROM run_coverage_issues WHERE {where_sql}",
                 tuple(params),
-            ) or {"count": 0}
+            )
+            total_row = total_rows[0] if total_rows else {"count": 0}
 
             rows_params = [*params, filters["limit"], filters["offset"]]
             rows = fetch_all_dict_conn(

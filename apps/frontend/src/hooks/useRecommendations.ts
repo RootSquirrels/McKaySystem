@@ -35,6 +35,7 @@ export interface RecommendationItem {
   account_id: string | null;
   detected_at: string | null;
   effective_state: string;
+  payload: Record<string, unknown> | null;
 }
 
 export interface RecommendationsResponse {

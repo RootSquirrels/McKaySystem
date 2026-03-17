@@ -64,6 +64,7 @@ from infra.config import get_settings
 from infra.logging_config import setup_logging
 from infra.pipeline_paths import PipelinePaths
 from apps.worker.coverage_model import CoverageIssue, CoverageResult, write_coverage_bundle
+from apps.worker.resource_graph_model import build_graph_from_findings, write_graph_bundle
 from pipeline.run_manifest import RunManifest, write_manifest
 from pipeline.writer_parquet import FindingsParquetWriter, ParquetWriterConfig
 from version import ENGINE_NAME, ENGINE_VERSION, RULEPACK_VERSION, SCHEMA_VERSION
@@ -600,6 +601,7 @@ def main(argv: Sequence[str]) -> int:
     checker_failures: list[str] = []
     coverage_results: dict[tuple[str, str, str, str], CoverageResult] = {}
     coverage_issues: list[CoverageIssue] = []
+    graph_wire_records: list[dict[str, Any]] = []
 
     for spec in checker_specs:
         meta = coverage_meta[spec]
@@ -643,6 +645,7 @@ def main(argv: Sequence[str]) -> int:
         try:
             result = runner.run_one(checker, ctx_control)
             writer.extend(result.valid_findings)
+            graph_wire_records.extend(dict(item) for item in result.valid_findings)
             valid_count = len(result.valid_findings)
             total_valid += valid_count
             total_invalid_count += int(result.invalid_findings)
@@ -734,6 +737,7 @@ def main(argv: Sequence[str]) -> int:
             try:
                 result = runner.run_one(checker, ctx_region)
                 writer.extend(result.valid_findings)
+                graph_wire_records.extend(dict(item) for item in result.valid_findings)
                 valid_count = len(result.valid_findings)
                 region_valid_total += valid_count
                 total_valid += valid_count
@@ -932,6 +936,17 @@ def main(argv: Sequence[str]) -> int:
                 ),
             ),
         )
+        graph_nodes, graph_edges = build_graph_from_findings(
+            graph_wire_records,
+            tenant_id=args.tenant,
+            workspace=args.workspace,
+            run_id=run_id,
+        )
+        graph_out_dir = write_graph_bundle(
+            raw_out_dir,
+            nodes=graph_nodes,
+            edges=graph_edges,
+        )
         manifest = RunManifest(
             tenant_id=args.tenant,
             workspace=args.workspace,
@@ -947,6 +962,7 @@ def main(argv: Sequence[str]) -> int:
             out_correlated=str(corr_out_dir),
             out_enriched=str(enriched_out_dir),
             coverage_dir=str(coverage_out_dir),
+            graph_dir=str(graph_out_dir),
             export_dir=str(paths.export_dir()),
         )
         mp = write_manifest(raw_out_dir, manifest)

@@ -5,6 +5,7 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 
 import { useAuth } from "@/hooks/useAuth";
 import { RunCoverageBanner } from "@/components/coverage/RunCoverageBanner";
+import { ResourceGraphContextPanel } from "@/components/graph/ResourceGraphContextPanel";
 import { useFindingLifecycle } from "@/hooks/useFindingLifecycle";
 import {
   FindingItem,
@@ -826,6 +827,15 @@ export function FindingsClientPage() {
                 {findingAdvice(selectedFinding.payload) ?? "-"}
               </p>
             </section>
+
+            <ResourceGraphContextPanel
+              findingFingerprint={selectedFinding.fingerprint}
+              payload={selectedFinding.payload}
+              accountId={selectedFinding.account_id}
+              region={selectedFinding.region}
+              service={selectedFinding.service}
+              enabled={canReadRuns}
+            />
 
             <section className="mt-5 rounded-xl border border-slate-200 bg-slate-50 p-3">
               <h3 className="text-sm font-semibold text-slate-900">Lifecycle Actions</h3>

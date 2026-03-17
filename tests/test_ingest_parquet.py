@@ -14,6 +14,7 @@ import pytest
 from apps.backend import db_migrate
 from apps.backend.db import db_conn
 from apps.worker.coverage_model import CoverageIssue, CoverageResult, write_coverage_bundle
+from apps.worker.resource_graph_model import ResourceGraphEdge, ResourceGraphNode, write_graph_bundle
 from apps.worker import ingest_parquet
 from apps.worker.ingest_parquet import DbApi, ingest_from_manifest
 from contracts.finops_contracts import build_ids_and_validate
@@ -513,6 +514,87 @@ def test_ingest_parquet_persists_coverage_summary(tmp_path: Path) -> None:
     params_list = list(params or ())
     assert 100.0 in params_list
     assert "healthy" in params_list
+
+
+def test_ingest_parquet_persists_graph_rows(tmp_path: Path) -> None:
+    """Ingest should persist graph rows from the manifest graph bundle."""
+    base_dir = tmp_path / "finops_findings"
+    wire = build_ids_and_validate(_wire_record(), issue_key={"policy": "graph-meta"})
+
+    writer = FindingsParquetWriter(
+        ParquetWriterConfig(
+            base_dir=str(base_dir),
+            drop_invalid_on_cast=False,
+            max_rows_per_file=10,
+            max_buffered_rows=10,
+        )
+    )
+    writer.extend([wire])
+    writer.close()
+
+    graph_dir = write_graph_bundle(
+        base_dir,
+        nodes=[
+            ResourceGraphNode(
+                tenant_id="acme",
+                workspace="prod",
+                run_id="run-1",
+                resource_key="aws:123:eu-west-3:s3:bucket:my-bucket",
+                provider="aws",
+                service="s3",
+                resource_type="bucket",
+                account_id="123",
+                region="eu-west-3",
+                resource_id="my-bucket",
+                resource_name="my-bucket",
+                first_seen_in_run="run-1",
+            )
+        ],
+        edges=[
+            ResourceGraphEdge(
+                tenant_id="acme",
+                workspace="prod",
+                run_id="run-1",
+                edge_key="edge-1",
+                from_resource_key="aws:123:eu-west-3:s3:bucket:my-bucket",
+                to_resource_key="aws:123:eu-west-3:vpc:vpc:vpc-12345678",
+                edge_type="member_of",
+                service="s3",
+                account_id="123",
+                region="eu-west-3",
+                source_kind="derived",
+            )
+        ],
+    )
+
+    manifest = RunManifest(
+        tenant_id="acme",
+        workspace="prod",
+        run_id="run-1",
+        run_ts=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        engine_name="finopsanalyzer",
+        engine_version="0.1.0",
+        rulepack_version="0.1.0",
+        schema_version=1,
+        out_raw=str(base_dir),
+        graph_dir=str(graph_dir),
+    )
+    manifest_path = write_manifest(base_dir, manifest)
+
+    fake = _FakeDb()
+    stats = ingest_from_manifest(
+        manifest_path,
+        db_api=DbApi(execute=fake.execute, execute_many=fake.execute_many, fetch_one=fake.fetch_one),
+        batch_size=1,
+        parquet_batch_size=1,
+    )
+
+    assert stats.graph_node_rows == 1
+    assert stats.graph_edge_rows == 1
+    assert any("resource_graph_nodes_run" in sql for sql, _ in fake.execute_many_calls)
+    assert any("resource_graph_edges_run" in sql for sql, _ in fake.execute_many_calls)
+    assert any("resource_graph_nodes_current" in sql for sql, _ in fake.executes)
+    assert any("resource_graph_edges_current" in sql for sql, _ in fake.executes)
 
 
 def test_ingest_parquet_rejects_invalid_manifest_run_ts(tmp_path: Path) -> None:

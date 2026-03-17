@@ -4,6 +4,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 
 import { RunCoverageBanner } from "@/components/coverage/RunCoverageBanner";
+import { ResourceGraphContextPanel } from "@/components/graph/ResourceGraphContextPanel";
 import { useAuth } from "@/hooks/useAuth";
 import { useRunCoverageLatest } from "@/hooks/useRunCoverageLatest";
 import { RecommendationItem, useRecommendations } from "@/hooks/useRecommendations";
@@ -645,6 +646,14 @@ export function RecommendationsClientPage() {
                 {selectedRecommendation.checker_advice || "-"}
               </p>
             </section>
+
+            <ResourceGraphContextPanel
+              payload={selectedRecommendation.payload}
+              accountId={selectedRecommendation.account_id}
+              region={selectedRecommendation.region}
+              service={selectedRecommendation.service}
+              enabled={canReadRuns}
+            />
 
             <section className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
               <h3 className="text-sm font-semibold text-slate-900">Normalized Action Plan</h3>
