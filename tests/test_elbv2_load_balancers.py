@@ -137,6 +137,8 @@ def test_no_listeners_emits(monkeypatch: pytest.MonkeyPatch) -> None:
         "LoadBalancerName": "test",
         "Type": "application",
         "Scheme": "internet-facing",
+        "VpcId": "vpc-123",
+        "AvailabilityZones": [{"SubnetId": "subnet-a"}, {"SubnetId": "subnet-b"}],
         "CreatedTime": now - timedelta(days=10),
     }
 
@@ -156,6 +158,9 @@ def test_no_listeners_emits(monkeypatch: pytest.MonkeyPatch) -> None:
     hits = [f for f in findings if f.check_id == "aws.elbv2.load.balancers.no.listeners"]
     assert len(hits) == 1
     assert hits[0].scope.resource_id == "test"
+    assert hits[0].scope.resource_arn == arn
+    assert hits[0].dimensions["vpc_id"] == "vpc-123"
+    assert hits[0].dimensions["subnet_ids"] == "subnet-a,subnet-b"
 
 
 def test_idle_alb_emits(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -211,6 +216,8 @@ def test_no_registered_targets_emits(monkeypatch: pytest.MonkeyPatch) -> None:
         "LoadBalancerName": "notargets",
         "Type": "network",
         "Scheme": "internal",
+        "VpcId": "vpc-456",
+        "AvailabilityZones": [{"SubnetId": "subnet-c"}],
         "CreatedTime": now - timedelta(days=10),
     }
 
@@ -238,6 +245,7 @@ def test_no_registered_targets_emits(monkeypatch: pytest.MonkeyPatch) -> None:
     hits = [f for f in findings if f.check_id == "aws.elbv2.load.balancers.no.registered.targets"]
     assert len(hits) == 1
     assert hits[0].scope.resource_id == "notargets"
+    assert hits[0].dimensions["target_group_arns"] == "tg-1"
 
 
 def test_no_healthy_targets_emits(monkeypatch: pytest.MonkeyPatch) -> None:

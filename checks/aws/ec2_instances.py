@@ -293,6 +293,36 @@ def _metric_query(query_id: str, *, metric: str, namespace: str, dimensions: lis
     }
 
 
+def _csv_join(values: Sequence[str]) -> str:
+    """Return a deterministic comma-separated list without empty values."""
+    return ",".join(sorted({str(value).strip() for value in values if str(value).strip()}))
+
+
+def _instance_relationship_dimensions(instance: Mapping[str, Any]) -> dict[str, str]:
+    """Extract deterministic relationship facts from an EC2 instance payload."""
+    subnet_id = str(instance.get("SubnetId") or "").strip()
+    vpc_id = str(instance.get("VpcId") or "").strip()
+    security_group_ids = _csv_join(
+        str((group or {}).get("GroupId") or "")
+        for group in instance.get("SecurityGroups", []) or []
+    )
+    attached_volume_ids = _csv_join(
+        str(((mapping or {}).get("Ebs") or {}).get("VolumeId") or "")
+        for mapping in instance.get("BlockDeviceMappings", []) or []
+        if isinstance(mapping, Mapping)
+    )
+    dimensions: dict[str, str] = {}
+    if subnet_id:
+        dimensions["subnet_id"] = subnet_id
+    if vpc_id:
+        dimensions["vpc_id"] = vpc_id
+    if security_group_ids:
+        dimensions["security_group_ids"] = security_group_ids
+    if attached_volume_ids:
+        dimensions["attached_volume_ids"] = attached_volume_ids
+    return dimensions
+
+
 def _fetch_t_credit_metrics(
     ctx: RunContext,
     *,
@@ -590,6 +620,7 @@ class EC2InstancesChecker:
                     estimate_confidence=estimate_confidence,
                     estimate_notes=estimate_notes,
                     dimensions={
+                        **_instance_relationship_dimensions(ins),
                         "instance_type": itype,
                         "recommended_instance_type": rec_type or "",
                         "recommended_monthly_cost_usd": (f"{rec_cost:.2f}" if rec_cost is not None else ""),
@@ -704,6 +735,7 @@ class EC2InstancesChecker:
                     estimate_confidence=70 if est_storage_cost > 0.0 else 40,
                     estimate_notes="attached EBS storage estimate (fallback pricing)",
                     dimensions={
+                        **_instance_relationship_dimensions(ins),
                         "age_days": str(age_days),
                         "stop_date": stop_ts.date().isoformat(),
                         "attached_storage_gib": f"{size_gib:.0f}",
@@ -757,7 +789,7 @@ class EC2InstancesChecker:
                     scope=scope,
                     message=f"Instance type '{itype}' is an older generation family.",
                     recommendation="Plan a migration to a current generation family (e.g., t3/t4g, m6/m7, c6/c7, r6/r7).",
-                    dimensions={"instance_type": itype, "family": fam},
+                    dimensions={**_instance_relationship_dimensions(ins), "instance_type": itype, "family": fam},
                     issue_key={"instance_id": iid, "signal": "old_generation"},
                 )
             )
@@ -809,7 +841,7 @@ class EC2InstancesChecker:
                     scope=scope,
                     message=f"MetadataOptions.HttpTokens is '{http_tokens or 'missing'}' (should be 'required').",
                     recommendation="Require IMDSv2 by setting HttpTokens=required on the instance/launch template.",
-                    dimensions={"http_tokens": http_tokens or "missing"},
+                    dimensions={**_instance_relationship_dimensions(ins), "http_tokens": http_tokens or "missing"},
                     issue_key={"instance_id": iid, "signal": "imdsv1_allowed"},
                 )
             )
@@ -893,7 +925,11 @@ class EC2InstancesChecker:
                     scope=scope,
                     message="Security group is not attached to any network interface and is not referenced in any SG rules.",
                     recommendation="Delete the security group if it is no longer needed.",
-                    dimensions={"group_id": gid, "group_name": gname},
+                    dimensions={
+                        "group_id": gid,
+                        "group_name": gname,
+                        "vpc_id": str(sg.get("VpcId") or ""),
+                    },
                     issue_key={"group_id": gid, "signal": "unused_security_group"},
                 )
             )
@@ -996,6 +1032,7 @@ class EC2InstancesChecker:
                     ),
                     recommendation="Consider moving to a larger T size, enabling Unlimited appropriately, or migrating to a non-burstable family.",
                     dimensions={
+                        **_instance_relationship_dimensions(ins),
                         "instance_type": itype,
                         "credit_balance_min": f"{bal_min:.2f}",
                         "surplus_credits_charged_sum": f"{surplus:.2f}",
@@ -1056,7 +1093,7 @@ class EC2InstancesChecker:
                     scope=scope,
                     message=f"Missing required tag keys: {miss}.",
                     recommendation="Apply consistent tagging (owner/env/cost_center) to improve allocation, chargeback, and automation.",
-                    dimensions={"missing_tag_keys": miss},
+                    dimensions={**_instance_relationship_dimensions(ins), "missing_tag_keys": miss},
                     issue_key={"instance_id": iid, "signal": "missing_tags"},
                 )
             )
@@ -1133,7 +1170,11 @@ class EC2InstancesChecker:
                     scope=scope,
                     message=f"Security groups allow 0.0.0.0/0 or ::/0 access to ports {ports_str}.",
                     recommendation="Restrict ingress to trusted IP ranges, use VPN/bastion, and enforce least privilege SG rules.",
-                    dimensions={"open_ports": ports_str, "offending_sg_ids": sg_str},
+                    dimensions={
+                        **_instance_relationship_dimensions(ins),
+                        "open_ports": ports_str,
+                        "offending_sg_ids": sg_str,
+                    },
                     issue_key={"instance_id": iid, "signal": "admin_ports_open_world"},
                 )
             )

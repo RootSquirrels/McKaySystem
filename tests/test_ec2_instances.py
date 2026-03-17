@@ -116,6 +116,10 @@ def test_underutilized_running_instance_emits(monkeypatch: pytest.MonkeyPatch) -
                                 {
                                     "InstanceId": "i-1",
                                     "InstanceType": "t3.micro",
+                                    "SubnetId": "subnet-1",
+                                    "VpcId": "vpc-1",
+                                    "SecurityGroups": [{"GroupId": "sg-1"}],
+                                    "BlockDeviceMappings": [{"Ebs": {"VolumeId": "vol-1"}}],
                                     "State": {"Name": "running"},
                                 }
                             ]
@@ -140,6 +144,10 @@ def test_underutilized_running_instance_emits(monkeypatch: pytest.MonkeyPatch) -
     assert f.scope.resource_id == "i-1"
     # 0.1 $/hr * 730 = 73
     assert float(f.estimated_monthly_cost or 0.0) == pytest.approx(73.0, rel=1e-6)
+    assert f.dimensions["subnet_id"] == "subnet-1"
+    assert f.dimensions["vpc_id"] == "vpc-1"
+    assert f.dimensions["security_group_ids"] == "sg-1"
+    assert f.dimensions["attached_volume_ids"] == "vol-1"
 
 
 def test_underutilized_includes_rightsizing_target_and_delta(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -202,6 +210,9 @@ def test_stopped_long_emits_with_storage_estimate(monkeypatch: pytest.MonkeyPatc
                                 {
                                     "InstanceId": "i-stop",
                                     "InstanceType": "t3.micro",
+                                    "SubnetId": "subnet-stop",
+                                    "VpcId": "vpc-stop",
+                                    "SecurityGroups": [{"GroupId": "sg-stop"}],
                                     "State": {"Name": "stopped"},
                                     "StateTransitionReason": "User initiated (2025-12-01 00:00:00)",
                                     "BlockDeviceMappings": [{"Ebs": {"VolumeId": "vol-1"}}],
@@ -228,6 +239,10 @@ def test_stopped_long_emits_with_storage_estimate(monkeypatch: pytest.MonkeyPatc
     f = hits[0]
     # 100 GiB * 0.10 = 10
     assert float(f.estimated_monthly_cost or 0.0) == pytest.approx(10.0, rel=1e-6)
+    assert f.dimensions["subnet_id"] == "subnet-stop"
+    assert f.dimensions["vpc_id"] == "vpc-stop"
+    assert f.dimensions["security_group_ids"] == "sg-stop"
+    assert f.dimensions["attached_volume_ids"] == "vol-1"
 
 
 def test_old_generation_family_emits_info(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -365,6 +380,7 @@ def test_unused_security_group_excludes_referenced(monkeypatch: pytest.MonkeyPat
                     "SecurityGroups": [
                         {"GroupId": "sg-attached", "GroupName": "used", "IpPermissions": [], "IpPermissionsEgress": []},
                         {"GroupId": "sg-unused", "GroupName": "unused", "IpPermissions": [], "IpPermissionsEgress": []},
+                        {"GroupId": "sg-unused-vpc", "GroupName": "unused-vpc", "VpcId": "vpc-sg", "IpPermissions": [], "IpPermissionsEgress": []},
                         # Referenced by another SG rule => excluded
                         {
                             "GroupId": "sg-ref",
@@ -388,8 +404,11 @@ def test_unused_security_group_excludes_referenced(monkeypatch: pytest.MonkeyPat
     checker = EC2InstancesChecker(account=mod.AwsAccountContext(account_id="123", billing_account_id="123"))
     findings = list(checker.run(ctx))
     hits = [f for f in findings if f.check_id == "aws.ec2.security.groups.unused"]
-    assert len(hits) == 1
-    assert hits[0].scope.resource_id == "sg-unused"
+    assert len(hits) == 2
+    by_id = {hit.scope.resource_id: hit for hit in hits}
+    assert "sg-unused" in by_id
+    assert "sg-unused-vpc" in by_id
+    assert by_id["sg-unused-vpc"].dimensions["vpc_id"] == "vpc-sg"
 
 
 def test_pricing_lookup_handles_malformed_pricing_data() -> None:

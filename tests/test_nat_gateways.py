@@ -279,6 +279,7 @@ def test_cross_az_nat_emits(monkeypatch: pytest.MonkeyPatch) -> None:
     hits = [f for f in findings if f.check_id == "aws.ec2.nat.gateways.cross.az"]
     assert len(hits) == 1
     assert hits[0].scope.resource_id == "nat-1"
+    assert hits[0].dimensions["routed_subnet_ids"] == "subnet-private"
 
 
 def test_access_denied_emits_access_error(monkeypatch: pytest.MonkeyPatch) -> None:

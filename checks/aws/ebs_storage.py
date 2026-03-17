@@ -236,6 +236,22 @@ def _money_val(val: float) -> float:
     return round(float(val), 6)
 
 
+def _volume_relationship_dimensions(volume: Mapping[str, Any]) -> dict[str, str]:
+    """Extract deterministic relationship facts from an EBS volume payload."""
+    attachments = volume.get("Attachments") or []
+    first_attachment = attachments[0] if attachments and isinstance(attachments[0], Mapping) else {}
+    instance_id = str((first_attachment or {}).get("InstanceId") or "").strip()
+    attachment_state = str((first_attachment or {}).get("State") or "").strip()
+    availability_zone = str(volume.get("AvailabilityZone") or "").strip()
+    dimensions = {
+        "volume_id": str(volume.get("VolumeId") or "").strip(),
+        "instance_id": instance_id,
+        "attachment_state": attachment_state,
+        "availability_zone": availability_zone,
+    }
+    return {key: value for key, value in dimensions.items() if value}
+
+
 # -----------------------------
 # Checker
 # -----------------------------
@@ -415,6 +431,7 @@ class EBSStorageChecker(Checker):
                                             estimate_notes=pricing_notes_out,
                                             tags=tags,
                                             dimensions={
+                                                **_volume_relationship_dimensions(vol),
                                                 "volume_type": vol_type,
                                                 "size_gb": str(size_gb),
                                                 "age_days": str(age_days),
@@ -474,6 +491,7 @@ class EBSStorageChecker(Checker):
                                     estimate_notes=str(pricing_notes_out),
                                     tags=tags,
                                     dimensions={
+                                        **_volume_relationship_dimensions(vol),
                                         "size_gb": str(size_gb),
                                         "source_volume_type": "gp2",
                                         "target_volume_type": "gp3",
@@ -521,6 +539,7 @@ class EBSStorageChecker(Checker):
                                 estimate_notes="Encryption is a binary compliance requirement.",
                                 tags=tags,
                                 dimensions={
+                                    **_volume_relationship_dimensions(vol),
                                     "volume_type": vol_type,
                                     "size_gb": str(size_gb),
                                     "encrypted": "false",
@@ -640,6 +659,7 @@ class EBSStorageChecker(Checker):
                                 tags=tags,
                                 dimensions={
                                     "snapshot_id": snap_id,
+                                    "volume_id": str(snap.get("VolumeId") or ""),
                                     "volume_size_gb": str(size_gb),
                                     "age_days": str(age_days),
                                     "referenced_by_ami": "false",
@@ -688,6 +708,8 @@ class EBSStorageChecker(Checker):
                                 estimate_notes="Encryption is a binary compliance requirement.",
                                 tags=tags,
                                 dimensions={
+                                    "snapshot_id": snap_id,
+                                    "volume_id": str(snap.get("VolumeId") or ""),
                                     "volume_size_gb": str(size_gb),
                                     "encrypted": "false",
                                     "aws_backup_managed": "false",

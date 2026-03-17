@@ -20,6 +20,12 @@ def build_elb_relationships(
     resource_id: str | None,
 ) -> None:
     """Derive load balancer and target group relationships from emitted fields."""
+    def _csv_values(key: str) -> list[str]:
+        raw_value = non_empty_text(dimensions.get(key))
+        if not raw_value:
+            return []
+        return sorted({item.strip() for item in raw_value.split(",") if item.strip()})
+
     if service != "elbv2":
         return
 
@@ -53,7 +59,7 @@ def build_elb_relationships(
         else:
             single_value = non_empty_text(raw_tg_value)
             if single_value:
-                tg_values = [single_value]
+                tg_values = _csv_values(tg_key_name) if tg_key_name.endswith("_arns") else [single_value]
         for tg_arn in [value for value in tg_values if value]:
             tg_key = state.ensure_node(
                 account_id=account_id,

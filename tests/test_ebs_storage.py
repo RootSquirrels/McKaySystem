@@ -159,7 +159,8 @@ def test_gp2_to_gp3_emits_savings(monkeypatch: pytest.MonkeyPatch) -> None:
                         {
                             "VolumeId": "vol-gp2",
                             "State": "in-use",
-                            "Attachments": [{"InstanceId": "i-1"}],
+                            "Attachments": [{"InstanceId": "i-1", "State": "attached"}],
+                            "AvailabilityZone": "eu-west-3a",
                             "CreateTime": _dt(1),
                             "VolumeType": "gp2",
                             "Size": 200,
@@ -182,6 +183,9 @@ def test_gp2_to_gp3_emits_savings(monkeypatch: pytest.MonkeyPatch) -> None:
     # 200 GB * ($0.10 - $0.08) = $4.00
     assert float(f.estimated_monthly_savings) == pytest.approx(4.0, rel=1e-6)
     assert "storage-only" in (f.estimate_notes or "").lower()
+    assert f.dimensions["instance_id"] == "i-1"
+    assert f.dimensions["attachment_state"] == "attached"
+    assert f.dimensions["availability_zone"] == "eu-west-3a"
 
 
 def test_old_snapshot_emits_when_not_referenced_by_ami(monkeypatch: pytest.MonkeyPatch) -> None:

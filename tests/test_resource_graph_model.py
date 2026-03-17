@@ -17,23 +17,24 @@ def test_build_graph_from_findings_derives_expected_nodes_and_edges() -> None:
     """Graph builder should derive deterministic nodes and relationship edges."""
     findings = [
         {
-            "title": "Unattached volume",
-            "check_id": "aws.ebs.unattached",
+            "title": "Underutilized instance",
+            "check_id": "aws.ec2.instances.underutilized",
             "severity": {"level": "medium"},
             "scope": {
                 "account_id": "123456789012",
                 "region": "eu-west-3",
                 "service": "ec2",
-                "resource_type": "volume",
-                "resource_id": "vol-12345678",
+                "resource_type": "instance",
+                "resource_id": "i-12345678",
                 "resource_arn": "",
             },
             "payload": {
-                "resource_name": "data-volume",
+                "resource_name": "compute-node",
                 "dimensions": {
-                    "instance_id": "i-12345678",
                     "subnet_id": "subnet-12345678",
                     "vpc_id": "vpc-12345678",
+                    "security_group_ids": "sg-12345678",
+                    "attached_volume_ids": "vol-12345678",
                 },
             },
         }
@@ -52,12 +53,13 @@ def test_build_graph_from_findings_derives_expected_nodes_and_edges() -> None:
     assert resource_keys == sorted(
         [
             "aws:123456789012:eu-west-3:ec2:instance:i-12345678",
+            "aws:123456789012:eu-west-3:ec2:security_group:sg-12345678",
             "aws:123456789012:eu-west-3:ec2:volume:vol-12345678",
             "aws:123456789012:eu-west-3:vpc:subnet:subnet-12345678",
             "aws:123456789012:eu-west-3:vpc:vpc:vpc-12345678",
         ]
     )
-    assert edge_types == ["attached_to", "member_of", "member_of"]
+    assert edge_types == ["attached_to", "member_of", "member_of", "member_of", "secured_by"]
 
 
 def test_graph_bundle_round_trip(tmp_path: Path) -> None:
@@ -116,6 +118,7 @@ def test_build_graph_from_findings_derives_nat_and_elb_relationships() -> None:
                 "dimensions": {
                     "subnet_id": "subnet-12345678",
                     "vpc_id": "vpc-12345678",
+                    "routed_subnet_ids": "subnet-87654321",
                 }
             },
         },
@@ -136,7 +139,12 @@ def test_build_graph_from_findings_derives_nat_and_elb_relationships() -> None:
             },
             "payload": {
                 "dimensions": {
-                    "target_group_arn": "arn:aws:elasticloadbalancing:eu-west-3:123456789012:targetgroup/demo/6d0ecf831eec9f09"
+                    "vpc_id": "vpc-12345678",
+                    "subnet_ids": "subnet-a,subnet-b",
+                    "target_group_arns": (
+                        "arn:aws:elasticloadbalancing:eu-west-3:123456789012:targetgroup/demo/6d0ecf831eec9f09,"
+                        "arn:aws:elasticloadbalancing:eu-west-3:123456789012:targetgroup/demo2/6d0ecf831eec9f10"
+                    ),
                 }
             },
         },
@@ -154,6 +162,7 @@ def test_build_graph_from_findings_derives_nat_and_elb_relationships() -> None:
 
     assert "aws:123456789012:eu-west-3:vpc:nat_gateway:nat-12345678" in resource_keys
     assert "aws:123456789012:eu-west-3:vpc:subnet:subnet-12345678" in resource_keys
+    assert "aws:123456789012:eu-west-3:vpc:subnet:subnet-87654321" in resource_keys
     assert "aws:123456789012:eu-west-3:vpc:vpc:vpc-12345678" in resource_keys
     assert (
         "aws:123456789012:eu-west-3:elbv2:load_balancer:"
@@ -163,9 +172,14 @@ def test_build_graph_from_findings_derives_nat_and_elb_relationships() -> None:
         "aws:123456789012:eu-west-3:elbv2:target_group:"
         "arn:aws:elasticloadbalancing:eu-west-3:123456789012:targetgroup/demo/6d0ecf831eec9f09"
     ) in resource_keys
+    assert (
+        "aws:123456789012:eu-west-3:elbv2:target_group:"
+        "arn:aws:elasticloadbalancing:eu-west-3:123456789012:targetgroup/demo2/6d0ecf831eec9f10"
+    ) in resource_keys
     assert "attached_to" in edge_types
     assert "member_of" in edge_types
     assert "routes_to" in edge_types
+    assert "routes_via" in edge_types
 
 
 def test_build_graph_from_findings_normalizes_amazonec2_service_names() -> None:

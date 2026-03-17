@@ -115,6 +115,11 @@ def _resolve_nat_pricing(ctx: RunContext, *, region: str) -> tuple[float, float,
     )
 
 
+def _csv_join(values: Sequence[str]) -> str:
+    """Return a deterministic comma-separated list without empty values."""
+    return ",".join(sorted({str(value).strip() for value in values if str(value).strip()}))
+
+
 # -----------------------------
 # CloudWatch batching
 # -----------------------------
@@ -770,7 +775,12 @@ class NatGatewaysChecker:
                 resource_id=nat_id,
             ),
             tags=tags,
-            dimensions={"vpc_id": vpc_id, "subnet_id": subnet_id},
+            dimensions={
+                "nat_gateway_id": nat_id,
+                "vpc_id": vpc_id,
+                "subnet_id": subnet_id,
+                "availability_zone": az,
+            },
             estimated_monthly_cost=monthly_cost,
             estimated_monthly_savings=monthly_cost,
             estimate_confidence=pricing_conf,
@@ -817,7 +827,12 @@ class NatGatewaysChecker:
                 resource_id=nat_id,
             ),
             tags=tags,
-            dimensions={"vpc_id": vpc_id, "subnet_id": subnet_id},
+            dimensions={
+                "nat_gateway_id": nat_id,
+                "vpc_id": vpc_id,
+                "subnet_id": subnet_id,
+                "availability_zone": az,
+            },
             estimated_monthly_cost=monthly_cost,
             estimated_monthly_savings=monthly_cost,
             estimate_confidence=pricing_conf,
@@ -863,7 +878,12 @@ class NatGatewaysChecker:
                 resource_id=nat_id,
             ),
             tags=tags,
-            dimensions={"vpc_id": vpc_id, "estimated_monthly_gib": f"{monthly_gib:.2f}"},
+            dimensions={
+                "nat_gateway_id": nat_id,
+                "vpc_id": vpc_id,
+                "availability_zone": az,
+                "estimated_monthly_gib": f"{monthly_gib:.2f}",
+            },
             estimated_monthly_cost=est_monthly_total_cost,
             estimated_monthly_savings=est_monthly_data_cost,
             estimate_confidence=pricing_conf,
@@ -906,7 +926,13 @@ class NatGatewaysChecker:
                 resource_id=nat_id,
             ),
             tags=tags,
-            dimensions={"vpc_id": vpc_id, "nat_az": nat_az, "sample_subnets": sample},
+            dimensions={
+                "nat_gateway_id": nat_id,
+                "vpc_id": vpc_id,
+                "nat_az": nat_az,
+                "sample_subnets": sample,
+                "routed_subnet_ids": _csv_join([subnet_id for subnet_id, _az in pairs]),
+            },
         ).with_issue(nat_gateway_id=nat_id)
 
     # -----------------------------

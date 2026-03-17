@@ -141,6 +141,36 @@ def _chunk(seq: Sequence[str], size: int) -> Iterator[list[str]]:
         i += size
 
 
+def _csv_join(values: Sequence[str]) -> str:
+    """Return a deterministic comma-separated list without empty values."""
+    return ",".join(sorted({str(value).strip() for value in values if str(value).strip()}))
+
+
+def _load_balancer_dimensions(
+    lb: Mapping[str, Any],
+    *,
+    lb_type: str,
+    scheme: str,
+    referenced_tgs: set[str] | None = None,
+) -> dict[str, str]:
+    """Extract deterministic relationship facts from an ELBv2 load balancer."""
+    subnet_ids = _csv_join(
+        str((zone or {}).get("SubnetId") or "")
+        for zone in lb.get("AvailabilityZones", []) or []
+        if isinstance(zone, Mapping)
+    )
+    dimensions = {
+        "lb_type": lb_type,
+        "scheme": scheme,
+        "vpc_id": str(lb.get("VpcId") or "").strip(),
+        "subnet_ids": subnet_ids,
+    }
+    target_group_arns = _csv_join(sorted(referenced_tgs or set()))
+    if target_group_arns:
+        dimensions["target_group_arns"] = target_group_arns
+    return {key: value for key, value in dimensions.items() if value}
+
+
 # -----------------------------
 # CloudWatch batching
 # -----------------------------
@@ -543,9 +573,26 @@ class ElbV2LoadBalancersChecker:
             hourly_usd, pricing_notes, pricing_conf = _resolve_lb_hourly_pricing(ctx, region=region, lb_type=lb_type)
             monthly_cost = money(hourly_usd * 24.0 * 30.0)
 
-            scope = build_scope(ctx, account=self._account, region=region, service="elbv2", resource_id=lb_name)
+            scope = build_scope(
+                ctx,
+                account=self._account,
+                region=region,
+                service="elbv2",
+                resource_type="load-balancer",
+                resource_id=lb_name,
+                resource_arn=arn,
+            )
 
             listeners = listeners_by_lb.get(arn, [])
+            referenced_tgs: set[str] = set()
+            for listener in listeners:
+                referenced_tgs |= _listener_tg_arns(listener)
+            lb_dimensions = _load_balancer_dimensions(
+                lb,
+                lb_type=lb_type,
+                scheme=scheme,
+                referenced_tgs=referenced_tgs,
+            )
             if not listeners:
                 if emitted["orphan_no_listeners"] < cfg.max_findings_per_type:
                     emitted["orphan_no_listeners"] += 1
@@ -567,7 +614,7 @@ class ElbV2LoadBalancersChecker:
                         estimate_notes=pricing_notes,
                         tags=tags,
                         issue_key={"check_id": "aws.elbv2.load.balancers.no.listeners", "lb_arn": arn},
-                        dimensions={"lb_type": lb_type, "scheme": scheme},
+                        dimensions=lb_dimensions,
                     )
                 continue
 
@@ -603,15 +650,11 @@ class ElbV2LoadBalancersChecker:
                     estimate_notes=pricing_notes,
                     tags=tags,
                     issue_key={"check_id": "aws.elbv2.load.balancers.idle", "lb_arn": arn},
-                    dimensions={"lb_type": lb_type, "scheme": scheme},
+                    dimensions=lb_dimensions,
                 )
 
             # Orphaned targets / unhealthy targets (best-effort)
             # Determine referenced TGs from listener actions and inspect target health.
-            referenced_tgs: set[str] = set()
-            for listener in listeners:
-                referenced_tgs |= _listener_tg_arns(listener)
-
             if not referenced_tgs:
                 # No forward target groups referenced.
                 continue
@@ -692,7 +735,7 @@ class ElbV2LoadBalancersChecker:
                     estimate_notes=pricing_notes,
                     tags=tags,
                     issue_key={"check_id": "aws.elbv2.load.balancers.no.registered.targets", "lb_arn": arn},
-                    dimensions={"lb_type": lb_type, "scheme": scheme},
+                    dimensions=lb_dimensions,
                 )
 
             if any_targets and not any_healthy and emitted["no_healthy_targets"] < cfg.max_findings_per_type:
@@ -712,7 +755,7 @@ class ElbV2LoadBalancersChecker:
                     recommendation="Investigate target group health checks, security groups, and target configuration.",
                     tags=tags,
                     issue_key={"check_id": "aws.elbv2.load.balancers.no.healthy.targets", "lb_arn": arn},
-                    dimensions={"lb_type": lb_type, "scheme": scheme},
+                    dimensions=lb_dimensions,
                 )
 
 
