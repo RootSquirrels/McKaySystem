@@ -20,7 +20,8 @@ Last reviewed: 2026-02-01
 
 - Raw findings Parquet (system of record)
 - Correlated findings Parquet (optional)
-- JSON exports for UI (optional)
+- Postgres-backed API read model after ingest
+- JSON exports for compatibility and debugging (optional)
 
 Pricing metadata overrides for run manifests (optional):
 
@@ -79,6 +80,34 @@ mckay recover --tenant <tenant> --workspace <workspace> --db-url <url>
 
 ---
 
+## Local full-stack development
+
+Backend:
+
+```bash
+python -m apps.backend.db_migrate
+python -m apps.flask_api.flask_app
+```
+
+Frontend:
+
+```bash
+cd apps/frontend
+npm install
+npm run dev
+```
+
+Frontend environment:
+
+```bash
+NEXT_PUBLIC_API_URL=http://127.0.0.1:5000/api/v1
+```
+
+When frontend and backend run on different origins, ensure Flask CORS settings
+allow the frontend origin and credentials.
+
+---
+
 ## RBAC scope bootstrap
 
 Initialize first admin access for a scope without manual SQL:
@@ -95,6 +124,7 @@ See full runbook:
 
 ## Monorepo workflows
 
+- Frontend code lives under `apps/frontend/`.
 - Backend/API code lives under `apps/flask_api/` and `apps/backend/` (deployment docs: `deploy/backend/`).
 - Worker/scanner code lives in core engine paths (`checks/`, `pipeline/`, etc.; deployment docs: `deploy/worker/`).
 - Enforce root layout policy with:

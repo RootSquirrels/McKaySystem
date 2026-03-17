@@ -23,7 +23,7 @@ flowchart TD
   DDB --> JSON["JSON exports\n(pipeline/export_json.py)\nfor UI / API"]
 
   %% --- UI / API ---
-  JSON --> UI["Flask UI / API\n(consumer)"]
+  JSON --> UI["Flask API / Next.js frontend\n(consumer)"]
 
   %% --- Optional / near-future blocks ---
   subgraph Future["Near-future product primitives"]

@@ -6,13 +6,15 @@ Last reviewed: 2026-02-14
 ## Purpose
 
 This policy keeps the monorepo operable while hosting:
+- frontend web app code
 - backend API/SaaS code
 - worker/scanner/pipeline code
 
 ## Boundaries
 
-### Backend
+### Product Surface
 - Owned paths:
+  - `apps/frontend/`
   - `apps/flask_api/`
   - `apps/backend/`
 - Deployment docs: `deploy/backend/`

@@ -1,14 +1,14 @@
 # FinOps Engine – Deterministic Cloud Cost & Governance Analysis
 
-This repository contains a **FinOps-grade analysis engine** designed to detect,
-correlate, and attribute cloud cost and governance inefficiencies across AWS
-environments.
+This repository contains a **FinOps-grade analysis platform** designed to
+detect, correlate, ingest, and serve cloud cost and governance inefficiencies
+across AWS environments.
 
 The system is intentionally:
 - **infra-native first** (resource-level signals before billing data)
 - **deterministic and testable by design**
-- **scalable** from local DuckDB to Iceberg / Trino backends
-- **production-ready**, while remaining hackable and inspectable
+- **multi-tenant and production-oriented**
+- **split into worker, API, and frontend boundaries**
 
 This README provides a **system-level orientation**.
 Authoritative design contracts and deep dives live under `docs/`.
@@ -24,20 +24,37 @@ Quick commands:
 ```bash
 pip install -e ".[dev]"
 pytest
+python -m apps.backend.db_migrate
 python -m apps.worker.runner --tenant acme --workspace prod
 python -m apps.worker.export_findings
+python -m apps.flask_api.flask_app
+```
+
+Frontend:
+
+```bash
+cd apps/frontend
+npm install
+npm run dev
 ```
 
 Note: `python -m apps.worker.export_findings` writes `run_manifest.json`. DB ingestion reads Parquet via `run_manifest.json`.
 Migrations: run `python -m apps.backend.db_migrate` (or `mckay migrate`) before first ingest.
 
 Monorepo separation:
+- Frontend: `apps/frontend/`
 - Backend/API: `apps/flask_api/` + `apps/backend/` (deployment docs: `deploy/backend/`)
 - Worker/Scanner: `apps/worker/` + engine paths (deployment docs: `deploy/worker/`)
 - Layout guard: `python tools/repo/check_layout.py`
 - Release tracks:
   - `make ci-backend` (or GitHub workflow: `.github/workflows/backend-ci.yml`)
   - `make ci-worker` (or GitHub workflow: `.github/workflows/worker-ci.yml`)
+
+Current product path:
+- workers write scoped Parquet outputs
+- ingestion loads product data into Postgres
+- Flask serves the versioned API
+- Next.js is the user-facing web app
 
 CloudShell worker sparse checkout:
 
@@ -67,6 +84,11 @@ Start here depending on your goal:
 - **Architecture & mental model**
   - `docs/01_architecture/architecture.md`
   - `docs/02_pipeline/pipeline_overview.md`
+
+- **Frontend & backend app setup**
+  - `apps/frontend/README.md`
+  - `apps/flask_api/README.md`
+  - `apps/backend/README.md`
 
 - **Checker philosophy & contracts**
   - `docs/03_checkers/checker_contract.md`
@@ -120,7 +142,7 @@ Canonical definitions live in `docs/00_overview/glossary.md`.
         └────┬─────┘
              ▼
         ┌──────────┐
-        │ Flask UI │
+        │ Flask API│
         └──────────┘
 ```
 
@@ -130,6 +152,9 @@ Canonical definitions live in `docs/00_overview/glossary.md`.
 
 ```
 .
+├── apps/frontend/               # Next.js + React web client
+├── apps/flask_api/              # Versioned Flask API
+├── apps/backend/                # DB access and migrations
 ├── apps/worker/runner.py        # Main orchestration entrypoint
 ├── contracts/                   # Canonical schema & validation
 │   ├── schema.py                # Arrow schema (source of truth)
@@ -169,7 +194,7 @@ Canonical definitions live in `docs/00_overview/glossary.md`.
 │   ├── raw_cur/                  # Raw CUR parquet inputs
 │   └── cur_facts/                # Normalized cost facts
 │
-├── webapp_data/                  # Flask-consumable JSON
+├── webapp_data/                  # Optional exported JSON artifacts
 │   ├── findings.json
 │   ├── summary.json
 │   ├── top_savings.json
@@ -323,7 +348,7 @@ python tools.stress.stress_engine --n 200000 --workdir .stress --clean
 
 ---
 
-## Export layer (Flask-ready)
+## Export layer
 
 `export_json.py`:
 
@@ -336,7 +361,8 @@ python tools.stress.stress_engine --n 200000 --workdir .stress --clean
   - correlated_findings.json
   - coverage.json (cost availability)
 
-This fully decouples backend evolution from the UI.
+These artifacts are optional compatibility outputs. Product reads should come
+from Postgres via the Flask API.
 
 ---
 
@@ -347,7 +373,8 @@ python -m apps.worker.runner --tenant acme --workspace prod
 python -m apps.worker.export_findings
 ```
 
-If CUR data exists, costs appear automatically. If not, the UI degrades gracefully.
+If CUR data exists, costs appear automatically. If not, the API and frontend
+degrade gracefully.
 Flow is :
 data/raw_cur/**/*.parquet
         ↓ normalize

@@ -1,6 +1,7 @@
 # Backend Deployment
 
 Deploy target:
+- `apps/frontend/` is a separate deployable web client and is not part of this artifact
 - `apps/flask_api/flask_app.py`
 - `apps/backend/db.py`
 - `apps/backend/db_migrate.py`

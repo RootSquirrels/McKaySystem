@@ -9,11 +9,11 @@ It is written from a **production / on-call perspective**: most problems are *ex
 
 ---
 
-## 1. Costs are always zero / missing in the UI
+## 1. Costs are always zero / missing in the frontend
 
 ### Symptoms
 - `actual.cost_30d` is `null` or `0` everywhere
-- Flask UI shows costs as empty or zero
+- the web frontend shows costs as empty or zero
 
 ### Diagnosis checklist
 
@@ -61,7 +61,7 @@ Low coverage is **not an error**.
 
 ### Symptoms
 - `coverage.json` shows `dataset = raw_union`
-- Enriched Parquet exists but UI ignores it
+- Enriched Parquet exists but exported artifacts still ignore it
 
 ### Diagnosis
 

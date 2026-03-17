@@ -23,7 +23,11 @@ The system is intentionally split into distinct layers to separate:
 
 ## High-Level Architecture
 
-At a high level, the system runs **checkers** that emit **wire-format findings**, validates them against a strict contract, then persists them as a **typed Parquet dataset**. DuckDB reads Parquet to export JSON payloads for the web app.
+At a high level, the system runs **checkers** that emit **wire-format
+findings**, validates them against a strict contract, persists them as typed
+Parquet datasets, and ingests scoped results into Postgres for product-facing
+API access. DuckDB and JSON export remain useful supporting tools, but the
+primary web path is Flask API -> React frontend.
 
 ```
           +-------------------+
@@ -67,7 +71,8 @@ At a high level, the system runs **checkers** that emit **wire-format findings**
                     | JSON files
                     v
           +-------------------+
-          | Flask webapp      |
+          | Flask API +       |
+          | Next.js frontend  |
           +-------------------+
 ```
 
@@ -122,7 +127,7 @@ Important files:
 Pipeline code is responsible for:
 - writing datasets (Parquet)
 - querying datasets (DuckDB)
-- exporting JSON for the UI
+- exporting compatibility JSON artifacts
 
 Key rule:
 > The pipeline owns the storage boundary.
@@ -134,7 +139,19 @@ Important files:
 
 ---
 
-### 2.4 `apps/worker/runner.py` (Orchestration)
+### 2.4 `apps/backend/` + `apps/flask_api/` (Serving boundary)
+
+Backend and API code are responsible for:
+- ingesting worker outputs into Postgres
+- exposing versioned REST endpoints
+- enforcing tenant/workspace scoping
+- serving the React frontend from a stable API contract
+
+Product reads must come from `finding_current`.
+
+---
+
+### 2.5 `apps/worker/runner.py` (Orchestration)
 
 Runner builds and wires:
 - `RunContext` (immutable run metadata)
@@ -144,7 +161,7 @@ Runner builds and wires:
 
 The worker runner is the only place where you should load SDK config and instantiate cloud clients.
 
-### 2.5 Checker discovery model
+### 2.6 Checker discovery model
 
 Runner does not maintain a hardcoded list of checkers.
 Instead:
@@ -283,8 +300,9 @@ DuckDB reads Parquet directly:
 - portable testing
 - simple SQL-based KPI generation
 
-Current MVP usage:
-- export JSON for Flask UI
+Current usage:
+- analytics over Parquet
+- export JSON artifacts for debugging or compatibility
 
 Future usage:
 - KPI materialization (“gold tables”)
@@ -301,7 +319,7 @@ The JSON exporter generates UI-friendly payloads:
 
 These files can be:
 - served statically
-- loaded by Flask endpoints
+- loaded by ad hoc tooling
 - produced by scheduled jobs (cron/EventBridge)
 
 ---
@@ -369,7 +387,7 @@ data/finops_kpi_gold/tenant_id=.../period=.../part-...parquet
 
 Tenant is a first-class partition key:
 - all datasets are partitioned by `tenant_id`
-- API/UI always filter by tenant
+- API and frontend flows always filter by tenant
 
 ---
 
