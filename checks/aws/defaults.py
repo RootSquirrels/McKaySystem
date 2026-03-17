@@ -41,6 +41,12 @@ CONTAINERS_NONPROD_TAG_VALUES: Final[tuple[str, ...]] = (
 )
 EKS_MIN_SUPPORTED_VERSION: Final[tuple[int, int]] = (1, 28)
 EKS_NONPROD_SPOT_MIN_RATIO: Final[float] = 0.50
+ECR_STALE_IMAGE_DAYS: Final[int] = 90
+ECR_MAX_FINDINGS_PER_TYPE: Final[int] = 50_000
+DYNAMODB_LOOKBACK_DAYS: Final[int] = 14
+DYNAMODB_MIN_DATAPOINTS: Final[int] = 7
+DYNAMODB_UNDERUTILIZED_UTIL_THRESHOLD_PCT: Final[float] = 20.0
+DYNAMODB_MAX_FINDINGS_PER_TYPE: Final[int] = 50_000
 
 # RDS instances optimization checker defaults
 RDS_STORAGE_GB_MONTH_PRICE_USD: Final[float] = 0.115

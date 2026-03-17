@@ -9,10 +9,12 @@ Service-specific checker references:
 - `backup_vaults.md`
 - `cloudfront.md`
 - `cloudwatch.md`
+- `dynamodb.md`
 - `ebs.md`
 - `ec2.md`
 - `ec2_reserved_instances.md`
 - `ec2_savings_plans.md`
+- `ecr.md`
 - `ecs_eks.md`
 - `efs.md`
 - `elbv2.md`
