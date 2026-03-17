@@ -9,6 +9,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { useRunCoverageLatest } from "@/hooks/useRunCoverageLatest";
 import { RecommendationItem, useRecommendations } from "@/hooks/useRecommendations";
 import { ApiError } from "@/lib/api/client";
+import { formatUtcDateTime } from "@/lib/dates";
 import { getStoredScope } from "@/lib/scope";
 
 const ALL_STATE_FILTER = "open,snoozed,resolved,ignored";
@@ -55,17 +56,6 @@ function formatMoney(value: number | null): string {
     currency: "USD",
     maximumFractionDigits: 2,
   }).format(value);
-}
-
-function formatDateTime(value: string | null): string {
-  if (!value) {
-    return "-";
-  }
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
-    return value;
-  }
-  return parsed.toLocaleString();
 }
 
 function priorityBadgeClass(priority: string): string {
@@ -631,7 +621,7 @@ export function RecommendationsClientPage() {
               <p><span className="font-medium">Service:</span> {selectedRecommendation.service}</p>
               <p><span className="font-medium">Severity:</span> {selectedRecommendation.severity}</p>
               <p><span className="font-medium">Category:</span> {selectedRecommendation.category ?? "-"}</p>
-              <p><span className="font-medium">Detected:</span> {formatDateTime(selectedRecommendation.detected_at)}</p>
+              <p><span className="font-medium">Detected:</span> {formatUtcDateTime(selectedRecommendation.detected_at)}</p>
               <p><span className="font-medium">Region:</span> {selectedRecommendation.region ?? "-"}</p>
               <p><span className="font-medium">Account:</span> {selectedRecommendation.account_id ?? "-"}</p>
               <p><span className="font-medium">Monthly Savings:</span> {formatMoney(selectedRecommendation.estimated_monthly_savings)}</p>

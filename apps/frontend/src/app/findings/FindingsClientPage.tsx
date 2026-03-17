@@ -17,6 +17,7 @@ import {
 import { useRunCoverageLatest } from "@/hooks/useRunCoverageLatest";
 import { RunLatestItem, useRunsLatest } from "@/hooks/useRunsLatest";
 import { ApiError } from "@/lib/api/client";
+import { formatUtcDateTime } from "@/lib/dates";
 import { getStoredScope } from "@/lib/scope";
 
 function formatMoney(value: number | null): string {
@@ -50,17 +51,6 @@ function parsePositiveInt(value: string | null, fallback: number): number {
     return fallback;
   }
   return parsed;
-}
-
-function formatDateTime(value: string | null): string {
-  if (!value) {
-    return "-";
-  }
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
-    return value;
-  }
-  return parsed.toLocaleString();
 }
 
 function lifecycleErrorMessage(error: unknown): string {
@@ -147,7 +137,7 @@ function runDateSummary(items: FindingItem[], latestRun: RunLatestItem | null): 
   if (latestRun?.run_id) {
     return {
       runIdLabel: latestRun.run_id,
-      runDateLabel: formatDateTime(latestRun.run_ts),
+      runDateLabel: formatUtcDateTime(latestRun.run_ts),
       sourceLabel: "latest run metadata",
     };
   }
@@ -181,7 +171,7 @@ function runDateSummary(items: FindingItem[], latestRun: RunLatestItem | null): 
 
   return {
     runIdLabel,
-    runDateLabel: latestDetectedValue ? formatDateTime(latestDetectedValue) : "-",
+    runDateLabel: latestDetectedValue ? formatUtcDateTime(latestDetectedValue) : "-",
     sourceLabel: "derived from findings",
   };
 }
@@ -815,9 +805,9 @@ export function FindingsClientPage() {
               <p><span className="font-medium">Savings:</span> {formatMoney(selectedFinding.estimated_monthly_savings)}</p>
               <p><span className="font-medium">Account:</span> {selectedFinding.account_id ?? "-"}</p>
               <p><span className="font-medium">Region:</span> {selectedFinding.region ?? "-"}</p>
-              <p><span className="font-medium">Detected:</span> {formatDateTime(selectedFinding.detected_at)}</p>
-              <p><span className="font-medium">Opened:</span> {formatDateTime(selectedFinding.first_opened_at)}</p>
-              <p><span className="font-medium">Snooze Until:</span> {formatDateTime(selectedFinding.snooze_until)}</p>
+              <p><span className="font-medium">Detected:</span> {formatUtcDateTime(selectedFinding.detected_at)}</p>
+              <p><span className="font-medium">Opened:</span> {formatUtcDateTime(selectedFinding.first_opened_at)}</p>
+              <p><span className="font-medium">Snooze Until:</span> {formatUtcDateTime(selectedFinding.snooze_until)}</p>
               <p><span className="font-medium">Owner:</span> {selectedFinding.owner_email ?? "-"}</p>
             </div>
 

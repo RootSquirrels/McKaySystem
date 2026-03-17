@@ -12,6 +12,7 @@ import {
   useUsersAdminMutations,
 } from "@/hooks/useUsersAdmin";
 import { ApiError } from "@/lib/api/client";
+import { formatUtcDateTime } from "@/lib/dates";
 import { getStoredScope } from "@/lib/scope";
 
 function parsePositiveInt(value: string | null, fallback: number): number {
@@ -34,17 +35,6 @@ function apiErrorMessage(prefix: string, error: unknown): string {
     return `${prefix}: ${error.message}`;
   }
   return prefix;
-}
-
-function formatDateTime(value: string | null): string {
-  if (!value) {
-    return "-";
-  }
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
-    return value;
-  }
-  return parsed.toLocaleString();
 }
 
 function userStatusBadgeClass(user: UserItem): string {
@@ -556,7 +546,7 @@ export function UsersClientPage() {
                             </span>
                           )}
                         </td>
-                        <td className="px-3 py-2">{formatDateTime(user.last_login_at)}</td>
+                        <td className="px-3 py-2">{formatUtcDateTime(user.last_login_at)}</td>
                         <td className="px-3 py-2">
                           <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium ${userStatusBadgeClass(user)}`}>
                             {user.is_active ? "Active" : "Inactive"}
@@ -752,7 +742,7 @@ export function UsersClientPage() {
                   </p>
                   <p className="mt-1 text-xs text-slate-600">
                     Granted by: {role.data.role.granted_by ?? "-"} | Granted at:{" "}
-                    {formatDateTime(role.data.role.granted_at)}
+                    {formatUtcDateTime(role.data.role.granted_at)}
                   </p>
                   <div className="mt-2 flex flex-wrap gap-1">
                     {role.data.role.permissions.length > 0 ? (

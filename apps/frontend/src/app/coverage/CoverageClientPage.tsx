@@ -16,18 +16,8 @@ import {
 } from "@/hooks/useRunCoverageDetails";
 import { useRunCoverageLatest } from "@/hooks/useRunCoverageLatest";
 import { ApiError } from "@/lib/api/client";
+import { formatUtcDateTime } from "@/lib/dates";
 import { getStoredScope } from "@/lib/scope";
-
-function formatDateTime(value: string | null): string {
-  if (!value) {
-    return "-";
-  }
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
-    return value;
-  }
-  return parsed.toLocaleString();
-}
 
 function parsePositiveInt(value: string | null, fallback: number): number {
   if (!value) {
@@ -280,7 +270,7 @@ export function CoverageClientPage() {
               </span>{" "}
               | Run date:{" "}
               <span className="font-medium">
-                {formatDateTime(latestCoverage.data?.run?.run_ts ?? checkerCoverage.data?.run?.run_ts ?? null)}
+                {formatUtcDateTime(latestCoverage.data?.run?.run_ts ?? checkerCoverage.data?.run?.run_ts ?? null)}
               </span>
             </p>
           </div>
@@ -632,7 +622,7 @@ export function CoverageClientPage() {
                           {item.run_id}
                         </span>
                       </td>
-                      <td className="px-3 py-2">{formatDateTime(item.run_ts)}</td>
+                      <td className="px-3 py-2">{formatUtcDateTime(item.run_ts)}</td>
                       <td className="px-3 py-2">
                         <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium ${statusBadgeClass(item.coverage_status ?? "")}`}>
                           {formatLabel(item.coverage_status)}
