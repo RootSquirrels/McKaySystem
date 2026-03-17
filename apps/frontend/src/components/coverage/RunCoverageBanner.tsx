@@ -47,6 +47,13 @@ function formatStatus(value: string | null): string {
     .join(" ");
 }
 
+function formatCoveragePct(value: number | null): string {
+  if (typeof value !== "number" || Number.isNaN(value)) {
+    return "-";
+  }
+  return `${value.toFixed(2)}%`;
+}
+
 function coverageMessage(summary: RunCoverageSummary, run: RunCoverageLatestRun | null): string {
   const permissionGaps = summary.permission_gap_count;
   const failed = summary.assessment_failed;
@@ -96,7 +103,7 @@ export function RunCoverageBanner({ run, summary }: RunCoverageBannerProps) {
       <div className="mt-3 grid gap-2 text-sm sm:grid-cols-2 lg:grid-cols-5">
         <div className="rounded-xl border border-white/60 bg-white/65 px-3 py-2">
           <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Coverage</p>
-          <p className="mt-1 font-semibold text-slate-900">{summary.coverage_pct.toFixed(2)}%</p>
+          <p className="mt-1 font-semibold text-slate-900">{formatCoveragePct(summary.coverage_pct)}</p>
         </div>
         <div className="rounded-xl border border-white/60 bg-white/65 px-3 py-2">
           <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500">Confidence</p>

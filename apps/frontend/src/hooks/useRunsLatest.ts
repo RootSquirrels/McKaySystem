@@ -32,6 +32,27 @@ interface RunLatestResponse {
   run: RunLatestItem | null;
 }
 
+function asNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeRun(run: RunLatestItem | null): RunLatestItem | null {
+  if (!run) {
+    return null;
+  }
+  return {
+    ...run,
+    coverage_pct: asNumber(run.coverage_pct),
+    coverage_targets: asNumber(run.coverage_targets),
+    coverage_failed: asNumber(run.coverage_failed),
+    permission_gap_count: asNumber(run.permission_gap_count),
+  };
+}
+
 /**
  * Resolve latest run metadata for current tenant/workspace.
  */
@@ -45,7 +66,7 @@ export function useRunsLatest(enabled = true) {
     queryFn: async () => {
       try {
         const response = await apiClient.get<RunLatestResponse>("/runs/latest");
-        return response.run;
+        return normalizeRun(response.run);
       } catch (error) {
         if (error instanceof ApiError && (error.status === 403 || error.status === 404)) {
           return null;

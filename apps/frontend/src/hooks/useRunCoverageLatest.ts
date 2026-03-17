@@ -40,6 +40,45 @@ export interface RunCoverageLatestResponse {
   coverage: RunCoverageSummary | null;
 }
 
+function asNumber(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeRun(run: RunCoverageLatestRun | null): RunCoverageLatestRun | null {
+  if (!run) {
+    return null;
+  }
+  return {
+    ...run,
+    coverage_pct: asNumber(run.coverage_pct),
+    coverage_targets: asNumber(run.coverage_targets),
+    coverage_failed: asNumber(run.coverage_failed),
+    permission_gap_count: asNumber(run.permission_gap_count),
+  };
+}
+
+function normalizeSummary(summary: RunCoverageSummary | null): RunCoverageSummary | null {
+  if (!summary) {
+    return null;
+  }
+  return {
+    ...summary,
+    targets_total: Number(summary.targets_total ?? 0),
+    assessed_total: Number(summary.assessed_total ?? 0),
+    assessed_with_findings: Number(summary.assessed_with_findings ?? 0),
+    assessed_no_issue: Number(summary.assessed_no_issue ?? 0),
+    assessment_failed: Number(summary.assessment_failed ?? 0),
+    skipped_total: Number(summary.skipped_total ?? 0),
+    not_assessed_total: Number(summary.not_assessed_total ?? 0),
+    permission_gap_count: Number(summary.permission_gap_count ?? 0),
+    coverage_pct: Number(summary.coverage_pct ?? 0),
+  };
+}
+
 /**
  * Resolve the latest run coverage summary for the active tenant/workspace.
  */
@@ -52,7 +91,12 @@ export function useRunCoverageLatest(enabled = true) {
     retry: false,
     queryFn: async () => {
       try {
-        return await apiClient.get<RunCoverageLatestResponse>("/runs/latest/coverage");
+        const response = await apiClient.get<RunCoverageLatestResponse>("/runs/latest/coverage");
+        return {
+          ...response,
+          run: normalizeRun(response.run),
+          coverage: normalizeSummary(response.coverage),
+        };
       } catch (error) {
         if (error instanceof ApiError && (error.status === 403 || error.status === 404)) {
           return null;
