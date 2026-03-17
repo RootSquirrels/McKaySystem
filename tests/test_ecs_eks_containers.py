@@ -97,6 +97,8 @@ class FakeEKS:
         clusters_by_name: Dict[str, Mapping[str, Any]],
         nodegroups_by_cluster: Dict[str, List[str]],
         nodegroups_by_name: Dict[tuple[str, str], Mapping[str, Any]],
+        addons_by_cluster: Optional[Dict[str, List[str]]] = None,
+        addons_by_name: Optional[Dict[tuple[str, str], Mapping[str, Any]]] = None,
         raise_on: Optional[str] = None,
     ) -> None:
         self.meta = SimpleNamespace(region_name=region)
@@ -104,6 +106,8 @@ class FakeEKS:
         self._clusters_by_name = clusters_by_name
         self._nodegroups_by_cluster = nodegroups_by_cluster
         self._nodegroups_by_name = nodegroups_by_name
+        self._addons_by_cluster = addons_by_cluster or {}
+        self._addons_by_name = addons_by_name or {}
         self._raise_on = raise_on
 
     def get_paginator(self, op_name: str) -> FakePaginator:
@@ -120,6 +124,13 @@ class FakeEKS:
             def _pages(**kwargs: Any) -> Iterable[Mapping[str, Any]]:
                 cluster = str(kwargs.get("clusterName") or "")
                 yield {"nodegroups": list(self._nodegroups_by_cluster.get(cluster, []))}
+
+            return FakePaginator(paginate_fn=_pages)
+
+        if op_name == "list_addons":
+            def _pages(**kwargs: Any) -> Iterable[Mapping[str, Any]]:
+                cluster = str(kwargs.get("clusterName") or "")
+                yield {"addons": list(self._addons_by_cluster.get(cluster, []))}
 
             return FakePaginator(paginate_fn=_pages)
 
@@ -148,6 +159,14 @@ class FakeEKS:
                 "describe_nodegroup",
             )
         return {"nodegroup": dict(self._nodegroups_by_name.get((clusterName, nodegroupName), {}))}
+
+    def describe_addon(self, *, clusterName: str, addonName: str) -> Mapping[str, Any]:
+        if self._raise_on == "describe_addon":
+            raise ClientError(
+                {"Error": {"Code": "AccessDeniedException", "Message": "denied"}},
+                "describe_addon",
+            )
+        return {"addon": dict(self._addons_by_name.get((clusterName, addonName), {}))}
 
 
 @dataclass
@@ -263,6 +282,7 @@ def test_eks_cluster_and_nodegroup_signals_emit() -> None:
             cluster_name: {
                 "name": cluster_name,
                 "arn": cluster_arn,
+                "status": "ACTIVE",
                 "version": "1.26",
                 "resourcesVpcConfig": {
                     "endpointPublicAccess": True,
@@ -277,11 +297,14 @@ def test_eks_cluster_and_nodegroup_signals_emit() -> None:
             (cluster_name, ng_name): {
                 "nodegroupName": ng_name,
                 "nodegroupArn": ng_arn,
+                "status": "ACTIVE",
                 "capacityType": "ON_DEMAND",
                 "scalingConfig": {"desiredSize": 3},
                 "tags": {"team": "platform"},
             }
         },
+        addons_by_cluster={},
+        addons_by_name={},
     )
 
     findings = list(_checker().run(_mk_ctx(eks=eks)))
@@ -292,6 +315,99 @@ def test_eks_cluster_and_nodegroup_signals_emit() -> None:
     assert "aws.eks.nodegroup.nonprod.on_demand" in check_ids
 
 
+def test_eks_idle_cluster_spot_mix_and_unhealthy_addon_emit() -> None:
+    idle_cluster_name = "idle-eks"
+    idle_cluster_arn = "arn:aws:eks:eu-west-1:111111111111:cluster/idle-eks"
+    idle_ng_name = "ng-zero"
+    idle_ng_arn = "arn:aws:eks:eu-west-1:111111111111:nodegroup/idle-eks/ng-zero/id"
+
+    mix_cluster_name = "dev-mixed-eks"
+    mix_cluster_arn = "arn:aws:eks:eu-west-1:111111111111:cluster/dev-mixed-eks"
+    od_ng_name = "ng-od"
+    od_ng_arn = "arn:aws:eks:eu-west-1:111111111111:nodegroup/dev-mixed-eks/ng-od/id"
+    spot_ng_name = "ng-spot"
+    spot_ng_arn = "arn:aws:eks:eu-west-1:111111111111:nodegroup/dev-mixed-eks/ng-spot/id"
+    addon_arn = "arn:aws:eks:eu-west-1:111111111111:addon/dev-mixed-eks/vpc-cni/id"
+
+    eks = FakeEKS(
+        region="eu-west-1",
+        clusters=[idle_cluster_name, mix_cluster_name],
+        clusters_by_name={
+            idle_cluster_name: {
+                "name": idle_cluster_name,
+                "arn": idle_cluster_arn,
+                "status": "ACTIVE",
+                "version": "1.29",
+                "resourcesVpcConfig": {
+                    "endpointPublicAccess": False,
+                    "endpointPrivateAccess": True,
+                },
+                "logging": {"clusterLogging": [{"types": ["api"], "enabled": True}]},
+                "tags": {"env": "dev"},
+            },
+            mix_cluster_name: {
+                "name": mix_cluster_name,
+                "arn": mix_cluster_arn,
+                "status": "ACTIVE",
+                "version": "1.29",
+                "resourcesVpcConfig": {
+                    "endpointPublicAccess": False,
+                    "endpointPrivateAccess": True,
+                },
+                "logging": {"clusterLogging": [{"types": ["api"], "enabled": True}]},
+                "tags": {"env": "dev"},
+            },
+        },
+        nodegroups_by_cluster={
+            idle_cluster_name: [idle_ng_name],
+            mix_cluster_name: [od_ng_name, spot_ng_name],
+        },
+        nodegroups_by_name={
+            (idle_cluster_name, idle_ng_name): {
+                "nodegroupName": idle_ng_name,
+                "nodegroupArn": idle_ng_arn,
+                "status": "ACTIVE",
+                "capacityType": "ON_DEMAND",
+                "scalingConfig": {"desiredSize": 0, "minSize": 0, "maxSize": 2},
+                "tags": {"env": "dev"},
+            },
+            (mix_cluster_name, od_ng_name): {
+                "nodegroupName": od_ng_name,
+                "nodegroupArn": od_ng_arn,
+                "status": "ACTIVE",
+                "capacityType": "ON_DEMAND",
+                "scalingConfig": {"desiredSize": 3, "minSize": 1, "maxSize": 4},
+                "tags": {"env": "dev"},
+            },
+            (mix_cluster_name, spot_ng_name): {
+                "nodegroupName": spot_ng_name,
+                "nodegroupArn": spot_ng_arn,
+                "status": "ACTIVE",
+                "capacityType": "SPOT",
+                "scalingConfig": {"desiredSize": 1, "minSize": 0, "maxSize": 3},
+                "tags": {"env": "dev"},
+            },
+        },
+        addons_by_cluster={mix_cluster_name: ["vpc-cni"]},
+        addons_by_name={
+            (mix_cluster_name, "vpc-cni"): {
+                "addonName": "vpc-cni",
+                "addonArn": addon_arn,
+                "addonVersion": "v1.18.0-eksbuild.1",
+                "status": "DEGRADED",
+                "tags": {"env": "dev"},
+            }
+        },
+    )
+
+    findings = list(_checker().run(_mk_ctx(eks=eks)))
+    check_ids = {f.check_id for f in findings}
+    assert "aws.eks.cluster.possibly.idle" in check_ids
+    assert "aws.eks.nodegroup.possibly.idle" in check_ids
+    assert "aws.eks.cluster.nonprod.spot.low_mix" in check_ids
+    assert "aws.eks.addon.unhealthy" in check_ids
+
+
 def test_access_denied_emits_access_error() -> None:
     eks = FakeEKS(
         region="eu-west-1",
@@ -299,6 +415,8 @@ def test_access_denied_emits_access_error() -> None:
         clusters_by_name={},
         nodegroups_by_cluster={},
         nodegroups_by_name={},
+        addons_by_cluster={},
+        addons_by_name={},
         raise_on="list_clusters",
     )
     findings = list(_checker().run(_mk_ctx(eks=eks)))

@@ -22,7 +22,11 @@ Detect ECS and EKS container-platform optimization and governance issues.
 - `aws.eks.cluster.endpoint.public.only`
 - `aws.eks.cluster.controlplane.logging.disabled`
 - `aws.eks.cluster.version.outdated`
+- `aws.eks.cluster.possibly.idle`
+- `aws.eks.cluster.nonprod.spot.low_mix`
 - `aws.eks.nodegroup.nonprod.on_demand`
+- `aws.eks.nodegroup.possibly.idle`
+- `aws.eks.addon.unhealthy`
 - `aws.containers.access.error`
 
 ## Key signals
@@ -36,7 +40,11 @@ EKS:
 - Public-only cluster endpoint posture.
 - Control-plane logging disabled.
 - Kubernetes version below configured minimum.
+- Potentially idle clusters with no desired managed worker capacity.
+- Low spot usage in non-production worker pools.
 - Non-production managed node groups using on-demand capacity.
+- Potentially idle managed node groups scaled to zero.
+- Managed add-ons in unhealthy states.
 
 ## Configuration and defaults
 
@@ -59,6 +67,8 @@ Typical read-only permissions:
 - `eks:DescribeCluster`
 - `eks:ListNodegroups`
 - `eks:DescribeNodegroup`
+- `eks:ListAddons`
+- `eks:DescribeAddon`
 
 ## Determinism and limitations
 

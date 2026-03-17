@@ -40,6 +40,7 @@ CONTAINERS_NONPROD_TAG_VALUES: Final[tuple[str, ...]] = (
     "non-prod",
 )
 EKS_MIN_SUPPORTED_VERSION: Final[tuple[int, int]] = (1, 28)
+EKS_NONPROD_SPOT_MIN_RATIO: Final[float] = 0.50
 
 # RDS instances optimization checker defaults
 RDS_STORAGE_GB_MONTH_PRICE_USD: Final[float] = 0.115

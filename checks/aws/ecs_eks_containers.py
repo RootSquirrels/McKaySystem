@@ -31,6 +31,7 @@ from checks.aws.defaults import (
     CONTAINERS_MAX_FINDINGS_PER_TYPE,
     CONTAINERS_NONPROD_TAG_KEYS,
     CONTAINERS_NONPROD_TAG_VALUES,
+    EKS_NONPROD_SPOT_MIN_RATIO,
     EKS_MIN_SUPPORTED_VERSION,
 )
 from checks.registry import Bootstrap, register_checker
@@ -47,6 +48,7 @@ class EcsEksContainersConfig:
     nonprod_tag_keys: tuple[str, ...] = CONTAINERS_NONPROD_TAG_KEYS
     nonprod_tag_values: tuple[str, ...] = CONTAINERS_NONPROD_TAG_VALUES
     eks_min_supported_version: tuple[int, int] = EKS_MIN_SUPPORTED_VERSION
+    eks_nonprod_spot_min_ratio: float = EKS_NONPROD_SPOT_MIN_RATIO
 
 
 def _to_int(value: Any, default: int = 0) -> int:
@@ -171,6 +173,13 @@ def _cluster_name_from_arn(cluster_arn: str) -> str:
     if marker in text:
         return text.split(marker, 1)[1]
     return text
+
+
+def _ratio(part: int, total: int) -> float:
+    """Return a bounded ratio for deterministic percentage-style calculations."""
+    if total <= 0:
+        return 0.0
+    return max(0.0, min(1.0, float(part) / float(total)))
 
 
 def _service_name_from_arn(service_arn: str) -> str:
@@ -495,6 +504,7 @@ class EcsEksContainersChecker(Checker):
 
             cluster_arn = str(cluster.get("arn") or "")
             cluster_tags = _normalize_tags_any(cluster.get("tags"))
+            cluster_status = str(cluster.get("status") or "ACTIVE").upper()
             vpc_cfg = cluster.get("resourcesVpcConfig") or {}
             endpoint_public = bool(vpc_cfg.get("endpointPublicAccess"))
             endpoint_private = bool(vpc_cfg.get("endpointPrivateAccess"))
@@ -608,6 +618,7 @@ class EcsEksContainersChecker(Checker):
                     continue
                 raise
 
+            described_nodegroups: list[dict[str, Any]] = []
             for ng_name in nodegroups:
                 try:
                     ng_resp = eks.describe_nodegroup(clusterName=cluster_name, nodegroupName=ng_name)
@@ -627,13 +638,17 @@ class EcsEksContainersChecker(Checker):
                 nodegroup = (ng_resp or {}).get("nodegroup") or {}
                 if not isinstance(nodegroup, Mapping):
                     continue
+                described_nodegroups.append(dict(nodegroup))
 
                 nodegroup_arn = str(nodegroup.get("nodegroupArn") or "")
                 nodegroup_tags = _normalize_tags_any(nodegroup.get("tags"))
                 merged_tags = dict(cluster_tags)
                 merged_tags.update(nodegroup_tags)
                 desired_size = _to_int((nodegroup.get("scalingConfig") or {}).get("desiredSize"))
+                min_size = _to_int((nodegroup.get("scalingConfig") or {}).get("minSize"))
+                max_size = _to_int((nodegroup.get("scalingConfig") or {}).get("maxSize"))
                 capacity_type = str(nodegroup.get("capacityType") or "ON_DEMAND").upper()
+                nodegroup_status = str(nodegroup.get("status") or "ACTIVE").upper()
 
                 if desired_size > 0 and capacity_type == "ON_DEMAND" and self._is_non_prod(merged_tags):
                     check_id = "aws.eks.nodegroup.nonprod.on_demand"
@@ -672,6 +687,249 @@ class EcsEksContainersChecker(Checker):
                                 "nodegroup_name": ng_name,
                             },
                         )
+
+                if nodegroup_status == "ACTIVE" and desired_size == 0 and min_size == 0:
+                    check_id = "aws.eks.nodegroup.possibly.idle"
+                    if self._should_emit(check_id, emitted):
+                        yield FindingDraft(
+                            check_id=check_id,
+                            check_name="EKS nodegroup possibly idle",
+                            category="cost",
+                            status="info",
+                            severity=Severity(level="low", score=250),
+                            title=f"EKS nodegroup appears idle: {ng_name}",
+                            scope=build_scope(
+                                ctx,
+                                account=self._account,
+                                region=region,
+                                service="eks",
+                                resource_type="nodegroup",
+                                resource_id=ng_name,
+                                resource_arn=nodegroup_arn,
+                            ),
+                            message=(
+                                f"Nodegroup is ACTIVE with desiredSize={desired_size} and minSize={min_size}, "
+                                f"so no worker nodes are currently requested."
+                            ),
+                            recommendation=(
+                                "If this nodegroup is no longer needed, delete it or keep it scaled to zero only "
+                                "when it is intentionally used as burst or standby capacity."
+                            ),
+                            tags=merged_tags,
+                            dimensions={
+                                "cluster_name": cluster_name,
+                                "desired_size": str(desired_size),
+                                "min_size": str(min_size),
+                                "max_size": str(max_size),
+                                "capacity_type": capacity_type,
+                            },
+                            issue_key={
+                                "signal": "nodegroup_idle",
+                                "cluster_name": cluster_name,
+                                "nodegroup_name": ng_name,
+                            },
+                        )
+
+            total_desired_nodes = 0
+            total_spot_nodes = 0
+            total_on_demand_nodes = 0
+            desired_nodegroup_count = 0
+            desired_nonprod_nodegroup_count = 0
+            for nodegroup in described_nodegroups:
+                desired_size = _to_int((nodegroup.get("scalingConfig") or {}).get("desiredSize"))
+                if desired_size <= 0:
+                    continue
+                desired_nodegroup_count += 1
+                total_desired_nodes += desired_size
+                merged_tags = dict(cluster_tags)
+                merged_tags.update(_normalize_tags_any(nodegroup.get("tags")))
+                if self._is_non_prod(merged_tags):
+                    desired_nonprod_nodegroup_count += 1
+                capacity_type = str(nodegroup.get("capacityType") or "ON_DEMAND").upper()
+                if capacity_type == "SPOT":
+                    total_spot_nodes += desired_size
+                else:
+                    total_on_demand_nodes += desired_size
+
+            if cluster_status == "ACTIVE" and total_desired_nodes == 0:
+                check_id = "aws.eks.cluster.possibly.idle"
+                if self._should_emit(check_id, emitted):
+                    yield FindingDraft(
+                        check_id=check_id,
+                        check_name="EKS cluster possibly idle",
+                        category="cost",
+                        status="info",
+                        severity=Severity(level="low", score=255),
+                        title=f"EKS cluster appears idle: {cluster_name}",
+                        scope=build_scope(
+                            ctx,
+                            account=self._account,
+                            region=region,
+                            service="eks",
+                            resource_type="cluster",
+                            resource_id=cluster_name,
+                            resource_arn=cluster_arn,
+                        ),
+                        message=(
+                            "Cluster has no managed nodegroups with desired worker capacity, so it may be retained "
+                            "without active compute demand."
+                        ),
+                        recommendation=(
+                            "If the cluster is no longer needed, remove it or confirm that keeping the control "
+                            "plane is justified for expected near-term workloads."
+                        ),
+                        tags=cluster_tags,
+                        dimensions={
+                            "managed_nodegroups": str(len(described_nodegroups)),
+                            "desired_nodes_total": str(total_desired_nodes),
+                        },
+                        issue_key={"signal": "cluster_idle", "cluster_name": cluster_name},
+                    )
+
+            cluster_nonprod = self._is_non_prod(cluster_tags)
+            all_desired_nodegroups_nonprod = (
+                desired_nodegroup_count > 0 and desired_nonprod_nodegroup_count == desired_nodegroup_count
+            )
+            spot_ratio = _ratio(total_spot_nodes, total_desired_nodes)
+            if (
+                total_desired_nodes >= 2
+                and total_on_demand_nodes > 0
+                and spot_ratio < self._cfg.eks_nonprod_spot_min_ratio
+                and (cluster_nonprod or all_desired_nodegroups_nonprod)
+            ):
+                check_id = "aws.eks.cluster.nonprod.spot.low_mix"
+                if self._should_emit(check_id, emitted):
+                    yield FindingDraft(
+                        check_id=check_id,
+                        check_name="Non-production EKS worker pool has low spot usage",
+                        category="cost",
+                        status="info",
+                        severity=Severity(level="low", score=280),
+                        title=f"EKS non-prod worker pool may rely too much on on-demand nodes: {cluster_name}",
+                        scope=build_scope(
+                            ctx,
+                            account=self._account,
+                            region=region,
+                            service="eks",
+                            resource_type="cluster",
+                            resource_id=cluster_name,
+                            resource_arn=cluster_arn,
+                        ),
+                        message=(
+                            f"Cluster has desired worker capacity of {total_desired_nodes} nodes with "
+                            f"{total_spot_nodes} SPOT and {total_on_demand_nodes} ON_DEMAND "
+                            f"({spot_ratio * 100.0:.0f}% spot share)."
+                        ),
+                        recommendation=(
+                            "Evaluate whether more non-production worker capacity can move to SPOT while keeping "
+                            "enough on-demand baseline for safe scheduling and interruption tolerance."
+                        ),
+                        tags=cluster_tags,
+                        dimensions={
+                            "desired_nodes_total": str(total_desired_nodes),
+                            "spot_nodes_total": str(total_spot_nodes),
+                            "on_demand_nodes_total": str(total_on_demand_nodes),
+                            "spot_ratio_pct": f"{spot_ratio * 100.0:.2f}",
+                            "recommended_min_spot_ratio_pct": f"{self._cfg.eks_nonprod_spot_min_ratio * 100.0:.2f}",
+                        },
+                        issue_key={"signal": "low_spot_mix", "cluster_name": cluster_name},
+                    )
+
+            try:
+                addon_names = list(
+                    _paginate_strings(
+                        eks,
+                        "list_addons",
+                        "addons",
+                        params={"clusterName": cluster_name},
+                    )
+                )
+            except (AttributeError, KeyError):
+                addon_names = []
+            except ClientError as exc:
+                if _is_access_denied(exc):
+                    check_id = "aws.containers.access.error"
+                    if self._should_emit(check_id, emitted):
+                        yield self._access_error(
+                            ctx,
+                            region=region,
+                            service="eks",
+                            action="eks:ListAddons",
+                            exc=exc,
+                        )
+                    addon_names = []
+                else:
+                    raise
+
+            for addon_name in addon_names:
+                try:
+                    addon_resp = eks.describe_addon(clusterName=cluster_name, addonName=addon_name)
+                except AttributeError:
+                    break
+                except ClientError as exc:
+                    if _is_access_denied(exc):
+                        check_id = "aws.containers.access.error"
+                        if self._should_emit(check_id, emitted):
+                            yield self._access_error(
+                                ctx,
+                                region=region,
+                                service="eks",
+                                action="eks:DescribeAddon",
+                                exc=exc,
+                            )
+                        continue
+                    raise
+
+                addon = (addon_resp or {}).get("addon") or {}
+                if not isinstance(addon, Mapping):
+                    continue
+                addon_arn = str(addon.get("addonArn") or "")
+                addon_status = str(addon.get("status") or "").upper()
+                if addon_status in {"", "ACTIVE"}:
+                    continue
+                addon_tags = _normalize_tags_any(addon.get("tags"))
+                merged_tags = dict(cluster_tags)
+                merged_tags.update(addon_tags)
+                addon_version = str(addon.get("addonVersion") or "")
+
+                check_id = "aws.eks.addon.unhealthy"
+                if self._should_emit(check_id, emitted):
+                    yield FindingDraft(
+                        check_id=check_id,
+                        check_name="EKS managed add-on unhealthy",
+                        category="governance",
+                        status="fail",
+                        severity=Severity(level="medium", score=640),
+                        title=f"EKS managed add-on is not healthy: {addon_name}",
+                        scope=build_scope(
+                            ctx,
+                            account=self._account,
+                            region=region,
+                            service="eks",
+                            resource_type="addon",
+                            resource_id=addon_name,
+                            resource_arn=addon_arn,
+                        ),
+                        message=(
+                            f"Managed add-on status is {addon_status}"
+                            + (f" on version {addon_version}." if addon_version else ".")
+                        ),
+                        recommendation=(
+                            "Review add-on health, version compatibility, and recent cluster upgrades. "
+                            "Restore the add-on to ACTIVE to keep cluster networking and platform services reliable."
+                        ),
+                        tags=merged_tags,
+                        dimensions={
+                            "cluster_name": cluster_name,
+                            "addon_status": addon_status,
+                            "addon_version": addon_version,
+                        },
+                        issue_key={
+                            "signal": "addon_unhealthy",
+                            "cluster_name": cluster_name,
+                            "addon_name": addon_name,
+                        },
+                    )
 
     def _access_error(
         self,
