@@ -13,6 +13,7 @@ import pytest
 
 from apps.backend import db_migrate
 from apps.backend.db import db_conn
+from apps.worker.coverage_model import CoverageIssue, CoverageResult, write_coverage_bundle
 from apps.worker import ingest_parquet
 from apps.worker.ingest_parquet import DbApi, ingest_from_manifest
 from contracts.finops_contracts import build_ids_and_validate
@@ -428,6 +429,90 @@ def test_ingest_parquet_persists_manifest_pricing_metadata(tmp_path: Path) -> No
     params_list = list(params or ())
     assert "aws_2026_06_01" in params_list
     assert "snapshot" in params_list
+
+
+def test_ingest_parquet_persists_coverage_summary(tmp_path: Path) -> None:
+    """Ingest should persist coverage rows and update run coverage summary columns."""
+    base_dir = tmp_path / "finops_findings"
+    wire = build_ids_and_validate(_wire_record(), issue_key={"policy": "coverage-meta"})
+
+    writer = FindingsParquetWriter(
+        ParquetWriterConfig(
+            base_dir=str(base_dir),
+            drop_invalid_on_cast=False,
+            max_rows_per_file=10,
+            max_buffered_rows=10,
+        )
+    )
+    writer.extend([wire])
+    writer.close()
+
+    coverage_dir = write_coverage_bundle(
+        base_dir,
+        results=[
+            CoverageResult(
+                tenant_id="acme",
+                workspace="prod",
+                run_id="run-1",
+                account_id="123",
+                region="eu-west-3",
+                service="s3",
+                checker_id="aws.s3.lifecycle.missing",
+                checker_scope="regional",
+                status="assessed_with_findings",
+                findings_count=1,
+                confidence="high",
+                completeness_pct=100.0,
+            )
+        ],
+        issues=[
+            CoverageIssue(
+                tenant_id="acme",
+                workspace="prod",
+                run_id="run-1",
+                account_id="123",
+                region="eu-west-3",
+                service="s3",
+                checker_id="aws.s3.lifecycle.missing",
+                issue_type="missing_permission",
+                error_code="AccessDenied",
+                message="denied",
+            )
+        ],
+    )
+
+    manifest = RunManifest(
+        tenant_id="acme",
+        workspace="prod",
+        run_id="run-1",
+        run_ts=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        engine_name="finopsanalyzer",
+        engine_version="0.1.0",
+        rulepack_version="0.1.0",
+        schema_version=1,
+        out_raw=str(base_dir),
+        coverage_dir=str(coverage_dir),
+    )
+    manifest_path = write_manifest(base_dir, manifest)
+
+    fake = _FakeDb()
+    stats = ingest_from_manifest(
+        manifest_path,
+        db_api=DbApi(execute=fake.execute, execute_many=fake.execute_many, fetch_one=fake.fetch_one),
+        batch_size=1,
+        parquet_batch_size=1,
+    )
+
+    assert stats.coverage_rows == 1
+    assert stats.coverage_issue_rows == 1
+    assert any("run_checker_coverage" in sql for sql, _ in fake.execute_many_calls)
+    assert any("run_coverage_issues" in sql for sql, _ in fake.execute_many_calls)
+    run_updates = [(sql, params) for sql, params in fake.executes if "UPDATE runs" in sql and "coverage_pct" in sql]
+    assert run_updates
+    _, params = run_updates[-1]
+    params_list = list(params or ())
+    assert 100.0 in params_list
+    assert "healthy" in params_list
 
 
 def test_ingest_parquet_rejects_invalid_manifest_run_ts(tmp_path: Path) -> None:

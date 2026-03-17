@@ -3,7 +3,9 @@
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 
+import { RunCoverageBanner } from "@/components/coverage/RunCoverageBanner";
 import { useAuth } from "@/hooks/useAuth";
+import { useRunCoverageLatest } from "@/hooks/useRunCoverageLatest";
 import { RecommendationItem, useRecommendations } from "@/hooks/useRecommendations";
 import { ApiError } from "@/lib/api/client";
 import { getStoredScope } from "@/lib/scope";
@@ -177,6 +179,8 @@ export function RecommendationsClientPage() {
   const permissions = useMemo(() => new Set(auth.user?.permissions ?? []), [auth.user?.permissions]);
   const canReadUsers = permissions.has("admin:full") || permissions.has("users:read");
   const canReadFindings = permissions.has("admin:full") || permissions.has("findings:read");
+  const canReadRuns = permissions.has("admin:full") || permissions.has("runs:read");
+  const latestCoverage = useRunCoverageLatest(canReadRuns);
 
   if (!scope) {
     return null;
@@ -259,6 +263,17 @@ export function RecommendationsClientPage() {
               Findings
             </button>
           ) : null}
+          {canReadRuns ? (
+            <button
+              type="button"
+              className="finops-toolbar-btn rounded-lg px-3 py-2 text-sm font-medium transition"
+              onClick={() => {
+                router.push("/coverage");
+              }}
+            >
+              Coverage
+            </button>
+          ) : null}
           {canReadUsers ? (
             <button
               type="button"
@@ -301,6 +316,11 @@ export function RecommendationsClientPage() {
           <p className="font-display mt-1 text-2xl font-semibold text-white">{approvalRequiredCount}</p>
         </article>
       </section>
+
+      <RunCoverageBanner
+        run={latestCoverage.data?.run ?? null}
+        summary={latestCoverage.data?.coverage ?? null}
+      />
 
       <section className="finops-panel mb-3 rounded-2xl p-4 text-sm">
         <div className="grid gap-3 md:grid-cols-4">

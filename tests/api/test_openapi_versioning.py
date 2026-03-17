@@ -299,3 +299,148 @@ def test_versioned_openapi_alias_and_version_endpoint(monkeypatch) -> None:  # t
     version_body = version_resp.get_json() or {}
     assert version_body.get("version") == "v1"
     assert version_body.get("prefix") == "/api/v1"
+
+
+def test_versioned_latest_run_coverage_alias_works(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """`/api/v1/runs/latest/coverage` should expose latest run coverage summary."""
+    _disable_runtime_guards(monkeypatch)
+
+    def _fake_fetch_one(
+        _conn: object, sql: str, params: Sequence[Any] | None = None
+    ) -> dict[str, Any] | None:
+        _ = params
+        assert "run_coverage_summary" in sql
+        return {
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "run_id": "run-1",
+            "run_ts": "2026-03-17T09:00:00Z",
+            "status": "ready",
+            "coverage_pct": 84.21,
+            "coverage_status": "degraded",
+            "coverage_targets": 10,
+            "coverage_failed": 2,
+            "permission_gap_count": 1,
+            "targets_total": 10,
+            "assessed_total": 8,
+            "assessed_with_findings": 3,
+            "assessed_no_issue": 5,
+            "assessment_failed": 2,
+            "skipped_total": 0,
+            "not_assessed_total": 0,
+            "summary_permission_gap_count": 1,
+            "summary_coverage_pct": 84.21,
+            "summary_coverage_status": "degraded",
+            "confidence": "medium",
+        }
+
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+
+    client = flask_app.app.test_client()
+    resp = client.get("/api/v1/runs/latest/coverage?tenant_id=acme&workspace=prod")
+
+    assert resp.status_code == 200
+    body = resp.get_json() or {}
+    assert body.get("ok") is True
+    run = body.get("run") or {}
+    coverage = body.get("coverage") or {}
+    assert run.get("coverage_pct") == 84.21
+    assert run.get("coverage_status") == "degraded"
+    assert coverage.get("targets_total") == 10
+    assert coverage.get("assessment_failed") == 2
+    assert coverage.get("confidence") == "medium"
+
+
+def test_versioned_latest_run_coverage_checkers_alias_works(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """`/api/v1/runs/latest/coverage/checkers` should expose checker coverage rows."""
+    _disable_runtime_guards(monkeypatch)
+
+    def _fake_fetch_all(
+        _conn: object, sql: str, params: Sequence[Any] | None = None
+    ) -> list[dict[str, Any]]:
+        _ = params
+        assert "run_checker_coverage" in sql
+        return [
+            {
+                "run_id": "run-1",
+                "run_ts": "2026-03-17T09:00:00Z",
+                "account_id": "123456789012",
+                "region": "eu-west-1",
+                "service": "ec2",
+                "checker_id": "aws.ec2.idle.instances",
+                "checker_scope": "regional",
+                "status": "assessment_failed",
+                "findings_count": 0,
+                "duration_ms": 1234,
+                "confidence": "low",
+                "completeness_pct": None,
+                "permission_gap_count": 1,
+                "error_class": "missing_permission",
+                "error_code": "AccessDenied",
+                "error_message": "Denied",
+                "skip_reason": None,
+                "started_at": "2026-03-17T09:00:00Z",
+                "finished_at": "2026-03-17T09:00:01Z",
+            }
+        ]
+
+    monkeypatch.setattr(flask_app, "fetch_all_dict_conn", _fake_fetch_all)
+
+    client = flask_app.app.test_client()
+    resp = client.get("/api/v1/runs/latest/coverage/checkers?tenant_id=acme&workspace=prod")
+
+    assert resp.status_code == 200
+    body = resp.get_json() or {}
+    assert body.get("ok") is True
+    run = body.get("run") or {}
+    items = body.get("items") or []
+    assert run.get("run_id") == "run-1"
+    assert len(items) == 1
+    assert items[0].get("checker_id") == "aws.ec2.idle.instances"
+    assert items[0].get("status") == "assessment_failed"
+    assert items[0].get("permission_gap_count") == 1
+
+
+def test_versioned_latest_run_coverage_issues_alias_works(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """`/api/v1/runs/latest/coverage/issues` should expose structured issue rows."""
+    _disable_runtime_guards(monkeypatch)
+
+    def _fake_fetch_all(
+        _conn: object, sql: str, params: Sequence[Any] | None = None
+    ) -> list[dict[str, Any]]:
+        _ = params
+        assert "run_coverage_issues" in sql
+        return [
+            {
+                "run_id": "run-1",
+                "run_ts": "2026-03-17T09:00:00Z",
+                "account_id": "123456789012",
+                "region": "eu-west-1",
+                "service": "ec2",
+                "checker_id": "aws.ec2.idle.instances",
+                "issue_type": "missing_permission",
+                "operation": "DescribeInstances",
+                "error_code": "AccessDenied",
+                "message": "Denied",
+                "is_retryable": False,
+                "severity": "error",
+                "payload": {"action": "ec2:DescribeInstances"},
+                "created_at": "2026-03-17T09:00:01Z",
+            }
+        ]
+
+    monkeypatch.setattr(flask_app, "fetch_all_dict_conn", _fake_fetch_all)
+
+    client = flask_app.app.test_client()
+    resp = client.get("/api/v1/runs/latest/coverage/issues?tenant_id=acme&workspace=prod")
+
+    assert resp.status_code == 200
+    body = resp.get_json() or {}
+    assert body.get("ok") is True
+    run = body.get("run") or {}
+    items = body.get("items") or []
+    assert run.get("run_id") == "run-1"
+    assert len(items) == 1
+    assert items[0].get("issue_type") == "missing_permission"
+    assert items[0].get("error_code") == "AccessDenied"
+    assert items[0].get("is_retryable") is False

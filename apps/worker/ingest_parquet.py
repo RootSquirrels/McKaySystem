@@ -22,6 +22,7 @@ from typing import Any
 import pyarrow.dataset as ds
 
 from apps.backend.db import db_conn, execute, execute_many, fetch_one
+from apps.worker.coverage_model import CoverageIssue, CoverageResult, load_coverage_bundle
 from apps.backend.run_state import (
     STATE_READY,
     acquire_run_lock,
@@ -337,6 +338,25 @@ class IngestStats:
     enriched_present: bool
     presence_rows: int
     latest_rows: int
+    coverage_rows: int = 0
+    coverage_issue_rows: int = 0
+
+
+@dataclass(frozen=True)
+class CoverageSummary:
+    """Computed run coverage summary persisted to Postgres."""
+
+    targets_total: int
+    assessed_total: int
+    assessed_with_findings: int
+    assessed_no_issue: int
+    assessment_failed: int
+    skipped_total: int
+    not_assessed_total: int
+    permission_gap_count: int
+    coverage_pct: float
+    coverage_status: str
+    confidence: str
 
 
 _AGG_DELETE_SQL = """
@@ -581,6 +601,273 @@ def _assert_post_ingest_invariants_with_cursor(
     )
 
 
+def _load_run_coverage(manifest: Any) -> tuple[list[CoverageResult], list[CoverageIssue]]:
+    """Load coverage artifacts when available for the manifest."""
+    coverage_dir = str(getattr(manifest, "coverage_dir", "") or "").strip()
+    if not coverage_dir:
+        return [], []
+    return load_coverage_bundle(coverage_dir)
+
+
+def _coverage_summary(results: Sequence[CoverageResult]) -> CoverageSummary:
+    """Compute deterministic summary counters from coverage rows."""
+    targets_total = len(results)
+    assessed_with_findings = sum(1 for item in results if item.status == "assessed_with_findings")
+    assessed_no_issue = sum(1 for item in results if item.status == "assessed_no_issue")
+    assessment_failed = sum(1 for item in results if item.status == "assessment_failed")
+    skipped_total = sum(1 for item in results if item.status == "skipped")
+    not_assessed_total = sum(1 for item in results if item.status == "not_assessed")
+    assessed_total = assessed_with_findings + assessed_no_issue
+    permission_gap_count = sum(max(0, int(item.permission_gap_count or 0)) for item in results)
+    coverage_pct = round((assessed_total / targets_total) * 100.0, 2) if targets_total else 0.0
+
+    if targets_total == 0 or assessment_failed == targets_total:
+        coverage_status = "failed"
+    elif assessment_failed > 0 or coverage_pct < 80.0:
+        coverage_status = "degraded"
+    elif skipped_total > 0 or not_assessed_total > 0:
+        coverage_status = "partial"
+    else:
+        coverage_status = "healthy"
+
+    if assessed_total == 0:
+        confidence = "none"
+    elif assessment_failed > 0 or permission_gap_count > 0:
+        confidence = "low"
+    elif skipped_total > 0 or not_assessed_total > 0:
+        confidence = "medium"
+    else:
+        confidence = "high"
+
+    return CoverageSummary(
+        targets_total=targets_total,
+        assessed_total=assessed_total,
+        assessed_with_findings=assessed_with_findings,
+        assessed_no_issue=assessed_no_issue,
+        assessment_failed=assessment_failed,
+        skipped_total=skipped_total,
+        not_assessed_total=not_assessed_total,
+        permission_gap_count=permission_gap_count,
+        coverage_pct=coverage_pct,
+        coverage_status=coverage_status,
+        confidence=confidence,
+    )
+
+
+def _coverage_result_rows(
+    results: Sequence[CoverageResult],
+) -> list[tuple[Any, ...]]:
+    """Convert coverage results to DB insert rows."""
+    return [
+        (
+            item.tenant_id,
+            item.workspace,
+            item.run_id,
+            item.account_id,
+            item.region,
+            item.service,
+            item.checker_id,
+            item.checker_scope,
+            item.status,
+            int(item.findings_count),
+            item.duration_ms,
+            item.confidence,
+            item.completeness_pct,
+            int(item.permission_gap_count),
+            item.error_class,
+            item.error_code,
+            item.error_message,
+            item.skip_reason,
+            _parse_dt(item.started_at),
+            _parse_dt(item.finished_at),
+        )
+        for item in results
+    ]
+
+
+def _coverage_issue_rows(
+    issues: Sequence[CoverageIssue],
+) -> list[tuple[Any, ...]]:
+    """Convert coverage issues to DB insert rows."""
+    return [
+        (
+            item.tenant_id,
+            item.workspace,
+            item.run_id,
+            item.account_id,
+            item.region,
+            item.service,
+            item.checker_id,
+            item.issue_type,
+            item.operation,
+            item.error_code,
+            item.message,
+            bool(item.is_retryable),
+            item.severity,
+            json.dumps(item.payload, ensure_ascii=False, separators=(",", ":")) if item.payload else None,
+        )
+        for item in issues
+    ]
+
+
+def _persist_coverage_with_api(
+    api: DbApi,
+    *,
+    tenant_id: str,
+    workspace: str,
+    run_id: str,
+    results: Sequence[CoverageResult],
+    issues: Sequence[CoverageIssue],
+) -> CoverageSummary:
+    """Persist coverage rows and summary using the DbApi abstraction."""
+    summary = _coverage_summary(results)
+    api.execute(
+        "DELETE FROM run_checker_coverage WHERE tenant_id=%s AND workspace=%s AND run_id=%s",
+        (tenant_id, workspace, run_id),
+    )
+    api.execute(
+        "DELETE FROM run_coverage_issues WHERE tenant_id=%s AND workspace=%s AND run_id=%s",
+        (tenant_id, workspace, run_id),
+    )
+    api.execute(
+        "DELETE FROM run_coverage_summary WHERE tenant_id=%s AND workspace=%s AND run_id=%s",
+        (tenant_id, workspace, run_id),
+    )
+
+    result_rows = _coverage_result_rows(results)
+    if result_rows:
+        api.execute_many(
+            """
+            INSERT INTO run_checker_coverage
+              (tenant_id, workspace, run_id, account_id, region, service, checker_id,
+               checker_scope, status, findings_count, duration_ms, confidence,
+               completeness_pct, permission_gap_count, error_class, error_code,
+               error_message, skip_reason, started_at, finished_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """,
+            result_rows,
+        )
+
+    issue_rows = _coverage_issue_rows(issues)
+    if issue_rows:
+        api.execute_many(
+            """
+            INSERT INTO run_coverage_issues
+              (tenant_id, workspace, run_id, account_id, region, service, checker_id,
+               issue_type, operation, error_code, message, is_retryable, severity, payload)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
+            """,
+            issue_rows,
+        )
+
+    api.execute(
+        """
+        INSERT INTO run_coverage_summary
+          (tenant_id, workspace, run_id, targets_total, assessed_total,
+           assessed_with_findings, assessed_no_issue, assessment_failed,
+           skipped_total, not_assessed_total, permission_gap_count, coverage_pct,
+           coverage_status, confidence)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """,
+        (
+            tenant_id,
+            workspace,
+            run_id,
+            summary.targets_total,
+            summary.assessed_total,
+            summary.assessed_with_findings,
+            summary.assessed_no_issue,
+            summary.assessment_failed,
+            summary.skipped_total,
+            summary.not_assessed_total,
+            summary.permission_gap_count,
+            summary.coverage_pct,
+            summary.coverage_status,
+            summary.confidence,
+        ),
+    )
+    return summary
+
+
+def _persist_coverage_with_cursor(
+    cur: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    run_id: str,
+    results: Sequence[CoverageResult],
+    issues: Sequence[CoverageIssue],
+) -> CoverageSummary:
+    """Persist coverage rows and summary inside an existing transaction."""
+    summary = _coverage_summary(results)
+    cur.execute(
+        "DELETE FROM run_checker_coverage WHERE tenant_id=%s AND workspace=%s AND run_id=%s",
+        (tenant_id, workspace, run_id),
+    )
+    cur.execute(
+        "DELETE FROM run_coverage_issues WHERE tenant_id=%s AND workspace=%s AND run_id=%s",
+        (tenant_id, workspace, run_id),
+    )
+    cur.execute(
+        "DELETE FROM run_coverage_summary WHERE tenant_id=%s AND workspace=%s AND run_id=%s",
+        (tenant_id, workspace, run_id),
+    )
+
+    result_rows = _coverage_result_rows(results)
+    if result_rows:
+        cur.executemany(
+            """
+            INSERT INTO run_checker_coverage
+              (tenant_id, workspace, run_id, account_id, region, service, checker_id,
+               checker_scope, status, findings_count, duration_ms, confidence,
+               completeness_pct, permission_gap_count, error_class, error_code,
+               error_message, skip_reason, started_at, finished_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """,
+            result_rows,
+        )
+
+    issue_rows = _coverage_issue_rows(issues)
+    if issue_rows:
+        cur.executemany(
+            """
+            INSERT INTO run_coverage_issues
+              (tenant_id, workspace, run_id, account_id, region, service, checker_id,
+               issue_type, operation, error_code, message, is_retryable, severity, payload)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
+            """,
+            issue_rows,
+        )
+
+    cur.execute(
+        """
+        INSERT INTO run_coverage_summary
+          (tenant_id, workspace, run_id, targets_total, assessed_total,
+           assessed_with_findings, assessed_no_issue, assessment_failed,
+           skipped_total, not_assessed_total, permission_gap_count, coverage_pct,
+           coverage_status, confidence)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """,
+        (
+            tenant_id,
+            workspace,
+            run_id,
+            summary.targets_total,
+            summary.assessed_total,
+            summary.assessed_with_findings,
+            summary.assessed_no_issue,
+            summary.assessment_failed,
+            summary.skipped_total,
+            summary.not_assessed_total,
+            summary.permission_gap_count,
+            summary.coverage_pct,
+            summary.coverage_status,
+            summary.confidence,
+        ),
+    )
+    return summary
+
+
 def _refresh_remediation_impacts_best_effort(
     *,
     tenant_id: str,
@@ -675,6 +962,7 @@ def ingest_from_manifest(
         _ensure_db_schema_current()
 
     manifest = load_manifest(manifest_path)
+    coverage_results, coverage_issues = _load_run_coverage(manifest)
     expected_schema = int(SCHEMA_VERSION)
     if manifest.schema_version is not None:
         try:
@@ -745,6 +1033,14 @@ def ingest_from_manifest(
         )
 
     try:
+        coverage_summary = _persist_coverage_with_api(
+            api,
+            tenant_id=manifest.tenant_id,
+            workspace=manifest.workspace,
+            run_id=manifest.run_id,
+            results=coverage_results,
+            issues=coverage_issues,
+        )
         api.execute(
             """
             INSERT INTO runs (tenant_id, workspace, run_id, run_ts, status, artifact_prefix, ingested_at, engine_version,
@@ -956,13 +1252,20 @@ def ingest_from_manifest(
             """
             UPDATE runs
             SET status='ready', ingested_at=NOW(),
-                raw_present=%s, correlated_present=%s, enriched_present=%s
+                raw_present=%s, correlated_present=%s, enriched_present=%s,
+                coverage_pct=%s, coverage_status=%s, coverage_targets=%s,
+                coverage_failed=%s, permission_gap_count=%s
             WHERE tenant_id=%s AND workspace=%s AND run_id=%s
             """,
             (
                 raw_present,
                 correlated_present,
                 enriched_present,
+                coverage_summary.coverage_pct,
+                coverage_summary.coverage_status,
+                coverage_summary.targets_total,
+                coverage_summary.assessment_failed,
+                coverage_summary.permission_gap_count,
                 manifest.tenant_id,
                 manifest.workspace,
                 manifest.run_id,
@@ -1012,6 +1315,8 @@ def ingest_from_manifest(
         enriched_present=enriched_present,
         presence_rows=total_presence,
         latest_rows=total_latest,
+        coverage_rows=len(coverage_results),
+        coverage_issue_rows=len(coverage_issues),
     )
 
 
@@ -1029,6 +1334,7 @@ def _ingest_with_copy(
 ) -> IngestStats:
     """Ingest using COPY into temp tables for scale."""
     run_ts = _manifest_run_ts(manifest.run_ts)
+    coverage_results, coverage_issues = _load_run_coverage(manifest)
 
     parquet_files = _list_parquet_files_for_paths(dataset_paths)
     if not parquet_files:
@@ -1317,6 +1623,14 @@ def _ingest_with_copy(
                     tenant_id=manifest.tenant_id,
                     workspace=manifest.workspace,
                 )
+                coverage_summary = _persist_coverage_with_cursor(
+                    cur,
+                    tenant_id=manifest.tenant_id,
+                    workspace=manifest.workspace,
+                    run_id=manifest.run_id,
+                    results=coverage_results,
+                    issues=coverage_issues,
+                )
                 _assert_post_ingest_invariants_with_cursor(
                     cur,
                     tenant_id=manifest.tenant_id,
@@ -1336,6 +1650,28 @@ def _ingest_with_copy(
                     correlated_present=correlated_present,
                     enriched_present=enriched_present,
                 )
+                with conn.cursor() as run_cur:
+                    run_cur.execute(
+                        """
+                        UPDATE runs
+                        SET coverage_pct=%s,
+                            coverage_status=%s,
+                            coverage_targets=%s,
+                            coverage_failed=%s,
+                            permission_gap_count=%s
+                        WHERE tenant_id=%s AND workspace=%s AND run_id=%s
+                        """,
+                        (
+                            coverage_summary.coverage_pct,
+                            coverage_summary.coverage_status,
+                            coverage_summary.targets_total,
+                            coverage_summary.assessment_failed,
+                            coverage_summary.permission_gap_count,
+                            manifest.tenant_id,
+                            manifest.workspace,
+                            manifest.run_id,
+                        ),
+                    )
                 if lock_token:
                     released = release_run_lock(
                         conn,
@@ -1433,6 +1769,8 @@ def _ingest_with_copy(
         enriched_present=enriched_present,
         presence_rows=total_presence,
         latest_rows=total_latest,
+        coverage_rows=len(coverage_results),
+        coverage_issue_rows=len(coverage_issues),
     )
 
 

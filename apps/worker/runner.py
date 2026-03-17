@@ -50,6 +50,7 @@ import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import boto3
@@ -62,11 +63,17 @@ from infra.aws_config import SDK_CONFIG
 from infra.config import get_settings
 from infra.logging_config import setup_logging
 from infra.pipeline_paths import PipelinePaths
+from apps.worker.coverage_model import CoverageIssue, CoverageResult, write_coverage_bundle
 from pipeline.run_manifest import RunManifest, write_manifest
 from pipeline.writer_parquet import FindingsParquetWriter, ParquetWriterConfig
 from version import ENGINE_NAME, ENGINE_VERSION, RULEPACK_VERSION, SCHEMA_VERSION
 
 logger = logging.getLogger(__name__)
+
+
+def _iso_z(dt: datetime) -> str:
+    """Return UTC ISO-8601 with trailing Z."""
+    return dt.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
@@ -102,6 +109,59 @@ def _optional_non_empty_text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _checker_service(checker: Checker, spec: str) -> str:
+    """Best-effort service name for coverage rows."""
+    explicit = str(getattr(checker, "service", "") or "").strip()
+    if explicit:
+        return explicit
+    checker_id = str(getattr(checker, "checker_id", "") or "").strip()
+    if checker_id.startswith("aws."):
+        parts = checker_id.split(".")
+        if len(parts) >= 2:
+            return parts[1]
+    if spec.startswith("checks.aws."):
+        parts = spec.split(".")
+        if len(parts) >= 3:
+            return parts[2].split(":")[0]
+    return "unknown"
+
+
+def _coverage_confidence(*, invalid_findings: int) -> str:
+    """Derive a simple deterministic confidence label."""
+    if invalid_findings > 0:
+        return "medium"
+    return "high"
+
+
+def _coverage_error_class(exc: Exception) -> tuple[str, bool, str | None]:
+    """Map runtime exceptions to coverage issue classes."""
+    code = None
+    resp = getattr(exc, "response", None)
+    if isinstance(resp, dict):
+        err = resp.get("Error")
+        if isinstance(err, dict):
+            raw_code = err.get("Code")
+            code = str(raw_code).strip() if raw_code is not None else None
+    if code is None:
+        raw_code = getattr(exc, "code", None)
+        code = str(raw_code).strip() if raw_code is not None else None
+
+    text = " ".join(
+        [
+            str(code or "").lower(),
+            exc.__class__.__name__.lower(),
+            str(exc).lower(),
+        ]
+    )
+    if "accessdenied" in text or "access denied" in text or "unauthorized" in text:
+        return "missing_permission", True, code
+    if "throttl" in text or "toomanyrequests" in text or "rate exceeded" in text:
+        return "throttled", False, code
+    if isinstance(exc, (TypeError, ValueError)):
+        return "malformed_source_data", False, code
+    return "internal_checker_error", False, code
 
 
 def _derive_pricing_metadata_from_services(services: Services) -> tuple[str | None, str | None]:
@@ -422,7 +482,7 @@ def _partition_checkers_by_scope(
     checker_specs: list[str],
     ctx_control: RunContext,
     bootstrap: dict,
-) -> tuple[list[Checker], list[str]]:
+) -> tuple[list[Checker], list[str], dict[str, dict[str, str]]]:
     """
     Instantiate once using the control ctx so we can detect checker.is_regional.
 
@@ -432,16 +492,22 @@ def _partition_checkers_by_scope(
     """
     global_checkers: list[Checker] = []
     regional_specs: list[str] = []
+    coverage_meta: dict[str, dict[str, str]] = {}
 
     for spec in checker_specs:
         inst = _load_checker(spec, ctx=ctx_control, bootstrap=bootstrap)
         is_regional = bool(getattr(inst, "is_regional", True))
+        coverage_meta[spec] = {
+            "checker_id": str(getattr(inst, "checker_id", spec)).strip() or spec,
+            "service": _checker_service(inst, spec),
+            "checker_scope": "regional" if is_regional else "global",
+        }
         if is_regional:
             regional_specs.append(spec)
         else:
             global_checkers.append(inst)
 
-    return global_checkers, regional_specs
+    return global_checkers, regional_specs, coverage_meta
 
 
 def main(argv: Sequence[str]) -> int:
@@ -512,7 +578,7 @@ def main(argv: Sequence[str]) -> int:
     if not checker_specs:
         raise RuntimeError("No checkers selected to run (after exclusions).")
 
-    global_checkers, regional_specs = _partition_checkers_by_scope(
+    global_checkers, regional_specs, coverage_meta = _partition_checkers_by_scope(
         checker_specs=checker_specs,
         ctx_control=ctx_control,
         bootstrap=bootstrap,
@@ -531,15 +597,116 @@ def main(argv: Sequence[str]) -> int:
     total_invalid_count = 0
     total_invalid_errors: list[str] = []
     per_region_valid: dict[str, int] = {}
+    checker_failures: list[str] = []
+    coverage_results: dict[tuple[str, str, str, str], CoverageResult] = {}
+    coverage_issues: list[CoverageIssue] = []
+
+    for spec in checker_specs:
+        meta = coverage_meta[spec]
+        if meta["checker_scope"] == "global":
+            coverage_results[(account_id, "", meta["service"], meta["checker_id"])] = CoverageResult(
+                tenant_id=args.tenant,
+                workspace=args.workspace,
+                run_id=run_id,
+                account_id=account_id,
+                region="",
+                service=meta["service"],
+                checker_id=meta["checker_id"],
+                checker_scope=meta["checker_scope"],
+                status="not_assessed",
+            )
+            continue
+
+        for region in regions:
+            coverage_results[(account_id, region, meta["service"], meta["checker_id"])] = CoverageResult(
+                tenant_id=args.tenant,
+                workspace=args.workspace,
+                run_id=run_id,
+                account_id=account_id,
+                region=region,
+                service=meta["service"],
+                checker_id=meta["checker_id"],
+                checker_scope=meta["checker_scope"],
+                status="not_assessed",
+            )
 
     # --- Run global checkers (once, in control region) ---
-    if global_checkers:
-        global_result = runner.run_many(global_checkers, ctx_control)
-        writer.extend(global_result.valid_findings)
-
-        total_valid += len(global_result.valid_findings)
-        total_invalid_count += int(global_result.invalid_findings)
-        total_invalid_errors.extend(global_result.invalid_errors or [])
+    for checker in global_checkers:
+        checker_started = _utc_now()
+        perf_started = perf_counter()
+        key = (
+            account_id,
+            "",
+            _checker_service(checker, str(getattr(checker, "checker_id", ""))),
+            str(getattr(checker, "checker_id", "")).strip(),
+        )
+        try:
+            result = runner.run_one(checker, ctx_control)
+            writer.extend(result.valid_findings)
+            valid_count = len(result.valid_findings)
+            total_valid += valid_count
+            total_invalid_count += int(result.invalid_findings)
+            total_invalid_errors.extend(result.invalid_errors or [])
+            coverage_results[key] = CoverageResult(
+                tenant_id=args.tenant,
+                workspace=args.workspace,
+                run_id=run_id,
+                account_id=account_id,
+                region="",
+                service=key[2],
+                checker_id=key[3],
+                checker_scope="global",
+                status="assessed_with_findings" if valid_count > 0 else "assessed_no_issue",
+                findings_count=valid_count,
+                duration_ms=int((perf_counter() - perf_started) * 1000),
+                confidence=_coverage_confidence(invalid_findings=result.invalid_findings),
+                completeness_pct=100.0,
+                permission_gap_count=0,
+                started_at=_iso_z(checker_started),
+                finished_at=_iso_z(_utc_now()),
+            )
+        except Exception as exc:  # strictly required to classify scan failures without hiding scope gaps
+            logger.exception("Checker failed: %s", key[3])
+            error_class, is_permission_gap, error_code = _coverage_error_class(exc)
+            checker_failures.append(key[3])
+            coverage_results[key] = CoverageResult(
+                tenant_id=args.tenant,
+                workspace=args.workspace,
+                run_id=run_id,
+                account_id=account_id,
+                region="",
+                service=key[2],
+                checker_id=key[3],
+                checker_scope="global",
+                status="assessment_failed",
+                findings_count=0,
+                duration_ms=int((perf_counter() - perf_started) * 1000),
+                confidence="none",
+                completeness_pct=0.0,
+                permission_gap_count=1 if is_permission_gap else 0,
+                error_class=error_class,
+                error_code=error_code,
+                error_message=str(exc)[:1000],
+                started_at=_iso_z(checker_started),
+                finished_at=_iso_z(_utc_now()),
+            )
+            coverage_issues.append(
+                CoverageIssue(
+                    tenant_id=args.tenant,
+                    workspace=args.workspace,
+                    run_id=run_id,
+                    account_id=account_id,
+                    region="",
+                    service=key[2],
+                    checker_id=key[3],
+                    issue_type=error_class,
+                    error_code=error_code,
+                    message=str(exc)[:1000],
+                    is_retryable=(error_class == "throttled"),
+                    severity="warning" if is_permission_gap else "error",
+                    payload={"exception_type": exc.__class__.__name__},
+                )
+            )
 
     # --- Run regional checkers per configured region ---
     for region in regions:
@@ -550,17 +717,90 @@ def main(argv: Sequence[str]) -> int:
         for spec in regional_specs:
             regional_checkers.append(_load_checker(spec, ctx=ctx_region, bootstrap=bootstrap))
 
+        region_valid_total = 0
         if not regional_checkers:
             per_region_valid[region] = 0
             continue
 
-        region_result = runner.run_many(regional_checkers, ctx_region)
-        writer.extend(region_result.valid_findings)
+        for checker in regional_checkers:
+            checker_started = _utc_now()
+            perf_started = perf_counter()
+            key = (
+                account_id,
+                region,
+                _checker_service(checker, str(getattr(checker, "checker_id", ""))),
+                str(getattr(checker, "checker_id", "")).strip(),
+            )
+            try:
+                result = runner.run_one(checker, ctx_region)
+                writer.extend(result.valid_findings)
+                valid_count = len(result.valid_findings)
+                region_valid_total += valid_count
+                total_valid += valid_count
+                total_invalid_count += int(result.invalid_findings)
+                total_invalid_errors.extend(result.invalid_errors or [])
+                coverage_results[key] = CoverageResult(
+                    tenant_id=args.tenant,
+                    workspace=args.workspace,
+                    run_id=run_id,
+                    account_id=account_id,
+                    region=region,
+                    service=key[2],
+                    checker_id=key[3],
+                    checker_scope="regional",
+                    status="assessed_with_findings" if valid_count > 0 else "assessed_no_issue",
+                    findings_count=valid_count,
+                    duration_ms=int((perf_counter() - perf_started) * 1000),
+                    confidence=_coverage_confidence(invalid_findings=result.invalid_findings),
+                    completeness_pct=100.0,
+                    permission_gap_count=0,
+                    started_at=_iso_z(checker_started),
+                    finished_at=_iso_z(_utc_now()),
+                )
+            except Exception as exc:  # strictly required to classify scan failures without aborting visibility
+                logger.exception("Checker failed: %s region=%s", key[3], region)
+                error_class, is_permission_gap, error_code = _coverage_error_class(exc)
+                checker_failures.append(f"{key[3]}@{region}")
+                coverage_results[key] = CoverageResult(
+                    tenant_id=args.tenant,
+                    workspace=args.workspace,
+                    run_id=run_id,
+                    account_id=account_id,
+                    region=region,
+                    service=key[2],
+                    checker_id=key[3],
+                    checker_scope="regional",
+                    status="assessment_failed",
+                    findings_count=0,
+                    duration_ms=int((perf_counter() - perf_started) * 1000),
+                    confidence="none",
+                    completeness_pct=0.0,
+                    permission_gap_count=1 if is_permission_gap else 0,
+                    error_class=error_class,
+                    error_code=error_code,
+                    error_message=str(exc)[:1000],
+                    started_at=_iso_z(checker_started),
+                    finished_at=_iso_z(_utc_now()),
+                )
+                coverage_issues.append(
+                    CoverageIssue(
+                        tenant_id=args.tenant,
+                        workspace=args.workspace,
+                        run_id=run_id,
+                        account_id=account_id,
+                        region=region,
+                        service=key[2],
+                        checker_id=key[3],
+                        issue_type=error_class,
+                        error_code=error_code,
+                        message=str(exc)[:1000],
+                        is_retryable=(error_class == "throttled"),
+                        severity="warning" if is_permission_gap else "error",
+                        payload={"exception_type": exc.__class__.__name__},
+                    )
+                )
 
-        per_region_valid[region] = len(region_result.valid_findings)
-        total_valid += len(region_result.valid_findings)
-        total_invalid_count += int(region_result.invalid_findings)
-        total_invalid_errors.extend(region_result.invalid_errors or [])
+        per_region_valid[region] = region_valid_total
 
     stats = writer.close()
 
@@ -631,6 +871,9 @@ def main(argv: Sequence[str]) -> int:
 
     logger.info("valid_findings: %s", total_valid)
     logger.info("invalid_findings: %s", total_invalid_count)
+    logger.info("coverage_targets: %s", len(coverage_results))
+    logger.info("coverage_failures: %s", len(checker_failures))
+    logger.info("coverage_issues: %s", len(coverage_issues))
 
     logger.info("writer_received: %s", stats.received)
     logger.info("writer_written: %s", stats.written)
@@ -666,11 +909,34 @@ def main(argv: Sequence[str]) -> int:
     # tenant/workspace or dataset paths.
     try:
         pricing_version, pricing_source = _resolve_run_pricing_metadata(services=control_services)
+        coverage_out_dir = write_coverage_bundle(
+            raw_out_dir,
+            results=sorted(
+                coverage_results.values(),
+                key=lambda item: (
+                    item.account_id,
+                    item.region,
+                    item.service,
+                    item.checker_id,
+                ),
+            ),
+            issues=sorted(
+                coverage_issues,
+                key=lambda item: (
+                    item.account_id,
+                    item.region,
+                    item.service,
+                    item.checker_id,
+                    item.issue_type,
+                    item.error_code or "",
+                ),
+            ),
+        )
         manifest = RunManifest(
             tenant_id=args.tenant,
             workspace=args.workspace,
             run_id=run_id,
-            run_ts=run_ts.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+            run_ts=_iso_z(run_ts),
             engine_name=ENGINE_NAME,
             engine_version=ENGINE_VERSION,
             rulepack_version=RULEPACK_VERSION,
@@ -680,6 +946,7 @@ def main(argv: Sequence[str]) -> int:
             out_raw=str(raw_out_dir),
             out_correlated=str(corr_out_dir),
             out_enriched=str(enriched_out_dir),
+            coverage_dir=str(coverage_out_dir),
             export_dir=str(paths.export_dir()),
         )
         mp = write_manifest(raw_out_dir, manifest)
@@ -696,6 +963,8 @@ def main(argv: Sequence[str]) -> int:
         return 3
     if corr_stats.get("failed"):
         return 3
+    if checker_failures:
+        return 4
 
     return 0
 

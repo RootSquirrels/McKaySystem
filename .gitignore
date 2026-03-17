@@ -1,20 +1,64 @@
-*.pyc
-*.vscode
-*.pytest
-*.hypothesis
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.py,cover
 
-# Node
+# Python tooling caches
+.pytest_cache/
+.hypothesis/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Virtual environments and packaging
+.venv/
+venv/
+env/
+ENV/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Node / Next.js
 node_modules/
 .next/
+apps/frontend/.next/
 out/
 dist/
+.turbo/
+.eslintcache
+
+# Build artifacts
+build/
+tmp/
+temp/
+*.tsbuildinfo
 
 # Logs
+*.log
 npm-debug.log*
 yarn-debug.log*
+yarn-error.log*
 pnpm-debug.log*
+pnpm-error.log*
 
 # Env files
 .env
-.env.local
-.env.production
+.env.*
+!.env.example
+
+# IDE and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

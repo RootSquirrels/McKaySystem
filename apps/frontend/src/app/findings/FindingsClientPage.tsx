@@ -4,6 +4,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Fragment, useEffect, useMemo, useState } from "react";
 
 import { useAuth } from "@/hooks/useAuth";
+import { RunCoverageBanner } from "@/components/coverage/RunCoverageBanner";
 import { useFindingLifecycle } from "@/hooks/useFindingLifecycle";
 import {
   FindingItem,
@@ -12,6 +13,7 @@ import {
   useFindings,
   useFindingsGroupedCategory,
 } from "@/hooks/useFindings";
+import { useRunCoverageLatest } from "@/hooks/useRunCoverageLatest";
 import { RunLatestItem, useRunsLatest } from "@/hooks/useRunsLatest";
 import { ApiError } from "@/lib/api/client";
 import { getStoredScope } from "@/lib/scope";
@@ -291,6 +293,7 @@ export function FindingsClientPage() {
   const permissions = useMemo(() => new Set(auth.user?.permissions ?? []), [auth.user?.permissions]);
   const canReadRuns = permissions.has("admin:full") || permissions.has("runs:read");
   const latestRun = useRunsLatest(canReadRuns);
+  const latestCoverage = useRunCoverageLatest(canReadRuns);
 
   useEffect(() => {
     if (!scope) {
@@ -513,6 +516,17 @@ export function FindingsClientPage() {
               Recommendations
             </button>
           ) : null}
+          {canReadRuns ? (
+            <button
+              type="button"
+              className="finops-toolbar-btn rounded-lg px-3 py-2 text-sm font-medium transition"
+              onClick={() => {
+                router.push("/coverage");
+              }}
+            >
+              Coverage
+            </button>
+          ) : null}
           {canReadUsers ? (
             <button
               type="button"
@@ -536,6 +550,11 @@ export function FindingsClientPage() {
           </button>
         </div>
       </header>
+
+      <RunCoverageBanner
+        run={latestCoverage.data?.run ?? null}
+        summary={latestCoverage.data?.coverage ?? null}
+      />
 
       <section className="mb-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
         <article className="rounded-xl border border-cyan-300/35 bg-slate-900/45 p-3">
