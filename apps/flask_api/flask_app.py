@@ -78,6 +78,12 @@ def _resolved_api_version() -> str:
 _API_VERSION = _resolved_api_version()
 _API_PREFIX = f"/api/{_API_VERSION}"
 _versioned_aliases_registered = False
+_API_ROUTE_SLOS_MS: dict[str, int] = {
+    "/api/findings": 500,
+    "/api/recommendations": 500,
+    "/api/groups": 700,
+    "/api/remediations/impact": 800,
+}
 
 
 def _canonical_api_path(path: str) -> str:
@@ -229,6 +235,49 @@ def _safe_scope_from_request() -> tuple[str | None, str | None]:
     return None, None
 
 
+def _api_route_perf_context(resp: Response, *, ms: int | None) -> dict[str, Any] | None:
+    """Return structured perf context for priority API routes only."""
+    path = _canonical_api_path(request.path or "")
+    slo_ms = _API_ROUTE_SLOS_MS.get(path)
+    if slo_ms is None:
+        return None
+
+    tenant_id, workspace = _safe_scope_from_request()
+    limit = _q("limit")
+    offset = _q("offset")
+    query_value = _q("q")
+    refresh_value = _q("refresh")
+    payload: dict[str, Any] = {
+        "route_key": path,
+        "method": request.method,
+        "path": request.path,
+        "status": int(getattr(resp, "status_code", 0) or 0),
+        "ms": ms,
+        "slo_ms": slo_ms,
+        "tenant_id": tenant_id,
+        "workspace": workspace,
+        "limit": None if limit in (None, "") else limit,
+        "offset": None if offset in (None, "") else offset,
+        "has_q": bool(query_value),
+        "refresh": None if refresh_value in (None, "") else refresh_value,
+    }
+
+    response_json = resp.get_json(silent=True)
+    if isinstance(response_json, dict):
+        items = response_json.get("items")
+        payload["items_count"] = len(items) if isinstance(items, list) else None
+        total = response_json.get("total")
+        payload["total"] = total if isinstance(total, int) else total
+        refreshed = response_json.get("refreshed")
+        payload["refreshed"] = refreshed if isinstance(refreshed, int) else None
+    else:
+        payload["items_count"] = None
+        payload["total"] = None
+        payload["refreshed"] = None
+
+    return payload
+
+
 @app.after_request
 def _log_request(resp: Response) -> Response:
     try:
@@ -249,6 +298,12 @@ def _log_request(resp: Response) -> Response:
                 "workspace": workspace,
             },
         )
+        perf_context = _api_route_perf_context(resp, ms=ms)
+        if perf_context is not None:
+            _log("INFO", "api_route_perf", perf_context)
+            slo_ms = int(perf_context.get("slo_ms") or 0)
+            if ms is not None and slo_ms > 0 and ms > slo_ms:
+                _log("WARN", "api_route_slo_breach", perf_context)
     except (RuntimeError, TypeError, ValueError) as exc:
         _LOGGER.debug("request logging skipped: %s", exc)
 
