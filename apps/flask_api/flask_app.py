@@ -59,6 +59,7 @@ from apps.flask_api.blueprints import runs as runs_module
 from apps.flask_api.blueprints import sla_policies as sla_policies_module
 from apps.flask_api.blueprints import teams as teams_module
 from apps.flask_api.blueprints import users as users_module
+from apps.flask_api import graph_context as graph_context_module
 from infra.config import get_settings
 
 app = Flask(__name__)
@@ -828,6 +829,7 @@ def _install_blueprint_backcompat_shims() -> None:
         lifecycle_module,
         groups_module,
         facets_module,
+        graph_context_module,
     ):
         if hasattr(module, "db_conn"):
             module.db_conn = _db_conn_proxy
