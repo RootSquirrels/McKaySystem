@@ -1,6 +1,7 @@
 """Runs Blueprint.
 
-Provides run management endpoints for querying runs and computing diffs.
+Provides run management endpoints for querying runs, coverage visibility,
+and computing diffs.
 """
 
 from typing import Any
@@ -9,10 +10,76 @@ from flask import Blueprint, jsonify
 
 from apps.backend.db import db_conn, fetch_all_dict_conn, fetch_one_dict_conn
 from apps.flask_api.auth_middleware import require_permission
-from apps.flask_api.utils import _json, _require_scope_from_query
+from apps.flask_api.utils import (
+    _coerce_non_negative_int,
+    _coerce_optional_text,
+    _coerce_positive_int,
+    _parse_iso8601_dt,
+    _json,
+    _q,
+    _require_scope_from_query,
+)
 
 # Create the blueprint
 runs_bp = Blueprint("runs", __name__)
+
+
+def _latest_run_ref(conn: Any, tenant_id: str, workspace: str) -> dict[str, Any] | None:
+    """Fetch latest run id and timestamp for one tenant/workspace."""
+    return fetch_one_dict_conn(
+        conn,
+        """
+        SELECT run_id, run_ts
+        FROM runs
+        WHERE tenant_id = %s AND workspace = %s
+        ORDER BY run_ts DESC
+        LIMIT 1
+        """,
+        (tenant_id, workspace),
+    )
+
+
+def _coverage_query_filters() -> dict[str, Any]:
+    """Parse supported coverage query filters from request args."""
+    limit_raw = _q("limit")
+    offset_raw = _q("offset")
+    limit = 200 if limit_raw in (None, "") else _coerce_positive_int(limit_raw, field_name="limit")
+    offset = 0 if offset_raw in (None, "") else _coerce_non_negative_int(offset_raw, field_name="offset")
+    return {
+        "status": _coerce_optional_text(_q("status")),
+        "service": _coerce_optional_text(_q("service")),
+        "region": _coerce_optional_text(_q("region")),
+        "account_id": _coerce_optional_text(_q("account_id")),
+        "checker_id": _coerce_optional_text(_q("checker_id")),
+        "issue_type": _coerce_optional_text(_q("issue_type")),
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+def _coverage_history_filters() -> dict[str, Any]:
+    """Parse supported coverage history filters from request args."""
+    limit_raw = _q("limit")
+    limit = 20 if limit_raw in (None, "") else _coerce_positive_int(limit_raw, field_name="limit")
+    return {
+        "status": _coerce_optional_text(_q("status")),
+        "date_from": _parse_iso8601_dt(_q("date_from"), field_name="date_from"),
+        "date_to": _parse_iso8601_dt(_q("date_to"), field_name="date_to"),
+        "limit": limit,
+    }
+
+
+def _append_filter(
+    clauses: list[str],
+    params: list[Any],
+    *,
+    column_sql: str,
+    value: str | None,
+) -> None:
+    """Append one equality filter when a non-empty value is present."""
+    if value:
+        clauses.append(f"{column_sql} = %s")
+        params.append(value)
 
 
 @runs_bp.route("/api/runs/latest", methods=["GET"])
@@ -152,44 +219,64 @@ def api_runs_latest_coverage_checkers() -> Any:
     """Get checker-level coverage rows for the latest run in scope."""
     try:
         tenant_id, workspace = _require_scope_from_query()
+        filters = _coverage_query_filters()
         with db_conn() as conn:
+            latest_run = _latest_run_ref(conn, tenant_id, workspace)
+            if not latest_run:
+                return _json(
+                    {
+                        "ok": True,
+                        "tenant_id": tenant_id,
+                        "workspace": workspace,
+                        "run": None,
+                        "items": [],
+                        "total": 0,
+                        "limit": filters["limit"],
+                        "offset": filters["offset"],
+                    }
+                )
+
+            where = ["tenant_id = %s", "workspace = %s", "run_id = %s"]
+            params: list[Any] = [tenant_id, workspace, latest_run["run_id"]]
+            _append_filter(where, params, column_sql="status", value=filters["status"])
+            _append_filter(where, params, column_sql="service", value=filters["service"])
+            _append_filter(where, params, column_sql="region", value=filters["region"])
+            _append_filter(where, params, column_sql="account_id", value=filters["account_id"])
+            _append_filter(where, params, column_sql="checker_id", value=filters["checker_id"])
+            where_sql = " AND ".join(where)
+
+            total_row = fetch_one_dict_conn(
+                conn,
+                f"SELECT COUNT(*) AS count FROM run_checker_coverage WHERE {where_sql}",
+                tuple(params),
+            ) or {"count": 0}
+
+            rows_params = [*params, filters["limit"], filters["offset"]]
             rows = fetch_all_dict_conn(
                 conn,
-                """
-                WITH latest_run AS (
-                  SELECT run_id, run_ts
-                  FROM runs
-                  WHERE tenant_id = %s AND workspace = %s
-                  ORDER BY run_ts DESC
-                  LIMIT 1
-                )
+                f"""
                 SELECT
-                  lr.run_id,
-                  lr.run_ts,
-                  c.account_id,
-                  c.region,
-                  c.service,
-                  c.checker_id,
-                  c.checker_scope,
-                  c.status,
-                  c.findings_count,
-                  c.duration_ms,
-                  c.confidence,
-                  c.completeness_pct,
-                  c.permission_gap_count,
-                  c.error_class,
-                  c.error_code,
-                  c.error_message,
-                  c.skip_reason,
-                  c.started_at,
-                  c.finished_at
-                FROM latest_run lr
-                LEFT JOIN run_checker_coverage c
-                  ON c.tenant_id = %s
-                 AND c.workspace = %s
-                 AND c.run_id = lr.run_id
+                  account_id,
+                  region,
+                  service,
+                  checker_id,
+                  checker_scope,
+                  status,
+                  findings_count,
+                  duration_ms,
+                  confidence,
+                  completeness_pct,
+                  permission_gap_count,
+                  error_class,
+                  error_code,
+                  error_message,
+                  skip_reason,
+                  started_at,
+                  finished_at
+                FROM run_checker_coverage
+                WHERE {where_sql}
                 ORDER BY
-                  CASE c.status
+                  CASE status
                     WHEN 'assessment_failed' THEN 0
                     WHEN 'skipped' THEN 1
                     WHEN 'not_assessed' THEN 2
@@ -197,21 +284,15 @@ def api_runs_latest_coverage_checkers() -> Any:
                     WHEN 'assessed_no_issue' THEN 4
                     ELSE 5
                   END,
-                  c.service,
-                  c.region,
-                  c.checker_id
+                  service,
+                  region,
+                  checker_id
+                LIMIT %s OFFSET %s
                 """,
-                (tenant_id, workspace, tenant_id, workspace),
+                tuple(rows_params),
             )
-
-        run = None
         items: list[dict[str, Any]] = []
         for row in rows:
-            if row.get("run_id") and run is None:
-                run = {
-                    "run_id": row.get("run_id"),
-                    "run_ts": row.get("run_ts"),
-                }
             if row.get("checker_id") is None:
                 continue
             items.append(
@@ -241,8 +322,11 @@ def api_runs_latest_coverage_checkers() -> Any:
                 "ok": True,
                 "tenant_id": tenant_id,
                 "workspace": workspace,
-                "run": run,
+                "run": latest_run,
                 "items": items,
+                "total": int(total_row.get("count") or 0),
+                "limit": filters["limit"],
+                "offset": filters["offset"],
             }
         )
     except ValueError as exc:
@@ -255,59 +339,73 @@ def api_runs_latest_coverage_issues() -> Any:
     """Get structured coverage issues for the latest run in scope."""
     try:
         tenant_id, workspace = _require_scope_from_query()
+        filters = _coverage_query_filters()
         with db_conn() as conn:
+            latest_run = _latest_run_ref(conn, tenant_id, workspace)
+            if not latest_run:
+                return _json(
+                    {
+                        "ok": True,
+                        "tenant_id": tenant_id,
+                        "workspace": workspace,
+                        "run": None,
+                        "items": [],
+                        "total": 0,
+                        "limit": filters["limit"],
+                        "offset": filters["offset"],
+                    }
+                )
+
+            where = ["tenant_id = %s", "workspace = %s", "run_id = %s"]
+            params: list[Any] = [tenant_id, workspace, latest_run["run_id"]]
+            _append_filter(where, params, column_sql="service", value=filters["service"])
+            _append_filter(where, params, column_sql="region", value=filters["region"])
+            _append_filter(where, params, column_sql="account_id", value=filters["account_id"])
+            _append_filter(where, params, column_sql="checker_id", value=filters["checker_id"])
+            _append_filter(where, params, column_sql="issue_type", value=filters["issue_type"])
+            where_sql = " AND ".join(where)
+
+            total_row = fetch_one_dict_conn(
+                conn,
+                f"SELECT COUNT(*) AS count FROM run_coverage_issues WHERE {where_sql}",
+                tuple(params),
+            ) or {"count": 0}
+
+            rows_params = [*params, filters["limit"], filters["offset"]]
             rows = fetch_all_dict_conn(
                 conn,
-                """
-                WITH latest_run AS (
-                  SELECT run_id, run_ts
-                  FROM runs
-                  WHERE tenant_id = %s AND workspace = %s
-                  ORDER BY run_ts DESC
-                  LIMIT 1
-                )
+                f"""
                 SELECT
-                  lr.run_id,
-                  lr.run_ts,
-                  i.account_id,
-                  i.region,
-                  i.service,
-                  i.checker_id,
-                  i.issue_type,
-                  i.operation,
-                  i.error_code,
-                  i.message,
-                  i.is_retryable,
-                  i.severity,
-                  i.payload,
-                  i.created_at
-                FROM latest_run lr
-                LEFT JOIN run_coverage_issues i
-                  ON i.tenant_id = %s
-                 AND i.workspace = %s
-                 AND i.run_id = lr.run_id
+                  account_id,
+                  region,
+                  service,
+                  checker_id,
+                  issue_type,
+                  operation,
+                  error_code,
+                  message,
+                  is_retryable,
+                  severity,
+                  payload,
+                  created_at
+                FROM run_coverage_issues
+                WHERE {where_sql}
                 ORDER BY
-                  CASE i.severity
+                  CASE severity
                     WHEN 'error' THEN 0
                     WHEN 'warning' THEN 1
                     ELSE 2
                   END,
-                  i.service,
-                  i.region,
-                  i.checker_id,
-                  i.issue_type
+                  service,
+                  region,
+                  checker_id,
+                  issue_type
+                LIMIT %s OFFSET %s
                 """,
-                (tenant_id, workspace, tenant_id, workspace),
+                tuple(rows_params),
             )
-
-        run = None
         items: list[dict[str, Any]] = []
         for row in rows:
-            if row.get("run_id") and run is None:
-                run = {
-                    "run_id": row.get("run_id"),
-                    "run_ts": row.get("run_ts"),
-                }
             if row.get("issue_type") is None:
                 continue
             items.append(
@@ -332,8 +430,458 @@ def api_runs_latest_coverage_issues() -> Any:
                 "ok": True,
                 "tenant_id": tenant_id,
                 "workspace": workspace,
-                "run": run,
+                "run": latest_run,
                 "items": items,
+                "total": int(total_row.get("count") or 0),
+                "limit": filters["limit"],
+                "offset": filters["offset"],
+            }
+        )
+    except ValueError as exc:
+        return _json({"error": "bad_request", "message": str(exc)}, status=400)
+
+
+@runs_bp.route("/api/runs/latest/coverage/services", methods=["GET"])
+@require_permission("runs:read")
+def api_runs_latest_coverage_services() -> Any:
+    """Get service-level coverage rollups for the latest run in scope."""
+    try:
+        tenant_id, workspace = _require_scope_from_query()
+        filters = _coverage_query_filters()
+        with db_conn() as conn:
+            latest_run = _latest_run_ref(conn, tenant_id, workspace)
+            if not latest_run:
+                return _json(
+                    {
+                        "ok": True,
+                        "tenant_id": tenant_id,
+                        "workspace": workspace,
+                        "run": None,
+                        "items": [],
+                    }
+                )
+
+            where = ["tenant_id = %s", "workspace = %s", "run_id = %s"]
+            params: list[Any] = [tenant_id, workspace, latest_run["run_id"]]
+            _append_filter(where, params, column_sql="status", value=filters["status"])
+            _append_filter(where, params, column_sql="region", value=filters["region"])
+            _append_filter(where, params, column_sql="account_id", value=filters["account_id"])
+            where_sql = " AND ".join(where)
+
+            rows = fetch_all_dict_conn(
+                conn,
+                f"""
+                SELECT
+                  service,
+                  COUNT(*) AS targets_total,
+                  SUM(CASE WHEN status IN ('assessed_with_findings', 'assessed_no_issue') THEN 1 ELSE 0 END) AS assessed_total,
+                  SUM(CASE WHEN status = 'assessment_failed' THEN 1 ELSE 0 END) AS assessment_failed,
+                  SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) AS skipped_total,
+                  SUM(CASE WHEN status = 'not_assessed' THEN 1 ELSE 0 END) AS not_assessed_total,
+                  SUM(permission_gap_count) AS permission_gap_count,
+                  ROUND(
+                    (
+                      SUM(CASE WHEN status IN ('assessed_with_findings', 'assessed_no_issue') THEN 1 ELSE 0 END)::numeric
+                      / NULLIF(COUNT(*), 0)
+                    ) * 100.0,
+                    2
+                  ) AS coverage_pct,
+                  CASE
+                    WHEN COUNT(*) = 0 OR SUM(CASE WHEN status = 'assessment_failed' THEN 1 ELSE 0 END) = COUNT(*) THEN 'failed'
+                    WHEN SUM(CASE WHEN status = 'assessment_failed' THEN 1 ELSE 0 END) > 0
+                      OR ROUND(
+                        (
+                          SUM(CASE WHEN status IN ('assessed_with_findings', 'assessed_no_issue') THEN 1 ELSE 0 END)::numeric
+                          / NULLIF(COUNT(*), 0)
+                        ) * 100.0,
+                        2
+                      ) < 80.0 THEN 'degraded'
+                    WHEN SUM(CASE WHEN status IN ('skipped', 'not_assessed') THEN 1 ELSE 0 END) > 0 THEN 'partial'
+                    ELSE 'healthy'
+                  END AS coverage_status
+                FROM run_checker_coverage
+                WHERE {where_sql}
+                GROUP BY service
+                ORDER BY
+                  CASE
+                    WHEN SUM(CASE WHEN status = 'assessment_failed' THEN 1 ELSE 0 END) > 0 THEN 0
+                    WHEN SUM(permission_gap_count) > 0 THEN 1
+                    ELSE 2
+                  END,
+                  service
+                """,
+                tuple(params),
+            )
+
+        return _json(
+            {
+                "ok": True,
+                "tenant_id": tenant_id,
+                "workspace": workspace,
+                "run": latest_run,
+                "items": rows,
+            }
+        )
+    except ValueError as exc:
+        return _json({"error": "bad_request", "message": str(exc)}, status=400)
+
+
+@runs_bp.route("/api/runs/latest/coverage/accounts", methods=["GET"])
+@require_permission("runs:read")
+def api_runs_latest_coverage_accounts() -> Any:
+    """Get account/region coverage rollups for the latest run in scope."""
+    try:
+        tenant_id, workspace = _require_scope_from_query()
+        filters = _coverage_query_filters()
+        with db_conn() as conn:
+            latest_run = _latest_run_ref(conn, tenant_id, workspace)
+            if not latest_run:
+                return _json(
+                    {
+                        "ok": True,
+                        "tenant_id": tenant_id,
+                        "workspace": workspace,
+                        "run": None,
+                        "items": [],
+                    }
+                )
+
+            where = ["tenant_id = %s", "workspace = %s", "run_id = %s"]
+            params: list[Any] = [tenant_id, workspace, latest_run["run_id"]]
+            _append_filter(where, params, column_sql="status", value=filters["status"])
+            _append_filter(where, params, column_sql="service", value=filters["service"])
+            _append_filter(where, params, column_sql="region", value=filters["region"])
+            _append_filter(where, params, column_sql="account_id", value=filters["account_id"])
+            where_sql = " AND ".join(where)
+
+            rows = fetch_all_dict_conn(
+                conn,
+                f"""
+                SELECT
+                  account_id,
+                  region,
+                  COUNT(*) AS targets_total,
+                  SUM(CASE WHEN status IN ('assessed_with_findings', 'assessed_no_issue') THEN 1 ELSE 0 END) AS assessed_total,
+                  SUM(CASE WHEN status = 'assessment_failed' THEN 1 ELSE 0 END) AS assessment_failed,
+                  SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) AS skipped_total,
+                  SUM(CASE WHEN status = 'not_assessed' THEN 1 ELSE 0 END) AS not_assessed_total,
+                  SUM(permission_gap_count) AS permission_gap_count,
+                  ROUND(
+                    (
+                      SUM(CASE WHEN status IN ('assessed_with_findings', 'assessed_no_issue') THEN 1 ELSE 0 END)::numeric
+                      / NULLIF(COUNT(*), 0)
+                    ) * 100.0,
+                    2
+                  ) AS coverage_pct,
+                  CASE
+                    WHEN COUNT(*) = 0 OR SUM(CASE WHEN status = 'assessment_failed' THEN 1 ELSE 0 END) = COUNT(*) THEN 'failed'
+                    WHEN SUM(CASE WHEN status = 'assessment_failed' THEN 1 ELSE 0 END) > 0
+                      OR ROUND(
+                        (
+                          SUM(CASE WHEN status IN ('assessed_with_findings', 'assessed_no_issue') THEN 1 ELSE 0 END)::numeric
+                          / NULLIF(COUNT(*), 0)
+                        ) * 100.0,
+                        2
+                      ) < 80.0 THEN 'degraded'
+                    WHEN SUM(CASE WHEN status IN ('skipped', 'not_assessed') THEN 1 ELSE 0 END) > 0 THEN 'partial'
+                    ELSE 'healthy'
+                  END AS coverage_status
+                FROM run_checker_coverage
+                WHERE {where_sql}
+                GROUP BY account_id, region
+                ORDER BY
+                  CASE
+                    WHEN SUM(CASE WHEN status = 'assessment_failed' THEN 1 ELSE 0 END) > 0 THEN 0
+                    WHEN SUM(permission_gap_count) > 0 THEN 1
+                    ELSE 2
+                  END,
+                  account_id,
+                  region
+                """,
+                tuple(params),
+            )
+
+        return _json(
+            {
+                "ok": True,
+                "tenant_id": tenant_id,
+                "workspace": workspace,
+                "run": latest_run,
+                "items": rows,
+            }
+        )
+    except ValueError as exc:
+        return _json({"error": "bad_request", "message": str(exc)}, status=400)
+
+
+@runs_bp.route("/api/runs/coverage/history", methods=["GET"])
+@require_permission("runs:read")
+def api_runs_coverage_history() -> Any:
+    """Get bounded coverage history for runs in scope."""
+    try:
+        tenant_id, workspace = _require_scope_from_query()
+        filters = _coverage_history_filters()
+        where = ["r.tenant_id = %s", "r.workspace = %s"]
+        params: list[Any] = [tenant_id, workspace]
+        if filters["status"]:
+            where.append("COALESCE(s.coverage_status, r.coverage_status) = %s")
+            params.append(filters["status"])
+        if filters["date_from"] is not None:
+            where.append("r.run_ts >= %s")
+            params.append(filters["date_from"])
+        if filters["date_to"] is not None:
+            where.append("r.run_ts <= %s")
+            params.append(filters["date_to"])
+        where_sql = " AND ".join(where)
+
+        with db_conn() as conn:
+            rows = fetch_all_dict_conn(
+                conn,
+                f"""
+                SELECT
+                  r.run_id,
+                  r.run_ts,
+                  r.status,
+                  COALESCE(s.targets_total, r.coverage_targets, 0) AS targets_total,
+                  COALESCE(s.assessed_total, 0) AS assessed_total,
+                  COALESCE(s.assessment_failed, r.coverage_failed, 0) AS assessment_failed,
+                  COALESCE(s.skipped_total, 0) AS skipped_total,
+                  COALESCE(s.not_assessed_total, 0) AS not_assessed_total,
+                  COALESCE(s.permission_gap_count, r.permission_gap_count, 0) AS permission_gap_count,
+                  COALESCE(s.coverage_pct, r.coverage_pct, 0) AS coverage_pct,
+                  COALESCE(s.coverage_status, r.coverage_status) AS coverage_status,
+                  COALESCE(s.confidence, 'none') AS confidence
+                FROM runs r
+                LEFT JOIN run_coverage_summary s
+                  ON s.tenant_id = r.tenant_id
+                 AND s.workspace = r.workspace
+                 AND s.run_id = r.run_id
+                WHERE {where_sql}
+                ORDER BY r.run_ts DESC
+                LIMIT %s
+                """,
+                tuple([*params, filters["limit"]]),
+            )
+
+        return _json(
+            {
+                "ok": True,
+                "tenant_id": tenant_id,
+                "workspace": workspace,
+                "items": rows,
+                "limit": filters["limit"],
+            }
+        )
+    except ValueError as exc:
+        return _json({"error": "bad_request", "message": str(exc)}, status=400)
+
+
+@runs_bp.route("/api/runs/coverage/regressions/latest", methods=["GET"])
+@require_permission("runs:read")
+def api_runs_coverage_regressions_latest() -> Any:
+    """Compare the latest two ready runs for coverage regressions."""
+    try:
+        tenant_id, workspace = _require_scope_from_query()
+        with db_conn() as conn:
+            runs = fetch_all_dict_conn(
+                conn,
+                """
+                SELECT r.run_id, r.run_ts
+                FROM runs r
+                WHERE r.tenant_id = %s AND r.workspace = %s AND r.status = 'ready'
+                ORDER BY r.run_ts DESC
+                LIMIT 2
+                """,
+                (tenant_id, workspace),
+            )
+
+            if not runs or len(runs) < 2:
+                return _json(
+                    {
+                        "ok": True,
+                        "tenant_id": tenant_id,
+                        "workspace": workspace,
+                        "runs": runs or [],
+                        "summary": None,
+                        "service_regressions": [],
+                        "checker_regressions": {"count": 0},
+                        "message": "Need at least 2 ready runs to compute coverage regressions.",
+                    }
+                )
+
+            latest_run = runs[0]
+            previous_run = runs[1]
+
+            summary_rows = fetch_all_dict_conn(
+                conn,
+                """
+                SELECT
+                  run_id,
+                  targets_total,
+                  assessed_total,
+                  assessment_failed,
+                  skipped_total,
+                  not_assessed_total,
+                  permission_gap_count,
+                  coverage_pct,
+                  coverage_status,
+                  confidence
+                FROM run_coverage_summary
+                WHERE tenant_id = %s
+                  AND workspace = %s
+                  AND run_id IN (%s, %s)
+                """,
+                (tenant_id, workspace, latest_run["run_id"], previous_run["run_id"]),
+            )
+            summary_by_run = {str(row["run_id"]): row for row in summary_rows}
+            latest_summary = summary_by_run.get(str(latest_run["run_id"]))
+            previous_summary = summary_by_run.get(str(previous_run["run_id"]))
+
+            service_rows = fetch_all_dict_conn(
+                conn,
+                """
+                SELECT
+                  run_id,
+                  service,
+                  COUNT(*) AS targets_total,
+                  SUM(CASE WHEN status = 'assessment_failed' THEN 1 ELSE 0 END) AS assessment_failed,
+                  SUM(permission_gap_count) AS permission_gap_count,
+                  ROUND(
+                    (
+                      SUM(CASE WHEN status IN ('assessed_with_findings', 'assessed_no_issue') THEN 1 ELSE 0 END)::numeric
+                      / NULLIF(COUNT(*), 0)
+                    ) * 100.0,
+                    2
+                  ) AS coverage_pct,
+                  CASE
+                    WHEN COUNT(*) = 0 OR SUM(CASE WHEN status = 'assessment_failed' THEN 1 ELSE 0 END) = COUNT(*) THEN 'failed'
+                    WHEN SUM(CASE WHEN status = 'assessment_failed' THEN 1 ELSE 0 END) > 0
+                      OR ROUND(
+                        (
+                          SUM(CASE WHEN status IN ('assessed_with_findings', 'assessed_no_issue') THEN 1 ELSE 0 END)::numeric
+                          / NULLIF(COUNT(*), 0)
+                        ) * 100.0,
+                        2
+                      ) < 80.0 THEN 'degraded'
+                    WHEN SUM(CASE WHEN status IN ('skipped', 'not_assessed') THEN 1 ELSE 0 END) > 0 THEN 'partial'
+                    ELSE 'healthy'
+                  END AS coverage_status
+                FROM run_checker_coverage
+                WHERE tenant_id = %s
+                  AND workspace = %s
+                  AND run_id IN (%s, %s)
+                GROUP BY run_id, service
+                """,
+                (tenant_id, workspace, latest_run["run_id"], previous_run["run_id"]),
+            )
+
+            checker_rows = fetch_all_dict_conn(
+                conn,
+                """
+                SELECT run_id, service, region, account_id, checker_id, status, permission_gap_count
+                FROM run_checker_coverage
+                WHERE tenant_id = %s
+                  AND workspace = %s
+                  AND run_id IN (%s, %s)
+                """,
+                (tenant_id, workspace, latest_run["run_id"], previous_run["run_id"]),
+            )
+
+        def _status_rank(value: str | None) -> int:
+            mapping = {"healthy": 0, "partial": 1, "degraded": 2, "failed": 3}
+            return mapping.get(str(value or ""), 0)
+
+        latest_service: dict[str, dict[str, Any]] = {}
+        previous_service: dict[str, dict[str, Any]] = {}
+        for row in service_rows:
+            key = str(row.get("service") or "")
+            if str(row.get("run_id")) == str(latest_run["run_id"]):
+                latest_service[key] = row
+            elif str(row.get("run_id")) == str(previous_run["run_id"]):
+                previous_service[key] = row
+
+        service_regressions: list[dict[str, Any]] = []
+        for service in sorted(set(latest_service) | set(previous_service)):
+            latest_item = latest_service.get(service)
+            previous_item = previous_service.get(service)
+            if not latest_item or not previous_item:
+                continue
+            coverage_pct_delta = float(latest_item.get("coverage_pct") or 0) - float(previous_item.get("coverage_pct") or 0)
+            assessment_failed_delta = int(latest_item.get("assessment_failed") or 0) - int(previous_item.get("assessment_failed") or 0)
+            permission_gap_delta = int(latest_item.get("permission_gap_count") or 0) - int(previous_item.get("permission_gap_count") or 0)
+            status_worsened = _status_rank(latest_item.get("coverage_status")) > _status_rank(previous_item.get("coverage_status"))
+            if coverage_pct_delta < 0 or assessment_failed_delta > 0 or permission_gap_delta > 0 or status_worsened:
+                service_regressions.append(
+                    {
+                        "service": service,
+                        "latest": latest_item,
+                        "previous": previous_item,
+                        "coverage_pct_delta": round(coverage_pct_delta, 2),
+                        "assessment_failed_delta": assessment_failed_delta,
+                        "permission_gap_delta": permission_gap_delta,
+                        "status_worsened": status_worsened,
+                    }
+                )
+
+        latest_checker: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        previous_checker: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        for row in checker_rows:
+            key = (
+                str(row.get("service") or ""),
+                str(row.get("region") or ""),
+                str(row.get("account_id") or ""),
+                str(row.get("checker_id") or ""),
+            )
+            if str(row.get("run_id")) == str(latest_run["run_id"]):
+                latest_checker[key] = row
+            elif str(row.get("run_id")) == str(previous_run["run_id"]):
+                previous_checker[key] = row
+
+        checker_regressed_count = 0
+        for key, latest_item in latest_checker.items():
+            previous_item = previous_checker.get(key)
+            if not previous_item:
+                continue
+            latest_failed = str(latest_item.get("status") or "") == "assessment_failed"
+            previous_failed = str(previous_item.get("status") or "") == "assessment_failed"
+            latest_gap = int(latest_item.get("permission_gap_count") or 0)
+            previous_gap = int(previous_item.get("permission_gap_count") or 0)
+            if (latest_failed and not previous_failed) or latest_gap > previous_gap:
+                checker_regressed_count += 1
+
+        summary = None
+        if latest_summary and previous_summary:
+            coverage_pct_delta = float(latest_summary.get("coverage_pct") or 0) - float(previous_summary.get("coverage_pct") or 0)
+            assessment_failed_delta = int(latest_summary.get("assessment_failed") or 0) - int(previous_summary.get("assessment_failed") or 0)
+            permission_gap_delta = int(latest_summary.get("permission_gap_count") or 0) - int(previous_summary.get("permission_gap_count") or 0)
+            status_worsened = _status_rank(latest_summary.get("coverage_status")) > _status_rank(previous_summary.get("coverage_status"))
+            severity = "minor"
+            if coverage_pct_delta <= -10 or assessment_failed_delta >= 5 or permission_gap_delta >= 5:
+                severity = "critical"
+            elif coverage_pct_delta <= -3 or assessment_failed_delta > 0 or permission_gap_delta > 0 or status_worsened:
+                severity = "meaningful"
+            summary = {
+                "latest": latest_summary,
+                "previous": previous_summary,
+                "coverage_pct_delta": round(coverage_pct_delta, 2),
+                "assessment_failed_delta": assessment_failed_delta,
+                "permission_gap_delta": permission_gap_delta,
+                "status_worsened": status_worsened,
+                "severity": severity,
+            }
+
+        return _json(
+            {
+                "ok": True,
+                "tenant_id": tenant_id,
+                "workspace": workspace,
+                "runs": [
+                    {"run_id": latest_run["run_id"], "run_ts": latest_run["run_ts"]},
+                    {"run_id": previous_run["run_id"], "run_ts": previous_run["run_ts"]},
+                ],
+                "summary": summary,
+                "service_regressions": service_regressions,
+                "checker_regressions": {"count": checker_regressed_count},
             }
         )
     except ValueError as exc:

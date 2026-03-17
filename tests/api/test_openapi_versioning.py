@@ -355,6 +355,13 @@ def test_versioned_latest_run_coverage_checkers_alias_works(monkeypatch) -> None
     """`/api/v1/runs/latest/coverage/checkers` should expose checker coverage rows."""
     _disable_runtime_guards(monkeypatch)
 
+    def _fake_fetch_one(
+        _conn: object, sql: str, params: Sequence[Any] | None = None
+    ) -> dict[str, Any] | None:
+        _ = sql
+        _ = params
+        return {"run_id": "run-1", "run_ts": "2026-03-17T09:00:00Z"}
+
     def _fake_fetch_all(
         _conn: object, sql: str, params: Sequence[Any] | None = None
     ) -> list[dict[str, Any]]:
@@ -384,6 +391,7 @@ def test_versioned_latest_run_coverage_checkers_alias_works(monkeypatch) -> None
             }
         ]
 
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
     monkeypatch.setattr(flask_app, "fetch_all_dict_conn", _fake_fetch_all)
 
     client = flask_app.app.test_client()
@@ -401,9 +409,77 @@ def test_versioned_latest_run_coverage_checkers_alias_works(monkeypatch) -> None
     assert items[0].get("permission_gap_count") == 1
 
 
+def test_versioned_latest_run_coverage_checkers_filters_work(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Checker coverage endpoint should accept scoped filter parameters."""
+    _disable_runtime_guards(monkeypatch)
+
+    def _fake_fetch_one(
+        _conn: object, sql: str, params: Sequence[Any] | None = None
+    ) -> dict[str, Any] | None:
+        _ = sql
+        _ = params
+        return {"run_id": "run-1", "run_ts": "2026-03-17T09:00:00Z"}
+
+    def _fake_fetch_all(
+        _conn: object, sql: str, params: Sequence[Any] | None = None
+    ) -> list[dict[str, Any]]:
+        assert params is not None
+        if "COUNT(*) AS count" in sql:
+            assert "status = %s" in sql
+            assert "service = %s" in sql
+            assert "region = %s" in sql
+            assert "account_id = %s" in sql
+            assert "checker_id = %s" in sql
+            return [{"count": 1}]
+        return [
+            {
+                "account_id": "123456789012",
+                "region": "eu-west-1",
+                "service": "ec2",
+                "checker_id": "aws.ec2.idle.instances",
+                "checker_scope": "regional",
+                "status": "assessment_failed",
+                "findings_count": 0,
+                "duration_ms": 1234,
+                "confidence": "low",
+                "completeness_pct": None,
+                "permission_gap_count": 1,
+                "error_class": "missing_permission",
+                "error_code": "AccessDenied",
+                "error_message": "Denied",
+                "skip_reason": None,
+                "started_at": "2026-03-17T09:00:00Z",
+                "finished_at": "2026-03-17T09:00:01Z",
+            }
+        ]
+
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+    monkeypatch.setattr(flask_app, "fetch_all_dict_conn", _fake_fetch_all)
+
+    client = flask_app.app.test_client()
+    resp = client.get(
+        "/api/v1/runs/latest/coverage/checkers"
+        "?tenant_id=acme&workspace=prod"
+        "&status=assessment_failed&service=ec2&region=eu-west-1"
+        "&account_id=123456789012&checker_id=aws.ec2.idle.instances"
+    )
+
+    assert resp.status_code == 200
+    body = resp.get_json() or {}
+    assert body.get("total") == 1
+    assert len(body.get("items") or []) == 1
+
+
 def test_versioned_latest_run_coverage_issues_alias_works(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """`/api/v1/runs/latest/coverage/issues` should expose structured issue rows."""
     _disable_runtime_guards(monkeypatch)
+
+    def _fake_fetch_one(
+        _conn: object, sql: str, params: Sequence[Any] | None = None
+    ) -> dict[str, Any] | None:
+        _ = sql
+        _ = params
+        return {"run_id": "run-1", "run_ts": "2026-03-17T09:00:00Z"}
 
     def _fake_fetch_all(
         _conn: object, sql: str, params: Sequence[Any] | None = None
@@ -429,6 +505,7 @@ def test_versioned_latest_run_coverage_issues_alias_works(monkeypatch) -> None: 
             }
         ]
 
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
     monkeypatch.setattr(flask_app, "fetch_all_dict_conn", _fake_fetch_all)
 
     client = flask_app.app.test_client()
@@ -444,3 +521,243 @@ def test_versioned_latest_run_coverage_issues_alias_works(monkeypatch) -> None: 
     assert items[0].get("issue_type") == "missing_permission"
     assert items[0].get("error_code") == "AccessDenied"
     assert items[0].get("is_retryable") is False
+
+
+def test_versioned_latest_run_coverage_services_alias_works(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """`/api/v1/runs/latest/coverage/services` should expose service rollups."""
+    _disable_runtime_guards(monkeypatch)
+
+    def _fake_fetch_one(
+        _conn: object, sql: str, params: Sequence[Any] | None = None
+    ) -> dict[str, Any] | None:
+        _ = sql
+        _ = params
+        return {"run_id": "run-1", "run_ts": "2026-03-17T09:00:00Z"}
+
+    def _fake_fetch_all(
+        _conn: object, sql: str, params: Sequence[Any] | None = None
+    ) -> list[dict[str, Any]]:
+        _ = params
+        assert "GROUP BY service" in sql
+        return [
+            {
+                "service": "ec2",
+                "targets_total": 10,
+                "assessed_total": 8,
+                "assessment_failed": 2,
+                "skipped_total": 0,
+                "not_assessed_total": 0,
+                "permission_gap_count": 1,
+                "coverage_pct": 80.0,
+                "coverage_status": "degraded",
+            }
+        ]
+
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+    monkeypatch.setattr(flask_app, "fetch_all_dict_conn", _fake_fetch_all)
+
+    client = flask_app.app.test_client()
+    resp = client.get("/api/v1/runs/latest/coverage/services?tenant_id=acme&workspace=prod")
+
+    assert resp.status_code == 200
+    body = resp.get_json() or {}
+    items = body.get("items") or []
+    assert len(items) == 1
+    assert items[0].get("service") == "ec2"
+    assert items[0].get("coverage_status") == "degraded"
+
+
+def test_versioned_latest_run_coverage_accounts_alias_works(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """`/api/v1/runs/latest/coverage/accounts` should expose account rollups."""
+    _disable_runtime_guards(monkeypatch)
+
+    def _fake_fetch_one(
+        _conn: object, sql: str, params: Sequence[Any] | None = None
+    ) -> dict[str, Any] | None:
+        _ = sql
+        _ = params
+        return {"run_id": "run-1", "run_ts": "2026-03-17T09:00:00Z"}
+
+    def _fake_fetch_all(
+        _conn: object, sql: str, params: Sequence[Any] | None = None
+    ) -> list[dict[str, Any]]:
+        _ = params
+        assert "GROUP BY account_id, region" in sql
+        return [
+            {
+                "account_id": "123456789012",
+                "region": "eu-west-1",
+                "targets_total": 10,
+                "assessed_total": 8,
+                "assessment_failed": 2,
+                "skipped_total": 0,
+                "not_assessed_total": 0,
+                "permission_gap_count": 1,
+                "coverage_pct": 80.0,
+                "coverage_status": "degraded",
+            }
+        ]
+
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+    monkeypatch.setattr(flask_app, "fetch_all_dict_conn", _fake_fetch_all)
+
+    client = flask_app.app.test_client()
+    resp = client.get("/api/v1/runs/latest/coverage/accounts?tenant_id=acme&workspace=prod")
+
+    assert resp.status_code == 200
+    body = resp.get_json() or {}
+    items = body.get("items") or []
+    assert len(items) == 1
+    assert items[0].get("account_id") == "123456789012"
+    assert items[0].get("coverage_status") == "degraded"
+
+
+def test_versioned_runs_coverage_history_alias_works(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """`/api/v1/runs/coverage/history` should expose bounded run coverage history."""
+    _disable_runtime_guards(monkeypatch)
+
+    def _fake_fetch_all(
+        _conn: object, sql: str, params: Sequence[Any] | None = None
+    ) -> list[dict[str, Any]]:
+        assert "run_coverage_summary" in sql
+        return [
+            {
+                "run_id": "run-2",
+                "run_ts": "2026-03-17T09:00:00Z",
+                "status": "ready",
+                "targets_total": 10,
+                "assessed_total": 8,
+                "assessment_failed": 2,
+                "skipped_total": 0,
+                "not_assessed_total": 0,
+                "permission_gap_count": 1,
+                "coverage_pct": 80.0,
+                "coverage_status": "degraded",
+                "confidence": "medium",
+            },
+            {
+                "run_id": "run-1",
+                "run_ts": "2026-03-16T09:00:00Z",
+                "status": "ready",
+                "targets_total": 10,
+                "assessed_total": 10,
+                "assessment_failed": 0,
+                "skipped_total": 0,
+                "not_assessed_total": 0,
+                "permission_gap_count": 0,
+                "coverage_pct": 100.0,
+                "coverage_status": "healthy",
+                "confidence": "high",
+            },
+        ]
+
+    monkeypatch.setattr(flask_app, "fetch_all_dict_conn", _fake_fetch_all)
+
+    client = flask_app.app.test_client()
+    resp = client.get("/api/v1/runs/coverage/history?tenant_id=acme&workspace=prod&limit=12")
+
+    assert resp.status_code == 200
+    body = resp.get_json() or {}
+    items = body.get("items") or []
+    assert len(items) == 2
+    assert items[0].get("run_id") == "run-2"
+    assert items[1].get("coverage_status") == "healthy"
+
+
+def test_versioned_runs_coverage_regressions_latest_alias_works(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """`/api/v1/runs/coverage/regressions/latest` should expose latest regression summary."""
+    _disable_runtime_guards(monkeypatch)
+
+    def _fake_fetch_all(
+        _conn: object, sql: str, params: Sequence[Any] | None = None
+    ) -> list[dict[str, Any]]:
+        assert params is not None
+        if "FROM runs r" in sql and "LIMIT 2" in sql:
+            return [
+                {"run_id": "run-2", "run_ts": "2026-03-17T09:00:00Z"},
+                {"run_id": "run-1", "run_ts": "2026-03-16T09:00:00Z"},
+            ]
+        if "FROM run_coverage_summary" in sql:
+            return [
+                {
+                    "run_id": "run-2",
+                    "targets_total": 10,
+                    "assessed_total": 8,
+                    "assessment_failed": 2,
+                    "skipped_total": 0,
+                    "not_assessed_total": 0,
+                    "permission_gap_count": 1,
+                    "coverage_pct": 80.0,
+                    "coverage_status": "degraded",
+                    "confidence": "medium",
+                },
+                {
+                    "run_id": "run-1",
+                    "targets_total": 10,
+                    "assessed_total": 10,
+                    "assessment_failed": 0,
+                    "skipped_total": 0,
+                    "not_assessed_total": 0,
+                    "permission_gap_count": 0,
+                    "coverage_pct": 100.0,
+                    "coverage_status": "healthy",
+                    "confidence": "high",
+                },
+            ]
+        if "GROUP BY run_id, service" in sql:
+            return [
+                {
+                    "run_id": "run-2",
+                    "service": "ec2",
+                    "targets_total": 10,
+                    "assessment_failed": 2,
+                    "permission_gap_count": 1,
+                    "coverage_pct": 80.0,
+                    "coverage_status": "degraded",
+                },
+                {
+                    "run_id": "run-1",
+                    "service": "ec2",
+                    "targets_total": 10,
+                    "assessment_failed": 0,
+                    "permission_gap_count": 0,
+                    "coverage_pct": 100.0,
+                    "coverage_status": "healthy",
+                },
+            ]
+        return [
+            {
+                "run_id": "run-2",
+                "service": "ec2",
+                "region": "eu-west-1",
+                "account_id": "123456789012",
+                "checker_id": "aws.ec2.idle.instances",
+                "status": "assessment_failed",
+                "permission_gap_count": 1,
+            },
+            {
+                "run_id": "run-1",
+                "service": "ec2",
+                "region": "eu-west-1",
+                "account_id": "123456789012",
+                "checker_id": "aws.ec2.idle.instances",
+                "status": "assessed_no_issue",
+                "permission_gap_count": 0,
+            },
+        ]
+
+    monkeypatch.setattr(flask_app, "fetch_all_dict_conn", _fake_fetch_all)
+
+    client = flask_app.app.test_client()
+    resp = client.get("/api/v1/runs/coverage/regressions/latest?tenant_id=acme&workspace=prod")
+
+    assert resp.status_code == 200
+    body = resp.get_json() or {}
+    summary = body.get("summary") or {}
+    service_regressions = body.get("service_regressions") or []
+    checker_regressions = body.get("checker_regressions") or {}
+    assert summary.get("coverage_pct_delta") == -20.0
+    assert summary.get("assessment_failed_delta") == 2
+    assert summary.get("severity") == "critical"
+    assert len(service_regressions) == 1
+    assert checker_regressions.get("count") == 1
