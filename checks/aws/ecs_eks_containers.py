@@ -36,7 +36,6 @@ from checks.aws.defaults import (
 )
 from checks.registry import Bootstrap, register_checker
 from contracts.finops_checker_pattern import Checker, FindingDraft, RunContext, Severity
-
 _LOGGER = get_logger("ecs_eks_containers")
 
 

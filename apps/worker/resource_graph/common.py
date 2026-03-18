@@ -42,7 +42,7 @@ class ResourceGraphNode:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "ResourceGraphNode":
+    def from_dict(cls, payload: dict[str, Any]) -> ResourceGraphNode:
         """Hydrate one node from a dict payload."""
         tags_json = payload.get("tags_json")
         attributes_json = payload.get("attributes_json")
@@ -93,7 +93,7 @@ class ResourceGraphEdge:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "ResourceGraphEdge":
+    def from_dict(cls, payload: dict[str, Any]) -> ResourceGraphEdge:
         """Hydrate one edge from a dict payload."""
         attributes_json = payload.get("attributes_json")
         return cls(

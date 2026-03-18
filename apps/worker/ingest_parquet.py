@@ -22,8 +22,6 @@ from typing import Any
 import pyarrow.dataset as ds
 
 from apps.backend.db import db_conn, execute, execute_many, fetch_one
-from apps.worker.coverage_model import CoverageIssue, CoverageResult, load_coverage_bundle
-from apps.worker.resource_graph_model import ResourceGraphEdge, ResourceGraphNode, load_graph_bundle
 from apps.backend.run_state import (
     STATE_READY,
     acquire_run_lock,
@@ -34,6 +32,8 @@ from apps.backend.run_state import (
     transition_run_to_failed,
     transition_run_to_ready,
 )
+from apps.worker.coverage_model import CoverageIssue, CoverageResult, load_coverage_bundle
+from apps.worker.resource_graph_model import ResourceGraphEdge, ResourceGraphNode, load_graph_bundle
 from infra.config import get_settings
 from pipeline.run_manifest import find_manifest, load_manifest
 from services.remediation.impact import refresh_scope_action_impacts

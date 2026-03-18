@@ -55,6 +55,8 @@ from typing import Any
 
 import boto3
 
+from apps.worker.coverage_model import CoverageIssue, CoverageResult, write_coverage_bundle
+from apps.worker.resource_graph_model import build_graph_from_findings, write_graph_bundle
 import checks  # IMPORTANT: used for module discovery
 from checks.registry import get_factory, list_specs
 from contracts.finops_checker_pattern import Checker, CheckerRunner, RunContext
@@ -63,8 +65,6 @@ from infra.aws_config import SDK_CONFIG
 from infra.config import get_settings
 from infra.logging_config import setup_logging
 from infra.pipeline_paths import PipelinePaths
-from apps.worker.coverage_model import CoverageIssue, CoverageResult, write_coverage_bundle
-from apps.worker.resource_graph_model import build_graph_from_findings, write_graph_bundle
 from pipeline.run_manifest import RunManifest, write_manifest
 from pipeline.writer_parquet import FindingsParquetWriter, ParquetWriterConfig
 from version import ENGINE_NAME, ENGINE_VERSION, RULEPACK_VERSION, SCHEMA_VERSION
@@ -75,6 +75,7 @@ logger = logging.getLogger(__name__)
 def _iso_z(dt: datetime) -> str:
     """Return UTC ISO-8601 with trailing Z."""
     return dt.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
