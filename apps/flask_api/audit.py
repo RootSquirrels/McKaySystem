@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
-from flask import request
+try:
+    from flask import request
+except ImportError:  # pragma: no cover
+    request = None
 
 if TYPE_CHECKING:
     from psycopg2 import Error as PsycopgError  # type: ignore
@@ -46,9 +50,28 @@ class AuditEvent:
 # pylint: enable=too-many-instance-attributes
 
 
+def _audit_json_default(value: Any) -> Any:
+    """Return a deterministic JSON-safe representation for audit payload values.
+
+    Args:
+        value: Raw value attached to an audit event payload.
+
+    Returns:
+        A JSON-serializable representation of the value.
+
+    Raises:
+        TypeError: If the value cannot be serialized safely.
+    """
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    raise TypeError(f"Object of type {value.__class__.__name__} is not JSON serializable")
+
+
 def _audit_insert_params(event: AuditEvent) -> tuple[Any, ...]:
     """Build SQL parameter tuple for one audit event."""
     try:
+        if request is None:
+            raise RuntimeError("flask request unavailable")
         ip_address = request.headers.get("X-Forwarded-For", request.remote_addr)
         user_agent = request.headers.get("User-Agent", "")
     except RuntimeError:
@@ -64,12 +87,20 @@ def _audit_insert_params(event: AuditEvent) -> tuple[Any, ...]:
         event.event_type,
         event.event_category,
         (
-            json.dumps(event.previous_value, separators=(",", ":"))
+            json.dumps(
+                event.previous_value,
+                separators=(",", ":"),
+                default=_audit_json_default,
+            )
             if event.previous_value is not None
             else None
         ),
         (
-            json.dumps(event.new_value, separators=(",", ":"))
+            json.dumps(
+                event.new_value,
+                separators=(",", ":"),
+                default=_audit_json_default,
+            )
             if event.new_value is not None
             else None
         ),
