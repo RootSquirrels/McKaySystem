@@ -7,6 +7,9 @@ __pycache__/
 
 # Python tooling caches
 .pytest_cache/
+.tmp_pytest/
+.tmp_corr_manual/
+.tmp_test_correlation/
 .hypothesis/
 .mypy_cache/
 .ruff_cache/
