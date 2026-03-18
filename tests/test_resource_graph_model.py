@@ -213,6 +213,81 @@ def test_build_graph_from_findings_normalizes_amazonec2_service_names() -> None:
     ]
 
 
+def test_build_graph_from_findings_derives_rds_relationships() -> None:
+    """Graph builder should derive RDS cluster, subnet, and SG relationships."""
+    findings = [
+        {
+            "title": "Unused read replica",
+            "check_id": "aws.rds.read.replica.unused",
+            "severity": {"level": "medium"},
+            "scope": {
+                "account_id": "123456789012",
+                "region": "eu-west-3",
+                "service": "rds",
+                "resource_type": "db_instance",
+                "resource_id": "replica-1",
+                "resource_arn": "",
+            },
+            "payload": {
+                "dimensions": {
+                    "db_subnet_group": "app-rds-subnets",
+                    "db_cluster_identifier": "aurora-app-cluster",
+                    "vpc_id": "vpc-12345678",
+                    "subnet_ids": "subnet-a,subnet-b",
+                    "security_group_ids": "sg-12345678,sg-23456789",
+                    "replica_source": "primary-1",
+                }
+            },
+        }
+    ]
+
+    nodes, edges = build_graph_from_findings(
+        findings,
+        tenant_id="acme",
+        workspace="prod",
+        run_id="run-rds-1",
+    )
+
+    resource_keys = {item.resource_key for item in nodes}
+    edge_pairs = {
+        (item.edge_type, item.from_resource_key, item.to_resource_key)
+        for item in edges
+    }
+
+    assert "aws:123456789012:eu-west-3:rds:db_instance:replica-1" in resource_keys
+    assert "aws:123456789012:eu-west-3:rds:db_instance:primary-1" in resource_keys
+    assert "aws:123456789012:eu-west-3:rds:db_cluster:aurora-app-cluster" in resource_keys
+    assert "aws:123456789012:eu-west-3:rds:db_subnet_group:app-rds-subnets" in resource_keys
+    assert "aws:123456789012:eu-west-3:ec2:security_group:sg-12345678" in resource_keys
+    assert "aws:123456789012:eu-west-3:vpc:subnet:subnet-a" in resource_keys
+    assert "aws:123456789012:eu-west-3:vpc:vpc:vpc-12345678" in resource_keys
+    assert (
+        "member_of",
+        "aws:123456789012:eu-west-3:rds:db_instance:replica-1",
+        "aws:123456789012:eu-west-3:rds:db_subnet_group:app-rds-subnets",
+    ) in edge_pairs
+    assert (
+        "member_of",
+        "aws:123456789012:eu-west-3:rds:db_instance:replica-1",
+        "aws:123456789012:eu-west-3:rds:db_cluster:aurora-app-cluster",
+    ) in edge_pairs
+    assert (
+        "replicates_from",
+        "aws:123456789012:eu-west-3:rds:db_instance:replica-1",
+        "aws:123456789012:eu-west-3:rds:db_instance:primary-1",
+    ) in edge_pairs
+    assert (
+        "secured_by",
+        "aws:123456789012:eu-west-3:rds:db_instance:replica-1",
+        "aws:123456789012:eu-west-3:ec2:security_group:sg-12345678",
+    ) in edge_pairs
+    assert (
+        "deployed_in",
+        "aws:123456789012:eu-west-3:rds:db_instance:replica-1",
+        "aws:123456789012:eu-west-3:vpc:subnet:subnet-a",
+    ) in edge_pairs
+
+
 def test_build_graph_from_runner_records_uses_top_level_dimensions() -> None:
     """Graph builder should derive relationships from runner-style records."""
     findings = [

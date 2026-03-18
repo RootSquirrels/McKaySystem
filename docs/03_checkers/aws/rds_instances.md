@@ -32,6 +32,7 @@ Detect RDS instance optimization and governance opportunities using inventory an
 - Legacy instance family and engine-version policy drift, with clearer modernization focus for Graviton-first vs general newer-generation refresh.
 - Unused read replicas by sustained low read IOPS, with sharper guidance for delete-candidate vs schedule/reporting review.
 - Schedule-aware read replica review using a short hourly CloudWatch window to distinguish business-hours or weekday-only reporting patterns from truly deletable replicas.
+- Relationship dimensions now carry subnet group, VPC, subnet, security-group, cluster, and replica-source context so graph packaging can connect RDS findings to their surrounding topology.
 
 ## Configuration and defaults
 

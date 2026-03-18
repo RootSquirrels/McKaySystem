@@ -221,6 +221,8 @@ def normalize_resource_type(resource_type: str | None) -> str:
         "security_group": "security_group",
         "nat_gateway": "nat_gateway",
         "db_instance": "db_instance",
+        "db_cluster": "db_cluster",
+        "db_subnet_group": "db_subnet_group",
     }
     return aliases.get(normalized, normalized)
 
@@ -237,7 +239,7 @@ def normalize_service(service: str | None, *, resource_type: str | None = None) 
         return "s3"
     if normalized_type in {"load_balancer", "target_group"}:
         return "elbv2"
-    if normalized_type == "db_instance":
+    if normalized_type in {"db_instance", "db_cluster", "db_subnet_group"}:
         return "rds"
     if normalized_type == "function":
         return "lambda"

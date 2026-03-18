@@ -129,6 +129,51 @@ def test_stopped_instances_with_storage_emits() -> None:
     assert float(f.estimated_monthly_savings) > 0.0
 
 
+def test_rds_findings_emit_relationship_dimensions() -> None:
+    arn = "arn:aws:rds:eu-west-3:111111111111:db:db_topology"
+    rds = FakeRdsClient(
+        region="eu-west-3",
+        instances=[
+            {
+                "DBInstanceIdentifier": "db_topology",
+                "DBInstanceArn": arn,
+                "DBInstanceStatus": "stopped",
+                "AllocatedStorage": 100,
+                "MultiAZ": False,
+                "DBInstanceClass": "db.t3.medium",
+                "Engine": "mysql",
+                "EngineVersion": "8.0.35",
+                "DBClusterIdentifier": "cluster-a",
+                "ReadReplicaSourceDBInstanceIdentifier": "primary-a",
+                "DBSubnetGroup": {
+                    "DBSubnetGroupName": "db-subnets-a",
+                    "VpcId": "vpc-12345678",
+                    "Subnets": [
+                        {"SubnetIdentifier": "subnet-1"},
+                        {"SubnetIdentifier": "subnet-2"},
+                    ],
+                },
+                "VpcSecurityGroups": [
+                    {"VpcSecurityGroupId": "sg-1"},
+                    {"VpcSecurityGroupId": "sg-2"},
+                ],
+            }
+        ],
+        tags_by_arn={arn: {"env": "dev"}},
+    )
+    cw = _FakeCloudWatchClient(series_by_metric_and_instance={})
+    ctx = make_run_ctx(rds=rds, cloudwatch=cw)
+
+    findings = list(_mk_checker().run(ctx))
+    hit = next(x for x in findings if x.check_id == "aws.rds.instances.stopped.storage")
+    assert hit.dimensions["db_cluster_identifier"] == "cluster-a"
+    assert hit.dimensions["db_subnet_group"] == "db-subnets-a"
+    assert hit.dimensions["vpc_id"] == "vpc-12345678"
+    assert hit.dimensions["subnet_ids"] == "subnet-1,subnet-2"
+    assert hit.dimensions["security_group_ids"] == "sg-1,sg-2"
+    assert hit.dimensions["replica_source"] == "primary-a"
+
+
 def test_storage_overprovisioned_emits_using_free_storage_p95() -> None:
     arn = "arn:aws:rds:eu-west-3:111111111111:db:db2"
     # Allocated 100GB, "free" ~90GB => used ~10GB => overprovisioned

@@ -102,6 +102,14 @@ def _bytes_to_gb(b: float) -> float:
     return float(b) / (1024.0 * 1024.0 * 1024.0)
 
 
+def _non_empty_text(value: Any) -> str | None:
+    """Return a stripped string or None when the value is empty."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def _hours_per_month() -> float:
     """Average hours per month (365 days / 12 * 24)."""
     return (365.0 / 12.0) * 24.0
@@ -141,6 +149,53 @@ def _percentile(values: Sequence[float], p: float) -> float | None:
 def _extract_tags(tag_list: Sequence[dict[str, Any]]) -> dict[str, str]:
     # Normalize into lower-cased keys/values for consistent suppression and environment checks.
     return normalize_tags(tag_list)
+
+
+def _csv_dimension(values: Sequence[str]) -> str:
+    """Serialize deterministic dimension values as a sorted CSV string."""
+    return ",".join(sorted({str(value).strip() for value in values if str(value).strip()}))
+
+
+def _rds_relationship_dimensions(inst: dict[str, Any]) -> dict[str, str]:
+    """Extract stable relationship dimensions from one DescribeDBInstances record."""
+    dimensions: dict[str, str] = {}
+
+    subnet_group = inst.get("DBSubnetGroup")
+    if isinstance(subnet_group, dict):
+        subnet_group_name = _non_empty_text(subnet_group.get("DBSubnetGroupName"))
+        if subnet_group_name:
+            dimensions["db_subnet_group"] = subnet_group_name
+        vpc_id = _non_empty_text(subnet_group.get("VpcId"))
+        if vpc_id:
+            dimensions["vpc_id"] = vpc_id
+        subnet_ids = [
+            _non_empty_text(item.get("SubnetIdentifier"))
+            for item in (subnet_group.get("Subnets", []) or [])
+            if isinstance(item, dict)
+        ]
+        subnet_csv = _csv_dimension([item for item in subnet_ids if item])
+        if subnet_csv:
+            dimensions["subnet_ids"] = subnet_csv
+
+    vpc_security_groups = inst.get("VpcSecurityGroups", []) or []
+    security_group_ids = [
+        _non_empty_text(item.get("VpcSecurityGroupId"))
+        for item in vpc_security_groups
+        if isinstance(item, dict)
+    ]
+    security_group_csv = _csv_dimension([item for item in security_group_ids if item])
+    if security_group_csv:
+        dimensions["security_group_ids"] = security_group_csv
+
+    replica_source = _non_empty_text(inst.get("ReadReplicaSourceDBInstanceIdentifier"))
+    if replica_source:
+        dimensions["replica_source"] = replica_source
+
+    cluster_id = _non_empty_text(inst.get("DBClusterIdentifier"))
+    if cluster_id:
+        dimensions["db_cluster_identifier"] = cluster_id
+
+    return dimensions
 
 
 def _is_non_prod(tags: dict[str, str]) -> bool:
@@ -956,6 +1011,7 @@ class RDSInstancesOptimizationsChecker:
         engine = str(inst.get("Engine") or "")
         engine_version = str(inst.get("EngineVersion") or "")
         license_model = str(inst.get("LicenseModel") or "")
+        relationship_dimensions = _rds_relationship_dimensions(inst)
 
         # 1) stopped_instances_with_storage
         if status == "stopped" and allocated_gb > 0:
@@ -999,6 +1055,7 @@ class RDSInstancesOptimizationsChecker:
                     "if_running_monthly_cost_usd": (f"{running_monthly:.2f}" if running_monthly is not None else ""),
                     "pricing_notes": (hourly_notes if hourly_run is not None else ""),
                     "pricing_confidence": (str(hourly_conf) if hourly_run is not None else ""),
+                    **relationship_dimensions,
                 },
             ).with_issue(check="stopped_storage", account_id=self._account.account_id, region=region, resource_type="db_instance", resource_id=instance_id, db_instance=instance_id)
 
@@ -1045,6 +1102,7 @@ class RDSInstancesOptimizationsChecker:
                         "window_days": str(self._storage_window_days),
                         "period_seconds": str(self._storage_period_seconds),
                         "datapoints": str(dp_count),
+                        **relationship_dimensions,
                     },
                 ).with_issue(check="storage_overprovisioned", account_id=self._account.account_id, region=region, resource_type="db_instance", resource_id=instance_id, db_instance=instance_id)
 
@@ -1101,6 +1159,7 @@ class RDSInstancesOptimizationsChecker:
                 estimate_confidence=confidence,
                 estimate_notes=estimate_notes,
                 tags=tags,
+                dimensions=relationship_dimensions,
             ).with_issue(check="multi_az_non_prod", account_id=self._account.account_id, region=region, resource_type="db_instance", resource_id=instance_id, db_instance=instance_id)
 
         # 4) instance_family_old_generation
@@ -1134,6 +1193,7 @@ class RDSInstancesOptimizationsChecker:
                     "family": fam,
                     "modernization_focus": modernization_focus,
                     "recommended_target": recommendation_target,
+                    **relationship_dimensions,
                 },
             ).with_issue(check="old_generation_family", account_id=self._account.account_id, region=region, resource_type="db_instance", resource_id=instance_id, db_instance=instance_id, family=fam)
 
@@ -1156,7 +1216,11 @@ class RDSInstancesOptimizationsChecker:
                 estimate_confidence=40,
                 estimate_notes="Policy-based governance signal. Extended support cost not computed without a maintained dataset.",
                 tags=tags,
-                dimensions={"engine": engine, "engine_version": engine_version},
+                dimensions={
+                    "engine": engine,
+                    "engine_version": engine_version,
+                    **relationship_dimensions,
+                },
             ).with_issue(check="engine_upgrade", account_id=self._account.account_id, region=region, resource_type="db_instance", resource_id=instance_id, db_instance=instance_id, engine=engine, engine_version=engine_version)
 
         # 6) unused read replica (batched ReadIOPS values)
@@ -1245,6 +1309,7 @@ class RDSInstancesOptimizationsChecker:
                             "business_hour_activity_share": f"{float(schedule_analysis['business_hour_share']):.2f}",
                             "off_hour_activity_share": f"{float(schedule_analysis['off_hour_share']):.2f}",
                             "weekend_activity_share": f"{float(schedule_analysis['weekend_share']):.2f}",
+                            **relationship_dimensions,
                         },
                     ).with_issue(check="unused_read_replica", account_id=self._account.account_id, region=region, resource_type="db_instance", resource_id=instance_id, db_instance=instance_id)
 
