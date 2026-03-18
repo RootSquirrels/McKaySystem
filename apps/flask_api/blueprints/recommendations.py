@@ -748,6 +748,18 @@ def _build_recommendations_where_from_values(
     """Build scoped SQL filters for recommendations endpoints."""
     where = ["fc.tenant_id = %s", "fc.workspace = %s", "fc.check_id = ANY(%s)"]
     params: list[Any] = [tenant_id, workspace, _RECOMMENDATION_CHECK_IDS]
+    where.append(
+        """
+        NOT (
+          LOWER(COALESCE(fc.title, '')) LIKE 'cannot verify%%'
+          OR LOWER(COALESCE(fc.title, '')) LIKE '%%access denied%%'
+          OR LOWER(COALESCE(fc.payload->'issue_key'->>'reason', '')) = 'access_denied'
+          OR LOWER(COALESCE(fc.payload->>'message', '')) LIKE '%%access denied%%'
+          OR LOWER(COALESCE(fc.payload->>'advice', '')) LIKE '%%access denied%%'
+          OR LOWER(COALESCE(fc.payload->>'recommendation', '')) LIKE '%%access denied%%'
+        )
+        """
+    )
 
     def _add_any(field: str, values: list[str] | None) -> None:
         if not values:
@@ -1109,8 +1121,17 @@ def _build_recommendation_item(
         row.get("_effective_estimated_annual_savings"),
         default=annual_savings,
     )
-    actionability_score = int((graph_package or {}).get("actionability_score") or 0) if graph_package else 0
-    actionability_label = str((graph_package or {}).get("actionability_label") or "low") if graph_package else "low"
+    if graph_package:
+        actionability_score = int((graph_package or {}).get("actionability_score") or 0)
+        actionability_label = str((graph_package or {}).get("actionability_label") or "low")
+    else:
+        actionability_score, actionability_label = _package_actionability_score(
+            package_monthly_savings=effective_monthly_savings,
+            confidence=confidence,
+            blast_radius="medium",
+            requires_approval=bool(rule.get("requires_approval")),
+            has_owner_hint=False,
+        )
     owner_hint = str((graph_package or {}).get("package_owner_hint") or "").strip() or None
     confidence_model = _build_confidence_model(
         check_id=check_id,

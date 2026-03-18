@@ -161,6 +161,8 @@ def test_recommendations_response_is_enriched(monkeypatch) -> None:  # type: ign
     assert item.get("pricing_version") == "aws_2026_02_01"
     assert item.get("estimated_monthly_savings") == 100.5
     assert item.get("estimated_annual_savings") == 1206.0
+    assert item.get("actionability_score") > 0
+    assert item.get("actionability_label") in {"medium", "high"}
 
 
 def test_recommendations_response_includes_graph_package_context(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -769,6 +771,33 @@ def test_recommendations_response_uses_run_metadata_fallback(monkeypatch) -> Non
     assert confidence_model.get("overall_score") == 78
     assert item.get("pricing_source") == "snapshot"
     assert item.get("pricing_version") == "aws_2026_04_01"
+
+
+def test_recommendations_query_excludes_access_denied_verification_rows(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Access-denied verification findings should stay out of recommendations."""
+    _disable_runtime_guards(monkeypatch)
+    captured_sql: list[str] = []
+
+    def _fake_fetch_all(_conn: object, sql: str, _params: Sequence[Any] | None = None) -> list[dict[str, Any]]:
+        captured_sql.append(sql)
+        return []
+
+    def _fake_fetch_one(_conn: object, sql: str, _params: Sequence[Any] | None = None) -> dict[str, Any]:
+        captured_sql.append(sql)
+        return {"n": 0}
+
+    monkeypatch.setattr(flask_app, "fetch_all_dict_conn", _fake_fetch_all)
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+
+    client = flask_app.app.test_client()
+    resp = client.get("/api/recommendations?tenant_id=acme&workspace=prod&check_id=aws.s3.governance.lifecycle.missing")
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 200
+    assert payload.get("ok") is True
+    sql_blob = "\n".join(captured_sql).lower()
+    assert "cannot verify" in sql_blob
+    assert "access_denied" in sql_blob
 
 
 def test_recommendations_response_ri_coverage_gap_is_enriched(monkeypatch) -> None:  # type: ignore[no-untyped-def]

@@ -410,7 +410,7 @@ export function RecommendationsClientPage() {
 
       <section className="mb-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
         <article className="rounded-xl border border-cyan-300/35 bg-slate-900/45 p-3">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-cyan-100/85">Total</p>
+          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-cyan-100/85">Eligible Actions</p>
           <p className="font-display mt-1 text-2xl font-semibold text-white">{total}</p>
         </article>
         <article className="rounded-xl border border-cyan-300/35 bg-slate-900/45 p-3">
@@ -418,7 +418,7 @@ export function RecommendationsClientPage() {
           <p className="font-display mt-1 text-2xl font-semibold text-white">{pageStart}-{pageEnd}</p>
         </article>
         <article className="rounded-xl border border-cyan-300/35 bg-slate-900/45 p-3">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-cyan-100/85">Page Savings</p>
+          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-cyan-100/85">Recommendation Savings</p>
           <p className="font-display mt-1 text-2xl font-semibold text-white">{formatMoney(pageSavings)}</p>
         </article>
         <article className="rounded-xl border border-cyan-300/35 bg-slate-900/45 p-3">
@@ -435,6 +435,12 @@ export function RecommendationsClientPage() {
         run={latestCoverage.data?.run ?? null}
         summary={latestCoverage.data?.coverage ?? null}
       />
+
+      <section className="finops-panel mb-3 rounded-2xl border border-cyan-200 bg-cyan-50/70 p-4 text-sm text-slate-700">
+        Recommendations show recommendation-eligible actions only. Access-denied verification issues and
+        permission gaps stay on Coverage, and Findings may still contain savings signals that have not yet
+        been normalized into recommendations.
+      </section>
 
       <section className="finops-panel mb-3 rounded-2xl p-4 text-sm">
         <div className="grid gap-3 md:grid-cols-4">
@@ -885,7 +891,7 @@ export function RecommendationsClientPage() {
 
           {visibleRecommendations.length === 0 ? (
             <p className="mt-3 rounded-xl bg-white/80 px-3 py-2 text-sm text-slate-600">
-              No recommendations match the current filters.
+              No recommendation-eligible actions match the current filters.
             </p>
           ) : null}
 

@@ -343,7 +343,7 @@ export function RemediationsImpactClientPage() {
             </p>
           </article>
           <article className={`finops-panel rounded-2xl border p-4 ${summaryCardTone("amber")}`}>
-            <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">Not yet realized</p>
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">Not yet realized (tracked actions)</p>
             <p className="mt-2 text-2xl font-semibold text-slate-900">
               {formatMoney(summary?.estimated_not_realized_monthly_savings ?? null)}
             </p>
@@ -352,7 +352,7 @@ export function RemediationsImpactClientPage() {
             </p>
           </article>
           <article className={`finops-panel rounded-2xl border p-4 ${summaryCardTone("rose")}`}>
-            <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">Needs attention</p>
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">Needs attention (tracked actions)</p>
             <p className="mt-2 text-2xl font-semibold text-slate-900">
               {(summary?.no_realization_count ?? 0) + (summary?.failed_count ?? 0)}
             </p>
@@ -361,6 +361,13 @@ export function RemediationsImpactClientPage() {
             </p>
           </article>
         </section>
+
+        {(summary?.actions_count ?? 0) === 0 ? (
+          <section className="finops-panel mb-4 rounded-2xl border border-amber-200 bg-amber-50/70 p-4 text-sm text-slate-700">
+            Realized savings starts after remediation actions are requested and tracked. Findings and recommendations
+            can exist while this page remains empty because no action execution/outcome has been recorded yet.
+          </section>
+        ) : null}
 
         <section className="finops-panel mb-4 rounded-2xl p-4 text-sm">
           <div className="grid gap-3 md:grid-cols-4">
