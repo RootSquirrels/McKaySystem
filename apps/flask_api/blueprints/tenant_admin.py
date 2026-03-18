@@ -117,7 +117,7 @@ def _workspace_upsert_from_payload(
     payload: dict[str, Any],
     tenant_id: str,
     workspace: str,
-) -> db_rbac.TenantWorkspaceUpsert:
+    ) -> db_rbac.TenantWorkspaceUpsert:
     """Build validated tenant workspace upsert payload."""
     status = _coerce_optional_text(payload.get("status")) or "active"
     if status not in {"active", "suspended", "archived"}:
@@ -134,6 +134,92 @@ def _workspace_upsert_from_payload(
         created_by=_coerce_optional_text(payload.get("created_by")),
         updated_by=_coerce_optional_text(payload.get("updated_by")),
     )
+
+
+def _workspace_lifecycle_guard_conflict(
+    *,
+    previous: dict[str, Any] | None,
+    workspace_entry: db_rbac.TenantWorkspaceUpsert,
+    inherited_source_binding_count: int,
+) -> bool:
+    """Return whether lifecycle guardrails should block the requested change."""
+    if workspace_entry.status not in {"suspended", "archived"}:
+        return False
+    previous_status = str((previous or {}).get("status") or "").strip().lower()
+    if previous_status == workspace_entry.status:
+        return False
+    return inherited_source_binding_count > 0
+
+
+def _retarget_inherited_access_bindings(
+    conn: Any,
+    *,
+    tenant_id: str,
+    anchor_workspace: str,
+    source_workspace: str,
+    target_workspace: str,
+    bindings: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Retarget inherited access bindings from one source workspace to another."""
+    normalized_target = _coerce_optional_text(target_workspace)
+    if not normalized_target:
+        raise ValueError("migrate_inherited_access_to_workspace is required")
+    if normalized_target == source_workspace:
+        raise ValueError("migrate_inherited_access_to_workspace must differ from source workspace")
+
+    target_entry = db_rbac.get_tenant_workspace(
+        conn,
+        tenant_id=tenant_id,
+        anchor_workspace=anchor_workspace,
+        target_workspace=normalized_target,
+    )
+    if target_entry is None:
+        raise ValueError("migration target workspace not found")
+    if str(target_entry.get("status") or "").strip().lower() == "archived":
+        raise ValueError("migration target workspace must not be archived")
+
+    updated: list[dict[str, Any]] = []
+    for binding in bindings:
+        user_id = str(binding.get("user_id") or "").strip()
+        role_id = str(binding.get("role_id") or "").strip()
+        if not user_id or not role_id:
+            continue
+        target_user = db_rbac.get_user_by_id(
+            conn,
+            tenant_id=tenant_id,
+            workspace=normalized_target,
+            user_id=user_id,
+        )
+        if target_user is None:
+            raise ValueError(
+                f"cannot migrate inherited access for {user_id}: user missing in target workspace"
+            )
+        target_role = db_rbac.get_role_by_id(
+            conn,
+            tenant_id=tenant_id,
+            workspace=normalized_target,
+            role_id=role_id,
+        )
+        if target_role is None:
+            raise ValueError(
+                f"cannot migrate inherited access for {user_id}: role {role_id} missing in target workspace"
+            )
+        updated_row = db_rbac.upsert_inherited_tenant_access_binding(
+            conn,
+            binding=db_rbac.TenantRoleBindingUpsert(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                role_id=role_id,
+                source_workspace=normalized_target,
+                granted_by=_coerce_optional_text(binding.get("granted_by")),
+                applies_to_future_workspaces=bool(
+                    binding.get("applies_to_future_workspaces")
+                ),
+            ),
+        )
+        if updated_row is not None:
+            updated.append(updated_row)
+    return updated
 
 
 def _binding_from_payload(
@@ -215,6 +301,94 @@ def api_tenant_admin_workspaces_create() -> Any:
                 anchor_workspace=anchor_workspace,
                 target_workspace=target_workspace,
             )
+            inherited_source_bindings = (
+                db_rbac.list_inherited_tenant_access_bindings_for_source_workspace(
+                    conn,
+                    tenant_id=tenant_id,
+                    anchor_workspace=anchor_workspace,
+                    source_workspace=target_workspace,
+                )
+                if target_workspace
+                else []
+            )
+            force_lifecycle_change = _parse_bool(
+                payload.get("force_lifecycle_change"),
+                field_name="force_lifecycle_change",
+                default=False,
+            )
+            migrate_inherited_access_to_workspace = _coerce_optional_text(
+                payload.get("migrate_inherited_access_to_workspace")
+            )
+            if (
+                not force_lifecycle_change
+                and _workspace_lifecycle_guard_conflict(
+                    previous=previous,
+                    workspace_entry=workspace_entry,
+                    inherited_source_binding_count=len(inherited_source_bindings),
+                )
+            ):
+                return _err(
+                    "conflict",
+                    "workspace lifecycle change is blocked while inherited tenant access still depends on this source workspace",
+                    status=409,
+                    extra={
+                        "workspace": target_workspace,
+                        "status": workspace_entry.status,
+                        "inherited_source_binding_count": len(inherited_source_bindings),
+                        "requires_force_lifecycle_change": True,
+                        "requires_inherited_access_migration": workspace_entry.status
+                        == "archived",
+                    },
+                )
+            if (
+                workspace_entry.status == "archived"
+                and force_lifecycle_change
+                and inherited_source_bindings
+            ):
+                if not migrate_inherited_access_to_workspace:
+                    return _err(
+                        "conflict",
+                        "archiving this workspace requires migrating inherited tenant access to another active workspace",
+                        status=409,
+                        extra={
+                            "workspace": target_workspace,
+                            "status": workspace_entry.status,
+                            "inherited_source_binding_count": len(inherited_source_bindings),
+                            "requires_inherited_access_migration": True,
+                        },
+                    )
+                migrated_bindings = _retarget_inherited_access_bindings(
+                    conn,
+                    tenant_id=tenant_id,
+                    anchor_workspace=anchor_workspace,
+                    source_workspace=target_workspace,
+                    target_workspace=migrate_inherited_access_to_workspace,
+                    bindings=inherited_source_bindings,
+                )
+                append_audit_event(
+                    conn,
+                    event=AuditEvent(
+                        tenant_id=tenant_id,
+                        workspace=anchor_workspace,
+                        entity_type="tenant_role_binding",
+                        entity_id=target_workspace,
+                        event_type="tenant_admin.role_binding.retargeted_for_workspace_archive",
+                        event_category="tenant_admin",
+                        previous_value={
+                            "source_workspace": target_workspace,
+                            "binding_count": len(inherited_source_bindings),
+                        },
+                        new_value={
+                            "source_workspace": migrate_inherited_access_to_workspace,
+                            "binding_count": len(migrated_bindings),
+                        },
+                        actor_id=auth_context.user_id,
+                        actor_email=auth_context.email,
+                        actor_name=auth_context.full_name,
+                        source="/api/tenant-admin/workspaces",
+                        correlation_id=_correlation_id(),
+                    ),
+                )
             row = db_rbac.upsert_tenant_workspace(conn, workspace_entry=workspace_entry)
             append_audit_event(
                 conn,
@@ -266,6 +440,90 @@ def api_tenant_admin_workspaces_update(target_workspace: str) -> Any:
                 anchor_workspace=anchor_workspace,
                 target_workspace=normalized_target,
             )
+            inherited_source_bindings = db_rbac.list_inherited_tenant_access_bindings_for_source_workspace(
+                conn,
+                tenant_id=tenant_id,
+                anchor_workspace=anchor_workspace,
+                source_workspace=normalized_target,
+            )
+            force_lifecycle_change = _parse_bool(
+                payload.get("force_lifecycle_change"),
+                field_name="force_lifecycle_change",
+                default=False,
+            )
+            migrate_inherited_access_to_workspace = _coerce_optional_text(
+                payload.get("migrate_inherited_access_to_workspace")
+            )
+            if (
+                not force_lifecycle_change
+                and _workspace_lifecycle_guard_conflict(
+                    previous=previous,
+                    workspace_entry=workspace_entry,
+                    inherited_source_binding_count=len(inherited_source_bindings),
+                )
+            ):
+                return _err(
+                    "conflict",
+                    "workspace lifecycle change is blocked while inherited tenant access still depends on this source workspace",
+                    status=409,
+                    extra={
+                        "workspace": normalized_target,
+                        "status": workspace_entry.status,
+                        "inherited_source_binding_count": len(inherited_source_bindings),
+                        "requires_force_lifecycle_change": True,
+                        "requires_inherited_access_migration": workspace_entry.status
+                        == "archived",
+                    },
+                )
+            if (
+                workspace_entry.status == "archived"
+                and force_lifecycle_change
+                and inherited_source_bindings
+            ):
+                if not migrate_inherited_access_to_workspace:
+                    return _err(
+                        "conflict",
+                        "archiving this workspace requires migrating inherited tenant access to another active workspace",
+                        status=409,
+                        extra={
+                            "workspace": normalized_target,
+                            "status": workspace_entry.status,
+                            "inherited_source_binding_count": len(inherited_source_bindings),
+                            "requires_inherited_access_migration": True,
+                        },
+                    )
+                migrated_bindings = _retarget_inherited_access_bindings(
+                    conn,
+                    tenant_id=tenant_id,
+                    anchor_workspace=anchor_workspace,
+                    source_workspace=normalized_target,
+                    target_workspace=migrate_inherited_access_to_workspace,
+                    bindings=inherited_source_bindings,
+                )
+                append_audit_event(
+                    conn,
+                    event=AuditEvent(
+                        tenant_id=tenant_id,
+                        workspace=anchor_workspace,
+                        entity_type="tenant_role_binding",
+                        entity_id=normalized_target,
+                        event_type="tenant_admin.role_binding.retargeted_for_workspace_archive",
+                        event_category="tenant_admin",
+                        previous_value={
+                            "source_workspace": normalized_target,
+                            "binding_count": len(inherited_source_bindings),
+                        },
+                        new_value={
+                            "source_workspace": migrate_inherited_access_to_workspace,
+                            "binding_count": len(migrated_bindings),
+                        },
+                        actor_id=auth_context.user_id,
+                        actor_email=auth_context.email,
+                        actor_name=auth_context.full_name,
+                        source="/api/tenant-admin/workspaces/<target_workspace>",
+                        correlation_id=_correlation_id(),
+                    ),
+                )
             row = db_rbac.upsert_tenant_workspace(conn, workspace_entry=workspace_entry)
             append_audit_event(
                 conn,
@@ -298,7 +556,7 @@ def api_tenant_admin_role_bindings_list() -> Any:
     try:
         tenant_id, workspace = _require_scope_from_query()
         with db_conn() as conn:
-            rows = db_rbac.list_tenant_role_bindings(
+            rows = db_rbac.list_inherited_tenant_access_bindings(
                 conn,
                 tenant_id=tenant_id,
                 anchor_workspace=workspace,
@@ -323,6 +581,10 @@ def api_tenant_admin_audit_list() -> Any:
         tenant_id, workspace = _require_scope_from_query()
         limit = _parse_int(_q("limit"), default=50, min_v=1, max_v=500)
         offset = _parse_int(_q("offset"), default=0, min_v=0, max_v=5_000_000)
+        event_category = _coerce_optional_text(_q("event_category"))
+        entity_type = _coerce_optional_text(_q("entity_type"))
+        target_workspace = _coerce_optional_text(_q("target_workspace"))
+        query = _coerce_optional_text(_q("q"))
         with db_conn() as conn:
             rows, total = db_rbac.list_tenant_admin_audit_events(
                 conn,
@@ -330,6 +592,10 @@ def api_tenant_admin_audit_list() -> Any:
                 anchor_workspace=workspace,
                 limit=limit,
                 offset=offset,
+                event_category=event_category,
+                entity_type=entity_type,
+                target_workspace=target_workspace,
+                query=query,
             )
         return _ok(
             {
@@ -337,6 +603,10 @@ def api_tenant_admin_audit_list() -> Any:
                 "workspace": workspace,
                 "limit": limit,
                 "offset": offset,
+                "event_category": event_category,
+                "entity_type": entity_type,
+                "target_workspace": target_workspace,
+                "q": query,
                 "total": total,
                 "items": [_public_audit_event(row) for row in rows],
             }
@@ -381,13 +651,13 @@ def api_tenant_admin_role_binding_upsert(user_id: str) -> Any:
             if role is None:
                 return _err("not_found", "role not found in source workspace", status=404)
 
-            previous = db_rbac.get_tenant_role_binding(
+            previous = db_rbac.get_inherited_tenant_access_binding(
                 conn,
                 tenant_id=tenant_id,
                 anchor_workspace=anchor_workspace,
                 user_id=binding.user_id,
             )
-            row = db_rbac.upsert_tenant_role_binding(conn, binding=binding)
+            row = db_rbac.upsert_inherited_tenant_access_binding(conn, binding=binding)
             append_audit_event(
                 conn,
                 event=AuditEvent(
@@ -426,13 +696,13 @@ def api_tenant_admin_role_binding_delete(user_id: str) -> Any:
             return _err("unauthorized", "authentication required", status=401)
 
         with db_conn() as conn:
-            previous = db_rbac.get_tenant_role_binding(
+            previous = db_rbac.get_inherited_tenant_access_binding(
                 conn,
                 tenant_id=tenant_id,
                 anchor_workspace=workspace,
                 user_id=uid,
             )
-            changed = db_rbac.delete_tenant_role_binding(
+            changed = db_rbac.delete_inherited_tenant_access_binding(
                 conn,
                 tenant_id=tenant_id,
                 user_id=uid,

@@ -157,7 +157,7 @@ def _apply_bootstrap(
         tenant_id=core.tenant_id,
         workspace=core.workspace,
     )
-    db_rbac.apply_tenant_role_bindings_to_workspace(
+    db_rbac.apply_inherited_tenant_access_to_workspace(
         conn,
         tenant_id=core.tenant_id,
         workspace=core.workspace,

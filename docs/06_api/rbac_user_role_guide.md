@@ -207,9 +207,9 @@ To apply `editor` for the same user to three workspaces, call role assignment th
 - `acme/dev`
 - `acme/staging`
 
-## Tenant-wide assignment endpoint (existing workspaces)
+## Inherited Tenant Access Endpoint (Existing Workspaces)
 
-You can fan-out one role across existing workspaces in one call:
+You can apply inherited tenant access across existing workspaces in one call:
 
 ```bash
 curl -sS -X PUT "$BASE_URL/api/users/u_alice/role/tenant" \

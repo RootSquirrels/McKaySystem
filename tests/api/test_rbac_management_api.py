@@ -414,10 +414,11 @@ def test_users_tenant_role_set_requires_admin_full(monkeypatch: Any) -> None:
     assert resp.status_code == 403
     assert payload.get("ok") is False
     assert payload.get("error") == "forbidden"
+    assert payload.get("detail") == "inherited tenant access requires admin:full"
 
 
 def test_users_tenant_role_set_fans_out_and_reports_skips(monkeypatch: Any) -> None:
-    """Tenant-wide role assignment should fan out to existing workspaces."""
+    """Inherited tenant access should fan out to existing workspaces."""
     _disable_runtime_guards(monkeypatch)
     monkeypatch.setattr(
         auth_middleware,
@@ -488,10 +489,15 @@ def test_users_tenant_role_set_fans_out_and_reports_skips(monkeypatch: Any) -> N
     assert resp.status_code == 200
     assert payload.get("ok") is True
     assert payload.get("target_workspaces") == ["prod", "dev", "staging"]
+    assert payload.get("assignment_mode") == "inherited_tenant_access_existing_workspaces"
     summary = payload.get("summary") or {}
     assert summary.get("targeted") == 3
     assert summary.get("assigned") == 1
     assert summary.get("skipped") == 2
+    assignment_summary = payload.get("assignment_summary") or {}
+    assert assignment_summary.get("scope") == "tenant"
+    assert assignment_summary.get("kind") == "inherited_access"
+    assert assignment_summary.get("source_workspace") == "prod"
 
     items = payload.get("items") or []
     by_workspace = {str(item.get("workspace")): item for item in items}
@@ -505,7 +511,7 @@ def test_users_tenant_role_set_fans_out_and_reports_skips(monkeypatch: Any) -> N
 
 
 def test_users_tenant_role_set_respects_explicit_workspaces(monkeypatch: Any) -> None:
-    """Tenant-wide role assignment should accept explicit workspace targets."""
+    """Inherited tenant access should accept explicit workspace targets."""
     _disable_runtime_guards(monkeypatch)
     monkeypatch.setattr(
         auth_middleware,
@@ -579,7 +585,7 @@ def test_users_tenant_role_set_respects_explicit_workspaces(monkeypatch: Any) ->
 
 
 def test_users_tenant_role_set_can_persist_future_workspace_binding(monkeypatch: Any) -> None:
-    """Tenant-wide role assignment can also persist a future-workspace policy."""
+    """Inherited tenant access can also persist a future-workspace policy."""
     _disable_runtime_guards(monkeypatch)
     monkeypatch.setattr(
         auth_middleware,
@@ -631,7 +637,7 @@ def test_users_tenant_role_set_can_persist_future_workspace_binding(monkeypatch:
     )
     monkeypatch.setattr(
         users_blueprint.db_rbac,
-        "upsert_tenant_role_binding",
+        "upsert_inherited_tenant_access_binding",
         lambda *_args, **kwargs: {
             "tenant_id": "acme",
             "workspace": "__tenant__",
@@ -662,9 +668,11 @@ def test_users_tenant_role_set_can_persist_future_workspace_binding(monkeypatch:
     assert resp.status_code == 200
     assert payload.get("ok") is True
     binding = payload.get("future_workspace_binding") or {}
+    alias_binding = payload.get("future_inherited_access_binding") or {}
     assert binding.get("role_id") == "editor"
     assert binding.get("source_workspace") == "prod"
     assert binding.get("applies_to_future_workspaces") is True
+    assert alias_binding == binding
 
 
 def test_tenant_admin_workspaces_list_success(monkeypatch: Any) -> None:
@@ -710,6 +718,308 @@ def test_tenant_admin_workspaces_list_success(monkeypatch: Any) -> None:
     assert items[0].get("provider") == "aws"
 
 
+def test_tenant_admin_workspace_update_blocks_lifecycle_without_force(monkeypatch: Any) -> None:
+    """Tenant admin workspace lifecycle change should conflict when bindings depend on it."""
+    _disable_runtime_guards(monkeypatch)
+    monkeypatch.setattr(
+        auth_middleware,
+        "authenticate_request",
+        lambda: _context_with_permissions("admin:full"),
+    )
+    monkeypatch.setattr(
+        tenant_admin_blueprint.db_rbac,
+        "get_tenant_workspace",
+        lambda *_args, **_kwargs: {
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "status": "active",
+        },
+    )
+    monkeypatch.setattr(
+        tenant_admin_blueprint.db_rbac,
+        "list_inherited_tenant_access_bindings_for_source_workspace",
+        lambda *_args, **_kwargs: [
+            {
+                "tenant_id": "acme",
+                "workspace": "__tenant__",
+                "user_id": "u-1",
+                "role_id": "admin",
+                "source_workspace": "prod",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        tenant_admin_blueprint.db_rbac,
+        "upsert_tenant_workspace",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected call")),
+    )
+
+    client = flask_app.app.test_client()
+    resp = client.put(
+        "/api/tenant-admin/workspaces/prod",
+        json={
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "status": "archived",
+        },
+    )
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 409
+    assert payload.get("ok") is False
+    assert payload.get("error") == "conflict"
+    assert payload.get("requires_force_lifecycle_change") is True
+    assert payload.get("inherited_source_binding_count") == 1
+
+
+def test_tenant_admin_workspace_update_can_force_lifecycle_change(monkeypatch: Any) -> None:
+    """Tenant admin workspace lifecycle change can proceed when force is explicit."""
+    _disable_runtime_guards(monkeypatch)
+    monkeypatch.setattr(
+        auth_middleware,
+        "authenticate_request",
+        lambda: _context_with_permissions("admin:full"),
+    )
+    monkeypatch.setattr(
+        tenant_admin_blueprint.db_rbac,
+        "get_tenant_workspace",
+        lambda *_args, **_kwargs: {
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "status": "active",
+        },
+    )
+    monkeypatch.setattr(
+        tenant_admin_blueprint.db_rbac,
+        "list_inherited_tenant_access_bindings_for_source_workspace",
+        lambda *_args, **_kwargs: [
+            {
+                "tenant_id": "acme",
+                "workspace": "__tenant__",
+                "user_id": "u-1",
+                "role_id": "admin",
+                "source_workspace": "prod",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        tenant_admin_blueprint.db_rbac,
+        "upsert_tenant_workspace",
+        lambda *_args, **_kwargs: {
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "status": "archived",
+            "display_name": "Production",
+            "provider": "aws",
+            "scope_kind": "account",
+            "scope_native_id": None,
+            "environment": "prod",
+            "created_by": "bootstrap-cli",
+            "updated_by": "admin@acme.io",
+            "registered_at": None,
+            "activated_at": None,
+            "archived_at": None,
+            "updated_at": None,
+        },
+    )
+    monkeypatch.setattr(
+        tenant_admin_blueprint,
+        "append_audit_event",
+        lambda *_args, **_kwargs: None,
+    )
+
+    client = flask_app.app.test_client()
+    resp = client.put(
+        "/api/tenant-admin/workspaces/prod",
+        json={
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "status": "archived",
+            "force_lifecycle_change": True,
+        },
+    )
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 200
+    assert payload.get("ok") is True
+    entry = payload.get("workspace_entry") or {}
+    assert entry.get("workspace") == "prod"
+    assert entry.get("status") == "archived"
+
+
+def test_tenant_admin_workspace_archive_requires_migration_target(monkeypatch: Any) -> None:
+    """Force archive should still conflict until inherited access is migrated."""
+    _disable_runtime_guards(monkeypatch)
+    monkeypatch.setattr(
+        auth_middleware,
+        "authenticate_request",
+        lambda: _context_with_permissions("admin:full"),
+    )
+    monkeypatch.setattr(
+        tenant_admin_blueprint.db_rbac,
+        "get_tenant_workspace",
+        lambda *_args, **_kwargs: {
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "status": "active",
+        },
+    )
+    monkeypatch.setattr(
+        tenant_admin_blueprint.db_rbac,
+        "list_inherited_tenant_access_bindings_for_source_workspace",
+        lambda *_args, **_kwargs: [
+            {
+                "tenant_id": "acme",
+                "workspace": "__tenant__",
+                "user_id": "u-1",
+                "role_id": "admin",
+                "source_workspace": "prod",
+                "applies_to_future_workspaces": True,
+                "granted_by": "admin@acme.io",
+            }
+        ],
+    )
+
+    client = flask_app.app.test_client()
+    resp = client.put(
+        "/api/tenant-admin/workspaces/prod",
+        json={
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "status": "archived",
+            "force_lifecycle_change": True,
+        },
+    )
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 409
+    assert payload.get("ok") is False
+    assert payload.get("requires_inherited_access_migration") is True
+
+
+def test_tenant_admin_workspace_archive_can_migrate_bindings(monkeypatch: Any) -> None:
+    """Force archive can proceed after inherited access is retargeted."""
+    _disable_runtime_guards(monkeypatch)
+    monkeypatch.setattr(
+        auth_middleware,
+        "authenticate_request",
+        lambda: _context_with_permissions("admin:full"),
+    )
+
+    def _get_tenant_workspace(*_args, **kwargs):  # type: ignore[no-untyped-def]
+        target_workspace = kwargs.get("target_workspace")
+        if target_workspace == "prod":
+            return {
+                "tenant_id": "acme",
+                "workspace": "prod",
+                "status": "active",
+            }
+        if target_workspace == "shared-admin":
+            return {
+                "tenant_id": "acme",
+                "workspace": "shared-admin",
+                "status": "active",
+            }
+        return None
+
+    monkeypatch.setattr(
+        tenant_admin_blueprint.db_rbac,
+        "get_tenant_workspace",
+        _get_tenant_workspace,
+    )
+    monkeypatch.setattr(
+        tenant_admin_blueprint.db_rbac,
+        "list_inherited_tenant_access_bindings_for_source_workspace",
+        lambda *_args, **_kwargs: [
+            {
+                "tenant_id": "acme",
+                "workspace": "__tenant__",
+                "user_id": "u-1",
+                "role_id": "admin",
+                "source_workspace": "prod",
+                "applies_to_future_workspaces": True,
+                "granted_by": "admin@acme.io",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        tenant_admin_blueprint.db_rbac,
+        "get_user_by_id",
+        lambda *_args, **kwargs: {
+            "tenant_id": "acme",
+            "workspace": kwargs.get("workspace"),
+            "user_id": kwargs.get("user_id"),
+            "email": "u-1@acme.io",
+        },
+    )
+    monkeypatch.setattr(
+        tenant_admin_blueprint.db_rbac,
+        "get_role_by_id",
+        lambda *_args, **kwargs: {
+            "tenant_id": "acme",
+            "workspace": kwargs.get("workspace"),
+            "role_id": kwargs.get("role_id"),
+            "name": "Admin",
+        },
+    )
+    monkeypatch.setattr(
+        tenant_admin_blueprint.db_rbac,
+        "upsert_inherited_tenant_access_binding",
+        lambda *_args, **kwargs: {
+            "tenant_id": "acme",
+            "workspace": "__tenant__",
+            "user_id": getattr(kwargs.get("binding"), "user_id", None),
+            "role_id": getattr(kwargs.get("binding"), "role_id", None),
+            "source_workspace": getattr(kwargs.get("binding"), "source_workspace", None),
+            "applies_to_future_workspaces": True,
+            "granted_by": "admin@acme.io",
+        },
+    )
+    monkeypatch.setattr(
+        tenant_admin_blueprint.db_rbac,
+        "upsert_tenant_workspace",
+        lambda *_args, **_kwargs: {
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "status": "archived",
+            "display_name": "Production",
+            "provider": "aws",
+            "scope_kind": "account",
+            "scope_native_id": None,
+            "environment": "prod",
+            "created_by": "bootstrap-cli",
+            "updated_by": "admin@acme.io",
+            "registered_at": None,
+            "activated_at": None,
+            "archived_at": None,
+            "updated_at": None,
+        },
+    )
+    monkeypatch.setattr(
+        tenant_admin_blueprint,
+        "append_audit_event",
+        lambda *_args, **_kwargs: None,
+    )
+
+    client = flask_app.app.test_client()
+    resp = client.put(
+        "/api/tenant-admin/workspaces/prod",
+        json={
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "status": "archived",
+            "force_lifecycle_change": True,
+            "migrate_inherited_access_to_workspace": "shared-admin",
+        },
+    )
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 200
+    assert payload.get("ok") is True
+    entry = payload.get("workspace_entry") or {}
+    assert entry.get("status") == "archived"
+
+
 def test_tenant_admin_role_binding_delete_success(monkeypatch: Any) -> None:
     """Tenant admin can delete a future-workspace role binding."""
     _disable_runtime_guards(monkeypatch)
@@ -735,7 +1045,7 @@ def test_tenant_admin_role_binding_delete_success(monkeypatch: Any) -> None:
     )
     monkeypatch.setattr(
         tenant_admin_blueprint.db_rbac,
-        "delete_tenant_role_binding",
+        "delete_inherited_tenant_access_binding",
         lambda *_args, **_kwargs: True,
     )
     captured: dict[str, Any] = {}

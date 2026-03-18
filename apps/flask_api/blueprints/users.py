@@ -232,7 +232,7 @@ def _optional_workspace_list(payload: dict[str, Any]) -> list[str] | None:
 
 @dataclass(frozen=True)
 class _TenantRoleAssignmentRequest:
-    """Input payload for tenant-wide workspace role assignment fan-out."""
+    """Input payload for inherited tenant access fan-out across workspaces."""
 
     tenant_id: str
     user_id: str
@@ -247,7 +247,7 @@ def _tenant_role_request_from_payload(
     payload: dict[str, Any],
     user_id: str,
 ) -> tuple[str, str, list[str] | None, _TenantRoleAssignmentRequest]:
-    """Build normalized tenant fan-out role assignment request."""
+    """Build normalized inherited tenant access fan-out request."""
     tenant_id, workspace = _require_scope_from_json(payload)
     uid = _coerce_optional_text(user_id)
     if not uid:
@@ -309,7 +309,7 @@ def _assign_workspace_role_for_tenant_scope(
     Args:
         conn: Open database connection.
         workspace: Target workspace.
-        assignment_request: Tenant-wide assignment payload.
+        assignment_request: Inherited tenant access assignment payload.
         role_permissions_cache: Per-workspace permissions cache.
 
     Returns:
@@ -380,7 +380,7 @@ def _apply_tenant_role_fanout(
     workspaces: list[str],
     assignment_request: _TenantRoleAssignmentRequest,
 ) -> tuple[list[dict[str, Any]], int]:
-    """Apply tenant role assignment across workspaces and return summary tuple."""
+    """Apply inherited tenant access across workspaces and return summary tuple."""
     items: list[dict[str, Any]] = []
     assigned_count = 0
     role_permissions_cache: dict[str, list[str]] = {}
@@ -456,7 +456,7 @@ def api_users_list() -> Any:
 @users_bp.route("/api/users/<user_id>/role/tenant", methods=["PUT"])
 @require_permission("users:manage_roles")
 def api_users_set_tenant_role(user_id: str) -> Any:
-    """Assign one role to a user across existing tenant workspaces."""
+    """Apply inherited tenant access to a user across existing workspaces."""
     try:
         payload = request.get_json(force=True, silent=False) or {}
         tenant_id, workspace, workspaces, assignment_request = _tenant_role_request_from_payload(
@@ -470,7 +470,7 @@ def api_users_set_tenant_role(user_id: str) -> Any:
         if not auth_context.is_superadmin and "admin:full" not in auth_context.permissions:
             return _err(
                 "forbidden",
-                "tenant-wide role assignment requires admin:full",
+                "inherited tenant access requires admin:full",
                 status=403,
             )
 
@@ -512,7 +512,7 @@ def api_users_set_tenant_role(user_id: str) -> Any:
                         "role not found in source workspace",
                         status=404,
                     )
-                binding = db_rbac.upsert_tenant_role_binding(
+                binding = db_rbac.upsert_inherited_tenant_access_binding(
                     conn,
                     binding=db_rbac.TenantRoleBindingUpsert(
                         tenant_id=tenant_id,
@@ -545,6 +545,7 @@ def api_users_set_tenant_role(user_id: str) -> Any:
                     previous_value=None,
                     new_value={
                         "mode": "tenant_existing_workspaces",
+                        "assignment_mode": "inherited_tenant_access_existing_workspaces",
                         "role_id": assignment_request.role_id,
                         "targeted": len(workspaces),
                         "assigned": assigned_count,
@@ -569,6 +570,7 @@ def api_users_set_tenant_role(user_id: str) -> Any:
                 "user_id": assignment_request.user_id,
                 "role_id": assignment_request.role_id,
                 "mode": "tenant_existing_workspaces",
+                "assignment_mode": "inherited_tenant_access_existing_workspaces",
                 "anchor_workspace": workspace,
                 "target_workspaces": workspaces,
                 "summary": {
@@ -576,7 +578,16 @@ def api_users_set_tenant_role(user_id: str) -> Any:
                     "assigned": assigned_count,
                     "skipped": len(workspaces) - assigned_count,
                 },
+                "assignment_summary": {
+                    "scope": "tenant",
+                    "kind": "inherited_access",
+                    "existing_workspaces_applied": assigned_count,
+                    "existing_workspaces_targeted": len(workspaces),
+                    "source_workspace": assignment_request.source_workspace,
+                    "applies_to_future_workspaces": assignment_request.apply_to_future_workspaces,
+                },
                 "future_workspace_binding": future_binding_payload,
+                "future_inherited_access_binding": future_binding_payload,
                 "items": items,
             }
         )

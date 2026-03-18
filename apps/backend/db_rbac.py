@@ -935,6 +935,20 @@ def list_tenant_role_bindings(
     anchor_workspace: str,
 ) -> list[dict[str, Any]]:
     """Return tenant-level inherited role bindings anchored to one workspace."""
+    return list_inherited_tenant_access_bindings(
+        conn,
+        tenant_id=tenant_id,
+        anchor_workspace=anchor_workspace,
+    )
+
+
+def list_inherited_tenant_access_bindings(
+    conn: Any,
+    *,
+    tenant_id: str,
+    anchor_workspace: str,
+) -> list[dict[str, Any]]:
+    """Return inherited tenant access bindings anchored to one workspace."""
     return fetch_all_dict_conn(
         conn,
         """
@@ -978,6 +992,59 @@ def list_tenant_role_bindings(
     )
 
 
+def list_inherited_tenant_access_bindings_for_source_workspace(
+    conn: Any,
+    *,
+    tenant_id: str,
+    anchor_workspace: str,
+    source_workspace: str,
+) -> list[dict[str, Any]]:
+    """Return inherited tenant access bindings that source from one workspace."""
+    return fetch_all_dict_conn(
+        conn,
+        """
+        SELECT
+          trb.tenant_id,
+          trb.workspace,
+          trb.user_id,
+          trb.role_id,
+          trb.source_workspace,
+          trb.applies_to_future_workspaces,
+          trb.granted_by,
+          trb.granted_at,
+          trb.updated_at
+        FROM tenant_role_bindings trb
+        WHERE trb.tenant_id = %s
+          AND trb.workspace = %s
+          AND trb.source_workspace = %s
+          AND (
+            EXISTS (
+              SELECT 1
+              FROM tenant_workspaces anchor
+              WHERE anchor.tenant_id = %s
+                AND anchor.workspace = %s
+            )
+            OR EXISTS (
+              SELECT 1
+              FROM roles anchor_role
+              WHERE anchor_role.tenant_id = %s
+                AND anchor_role.workspace = %s
+            )
+          )
+        ORDER BY trb.user_id ASC
+        """,
+        (
+            tenant_id,
+            TENANT_POLICY_WORKSPACE,
+            source_workspace,
+            tenant_id,
+            anchor_workspace,
+            tenant_id,
+            anchor_workspace,
+        ),
+    )
+
+
 def list_tenant_admin_audit_events(
     conn: Any,
     *,
@@ -985,11 +1052,63 @@ def list_tenant_admin_audit_events(
     anchor_workspace: str,
     limit: int = 100,
     offset: int = 0,
+    event_category: str | None = None,
+    entity_type: str | None = None,
+    target_workspace: str | None = None,
+    query: str | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """Return tenant administration audit history for one tenant."""
+    where = [
+        "al.tenant_id = %s",
+        "(al.event_category = 'tenant_admin' OR al.event_type = 'users.role.assigned_tenant')",
+        """(
+            EXISTS (
+              SELECT 1
+              FROM tenant_workspaces anchor
+              WHERE anchor.tenant_id = %s
+                AND anchor.workspace = %s
+            )
+            OR EXISTS (
+              SELECT 1
+              FROM roles anchor_role
+              WHERE anchor_role.tenant_id = %s
+                AND anchor_role.workspace = %s
+            )
+          )""",
+    ]
+    params: list[Any] = [
+        tenant_id,
+        tenant_id,
+        anchor_workspace,
+        tenant_id,
+        anchor_workspace,
+    ]
+    if event_category:
+        where.append("al.event_category = %s")
+        params.append(event_category)
+    if entity_type:
+        where.append("al.entity_type = %s")
+        params.append(entity_type)
+    if target_workspace:
+        where.append("al.workspace = %s")
+        params.append(target_workspace)
+    if query:
+        where.append(
+            """(
+                al.workspace ILIKE %s
+                OR al.entity_id ILIKE %s
+                OR al.event_type ILIKE %s
+                OR COALESCE(al.actor_email, '') ILIKE %s
+                OR COALESCE(al.actor_id, '') ILIKE %s
+              )"""
+        )
+        query_like = f"%{query}%"
+        params.extend([query_like, query_like, query_like, query_like, query_like])
+
+    where_sql = " AND ".join(where)
     rows = fetch_all_dict_conn(
         conn,
-        """
+        f"""
         SELECT
           al.id,
           al.tenant_id,
@@ -1007,64 +1126,20 @@ def list_tenant_admin_audit_events(
           al.correlation_id,
           al.created_at
         FROM audit_log al
-        WHERE al.tenant_id = %s
-          AND (
-            al.event_category = 'tenant_admin'
-            OR al.event_type = 'users.role.assigned_tenant'
-          )
-          AND (
-            EXISTS (
-              SELECT 1
-              FROM tenant_workspaces anchor
-              WHERE anchor.tenant_id = %s
-                AND anchor.workspace = %s
-            )
-            OR EXISTS (
-              SELECT 1
-              FROM roles anchor_role
-              WHERE anchor_role.tenant_id = %s
-                AND anchor_role.workspace = %s
-            )
-          )
+        WHERE {where_sql}
         ORDER BY al.created_at DESC, al.id DESC
         LIMIT %s OFFSET %s
         """,
-        (
-            tenant_id,
-            tenant_id,
-            anchor_workspace,
-            tenant_id,
-            anchor_workspace,
-            limit,
-            offset,
-        ),
+        tuple(params + [limit, offset]),
     )
     count_row = fetch_one_dict_conn(
         conn,
-        """
+        f"""
         SELECT COUNT(*)::bigint AS n
         FROM audit_log al
-        WHERE al.tenant_id = %s
-          AND (
-            al.event_category = 'tenant_admin'
-            OR al.event_type = 'users.role.assigned_tenant'
-          )
-          AND (
-            EXISTS (
-              SELECT 1
-              FROM tenant_workspaces anchor
-              WHERE anchor.tenant_id = %s
-                AND anchor.workspace = %s
-            )
-            OR EXISTS (
-              SELECT 1
-              FROM roles anchor_role
-              WHERE anchor_role.tenant_id = %s
-                AND anchor_role.workspace = %s
-            )
-          )
+        WHERE {where_sql}
         """,
-        (tenant_id, tenant_id, anchor_workspace, tenant_id, anchor_workspace),
+        tuple(params),
     )
     total = int((count_row or {}).get("n") or 0)
     return rows, total
@@ -1078,6 +1153,22 @@ def get_tenant_role_binding(
     user_id: str,
 ) -> dict[str, Any] | None:
     """Return one tenant-level inherited role binding."""
+    return get_inherited_tenant_access_binding(
+        conn,
+        tenant_id=tenant_id,
+        anchor_workspace=anchor_workspace,
+        user_id=user_id,
+    )
+
+
+def get_inherited_tenant_access_binding(
+    conn: Any,
+    *,
+    tenant_id: str,
+    anchor_workspace: str,
+    user_id: str,
+) -> dict[str, Any] | None:
+    """Return one inherited tenant access binding."""
     return fetch_one_dict_conn(
         conn,
         """
@@ -1128,6 +1219,15 @@ def upsert_tenant_role_binding(
     binding: TenantRoleBindingUpsert,
 ) -> dict[str, Any] | None:
     """Create or update one tenant-level inherited role binding idempotently."""
+    return upsert_inherited_tenant_access_binding(conn, binding=binding)
+
+
+def upsert_inherited_tenant_access_binding(
+    conn: Any,
+    *,
+    binding: TenantRoleBindingUpsert,
+) -> dict[str, Any] | None:
+    """Create or update one inherited tenant access binding idempotently."""
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -1182,6 +1282,20 @@ def delete_tenant_role_binding(
     user_id: str,
 ) -> bool:
     """Delete one tenant-level inherited role binding."""
+    return delete_inherited_tenant_access_binding(
+        conn,
+        tenant_id=tenant_id,
+        user_id=user_id,
+    )
+
+
+def delete_inherited_tenant_access_binding(
+    conn: Any,
+    *,
+    tenant_id: str,
+    user_id: str,
+) -> bool:
+    """Delete one inherited tenant access binding."""
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -1202,8 +1316,22 @@ def apply_tenant_role_bindings_to_workspace(
     workspace: str,
 ) -> list[dict[str, Any]]:
     """Apply active future-workspace role bindings to one workspace idempotently."""
+    return apply_inherited_tenant_access_to_workspace(
+        conn,
+        tenant_id=tenant_id,
+        workspace=workspace,
+    )
+
+
+def apply_inherited_tenant_access_to_workspace(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+) -> list[dict[str, Any]]:
+    """Apply active future-workspace inherited access bindings to one workspace."""
     applied: list[dict[str, Any]] = []
-    bindings = list_tenant_role_bindings(
+    bindings = list_inherited_tenant_access_bindings(
         conn,
         tenant_id=tenant_id,
         anchor_workspace=workspace,

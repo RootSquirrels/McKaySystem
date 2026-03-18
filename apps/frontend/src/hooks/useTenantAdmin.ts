@@ -74,6 +74,10 @@ export interface TenantAdminAuditResponse {
   workspace: string;
   limit: number;
   offset: number;
+  event_category: string | null;
+  entity_type: string | null;
+  target_workspace: string | null;
+  q: string | null;
   total: number;
   items: TenantAdminAuditItem[];
 }
@@ -100,6 +104,8 @@ export interface TenantWorkspaceUpsertPayload {
   status?: string;
   created_by?: string;
   updated_by?: string;
+  force_lifecycle_change?: boolean;
+  migrate_inherited_access_to_workspace?: string;
 }
 
 export interface TenantRoleBindingPayload {
@@ -121,9 +127,27 @@ function bindingsQueryKey(scope: { tenantId?: string; workspace?: string }) {
 
 function auditQueryKey(
   scope: { tenantId?: string; workspace?: string },
-  options: { limit: number; offset: number },
+  options: {
+    limit: number;
+    offset: number;
+    eventCategory: string;
+    entityType: string;
+    targetWorkspace: string;
+    q: string;
+  },
 ) {
-  return ["tenant-admin", "audit", scope.tenantId, scope.workspace, options.limit, options.offset] as const;
+  return [
+    "tenant-admin",
+    "audit",
+    scope.tenantId,
+    scope.workspace,
+    options.limit,
+    options.offset,
+    options.eventCategory,
+    options.entityType,
+    options.targetWorkspace,
+    options.q,
+  ] as const;
 }
 
 /**
@@ -160,22 +184,40 @@ export function useTenantRoleBindings(enabled = true) {
  * Query tenant administration audit history.
  */
 export function useTenantAdminAudit(
-  options: { limit?: number; offset?: number } = {},
+  options: {
+    limit?: number;
+    offset?: number;
+    eventCategory?: string;
+    entityType?: string;
+    targetWorkspace?: string;
+    q?: string;
+  } = {},
   enabled = true,
 ) {
   const scope = getStoredScope();
   const limit = options.limit ?? 50;
   const offset = options.offset ?? 0;
+  const eventCategory = options.eventCategory ?? "";
+  const entityType = options.entityType ?? "";
+  const targetWorkspace = options.targetWorkspace ?? "";
+  const q = options.q ?? "";
 
   return useQuery({
     queryKey: auditQueryKey(
       { tenantId: scope?.tenantId, workspace: scope?.workspace },
-      { limit, offset },
+      { limit, offset, eventCategory, entityType, targetWorkspace, q },
     ),
     enabled: Boolean(scope?.tenantId && scope?.workspace && enabled),
     queryFn: async () => {
       return apiClient.get<TenantAdminAuditResponse>("/tenant-admin/audit", {
-        query: { limit, offset },
+        query: {
+          limit,
+          offset,
+          event_category: eventCategory || undefined,
+          entity_type: entityType || undefined,
+          target_workspace: targetWorkspace || undefined,
+          q: q || undefined,
+        },
       });
     },
   });

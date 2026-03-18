@@ -47,6 +47,17 @@ function userStatusBadgeClass(user: UserItem): string {
   return "border-zinc-300 bg-zinc-100 text-zinc-700";
 }
 
+function assignmentBadgeClass(source: string | null): string {
+  const normalized = (source ?? "").trim().toLowerCase();
+  if (normalized === "inherited") {
+    return "border-violet-300 bg-violet-50 text-violet-800";
+  }
+  if (normalized === "direct") {
+    return "border-cyan-300 bg-cyan-50 text-cyan-800";
+  }
+  return "border-zinc-300 bg-zinc-100 text-zinc-700";
+}
+
 export function UsersClientPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -244,7 +255,7 @@ export function UsersClientPage() {
         });
         const summary = result.summary;
         setRoleFeedback(
-          `Tenant role updated: ${summary.assigned}/${summary.targeted} assigned, ${summary.skipped} skipped.`,
+          `Inherited tenant access updated: ${summary.assigned}/${summary.targeted} assigned, ${summary.skipped} skipped.`,
         );
       } else {
         await mutations.setUserRole.mutateAsync({
@@ -272,11 +283,15 @@ export function UsersClientPage() {
               Access Governance
             </p>
             <h1 className="font-display mt-2 text-2xl font-semibold tracking-tight text-slate-900 md:text-3xl">
-              Users and Roles
+              Workspace Users and Roles
             </h1>
             <p className="mt-1 text-sm text-slate-600">
               Tenant: <span className="font-medium">{activeScope.tenantId}</span> | Workspace:{" "}
               <span className="font-medium">{activeScope.workspace}</span>
+            </p>
+            <p className="mt-2 max-w-3xl text-sm text-slate-600">
+              This page manages access for the current workspace. Tenant-wide inherited access is
+              separated into the tenant administration surface.
             </p>
           </div>
           <div className="flex items-center gap-2 self-start">
@@ -434,11 +449,21 @@ export function UsersClientPage() {
                 >
                   {showCreate ? "Close" : "Create User"}
                 </button>
-              ) : null}
-            </div>
+                ) : null}
+              </div>
 
-            {showCreate ? (
-              <form className="mt-3 grid gap-3 md:grid-cols-2" onSubmit={submitCreate}>
+              <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-700">
+                <p className="font-medium text-slate-900">Access model</p>
+                <p className="mt-1">
+                  Workspace admins can manage users and roles only inside{" "}
+                  <span className="font-medium">{activeScope.workspace}</span>. Tenant-wide inherited
+                  access remains restricted to <code>admin:full</code> and cannot be elevated from
+                  workspace-only administration.
+                </p>
+              </div>
+
+              {showCreate ? (
+                <form className="mt-3 grid gap-3 md:grid-cols-2" onSubmit={submitCreate}>
                 <label className="block text-sm">
                   <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">
                     User ID
@@ -531,6 +556,7 @@ export function UsersClientPage() {
                       <th className="px-3 py-2">Full name</th>
                       <th className="px-3 py-2">Provider</th>
                       <th className="px-3 py-2">Role</th>
+                      <th className="px-3 py-2">Assignment</th>
                       <th className="px-3 py-2">Last login</th>
                       <th className="px-3 py-2">Status</th>
                       <th className="px-3 py-2">Actions</th>
@@ -548,14 +574,28 @@ export function UsersClientPage() {
                         <td className="px-3 py-2">{user.auth_provider ?? "-"}</td>
                         <td className="px-3 py-2">
                           {user.role_id ? (
-                            <span className="inline-flex items-center rounded border border-cyan-300 bg-cyan-50 px-2 py-0.5 text-xs font-medium text-cyan-800">
-                              {user.role_name ? `${user.role_name} (${user.role_id})` : user.role_id}
-                            </span>
+                            <div>
+                              <span className="inline-flex items-center rounded border border-cyan-300 bg-cyan-50 px-2 py-0.5 text-xs font-medium text-cyan-800">
+                                {user.role_name ? `${user.role_name} (${user.role_id})` : user.role_id}
+                              </span>
+                              <div className="mt-1 text-xs text-slate-500">
+                                Source: {user.source_workspace ?? activeScope.workspace}
+                              </div>
+                            </div>
                           ) : (
                             <span className="inline-flex items-center rounded border border-zinc-300 bg-zinc-100 px-2 py-0.5 text-xs text-zinc-600">
                               Unassigned
                             </span>
                           )}
+                        </td>
+                        <td className="px-3 py-2">
+                          <span
+                            className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium ${assignmentBadgeClass(
+                              user.assignment_source,
+                            )}`}
+                          >
+                            {user.assignment_source ?? "unknown"}
+                          </span>
                         </td>
                         <td className="px-3 py-2">{formatUtcDateTime(user.last_login_at)}</td>
                         <td className="px-3 py-2">
@@ -731,19 +771,26 @@ export function UsersClientPage() {
                 />
               </label>
 
-              <label className="flex items-center text-sm">
-                <input
-                  type="checkbox"
-                  checked={applyTenantWide}
-                  onChange={(event) => {
-                    setApplyTenantWide(event.target.checked);
-                  }}
-                  disabled={!canManageRoles || !isAdminFull}
-                />
-                <span className="ml-2">
-                  Apply role to all existing tenant workspaces (requires `admin:full`)
-                </span>
-              </label>
+              {isAdminFull ? (
+                <label className="flex items-center text-sm">
+                  <input
+                    type="checkbox"
+                    checked={applyTenantWide}
+                    onChange={(event) => {
+                      setApplyTenantWide(event.target.checked);
+                    }}
+                    disabled={!canManageRoles}
+                  />
+                  <span className="ml-2">
+                    Apply as inherited tenant access across existing workspaces
+                  </span>
+                </label>
+              ) : (
+                <p className="rounded border border-amber-300 bg-amber-50 px-2 py-1 text-xs text-amber-800">
+                  Tenant-wide inherited access is intentionally restricted to tenant administrators.
+                  This screen only changes the current workspace assignment.
+                </p>
+              )}
 
               {role.data?.role ? (
                 <section className="rounded-xl border border-slate-200 bg-slate-50 p-3">
@@ -755,6 +802,18 @@ export function UsersClientPage() {
                     Granted by: {role.data.role.granted_by ?? "-"} | Granted at:{" "}
                     {formatUtcDateTime(role.data.role.granted_at)}
                   </p>
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <span
+                      className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium ${assignmentBadgeClass(
+                        role.data.role.assignment_source,
+                      )}`}
+                    >
+                      {role.data.role.assignment_source ?? "unknown"}
+                    </span>
+                    <span className="text-xs text-slate-600">
+                      Source workspace: {role.data.role.source_workspace ?? activeScope.workspace}
+                    </span>
+                  </div>
                   <div className="mt-2 flex flex-wrap gap-1">
                     {role.data.role.permissions.length > 0 ? (
                       role.data.role.permissions.map((permission) => (

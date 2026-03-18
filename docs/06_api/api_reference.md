@@ -14,7 +14,7 @@ The API is organized into Flask Blueprints, each handling a specific domain:
 - `findings` - Finding queries and governance
 - `recommendations` - FinOps optimization recommendations
 - `remediations` - Remediation action approval and queue views
-- `users` - User CRUD and workspace/tenant role assignment
+- `users` - User CRUD and workspace/inherited-tenant access assignment
 - `api_keys` - API key CRUD for RBAC principals
 - `teams` - Team and member management
 - `sla_policies` - SLA policy management
@@ -345,6 +345,11 @@ Body:
 - `workspaces` optional list of explicit target workspaces (when omitted, existing tenant workspaces are discovered from RBAC roles)
 
 Behavior:
+- applies inherited tenant access across existing workspaces
+- requires `admin:full` in addition to `users:manage_roles`
+- preserves backward-compatible `mode = tenant_existing_workspaces`
+- also returns `assignment_mode = inherited_tenant_access_existing_workspaces`
+- returns both `future_workspace_binding` and `future_inherited_access_binding`
 - Assigns one role across existing tenant workspaces in one request.
 - Fan-out applies only where both user and role exist for each workspace.
 - Returns per-workspace status (`assigned` or `skipped` with reason).

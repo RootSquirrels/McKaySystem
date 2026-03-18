@@ -80,10 +80,25 @@ export function TenantAdminClientPage() {
   const auth = useAuth();
   const permissions = useMemo(() => new Set(auth.user?.permissions ?? []), [auth.user?.permissions]);
   const isAdminFull = permissions.has("admin:full");
+  const [auditEventCategory, setAuditEventCategory] = useState("");
+  const [auditEntityType, setAuditEntityType] = useState("");
+  const [auditTargetWorkspace, setAuditTargetWorkspace] = useState("");
+  const [auditQuery, setAuditQuery] = useState("");
+  const [auditOffset, setAuditOffset] = useState(0);
 
   const workspaces = useTenantWorkspaces(isAdminFull);
   const bindings = useTenantRoleBindings(isAdminFull);
-  const audit = useTenantAdminAudit({ limit: 20, offset: 0 }, isAdminFull);
+  const audit = useTenantAdminAudit(
+    {
+      limit: 20,
+      offset: auditOffset,
+      eventCategory: auditEventCategory,
+      entityType: auditEntityType,
+      targetWorkspace: auditTargetWorkspace,
+      q: auditQuery,
+    },
+    isAdminFull,
+  );
   const users = useUsers({ limit: 50, offset: 0, includeInactive: true, enabled: isAdminFull });
   const mutations = useTenantAdminMutations();
 
@@ -135,6 +150,16 @@ export function TenantAdminClientPage() {
   const activeCount = workspaceItems.filter((item) => item.status === "active").length;
   const suspendedCount = workspaceItems.filter((item) => item.status === "suspended").length;
   const archivedCount = workspaceItems.filter((item) => item.status === "archived").length;
+  const auditLimit = audit.data?.limit ?? 20;
+  const auditTotal = audit.data?.total ?? 0;
+  const auditPage = Math.floor(auditOffset / auditLimit) + 1;
+  const auditTotalPages = Math.max(1, Math.ceil(auditTotal / auditLimit));
+  const auditCanPrev = auditOffset > 0;
+  const auditCanNext = auditOffset + auditLimit < auditTotal;
+
+  useEffect(() => {
+    setAuditOffset(0);
+  }, [auditEventCategory, auditEntityType, auditTargetWorkspace, auditQuery]);
 
   function beginEditWorkspace(item: TenantWorkspaceItem) {
     setEditingWorkspace(item.workspace);
@@ -160,6 +185,42 @@ export function TenantAdminClientPage() {
     setWorkspaceFeedback(null);
   }
 
+  async function saveWorkspaceWithLifecycleOverride(
+    payload: Parameters<typeof mutations.upsertWorkspace.mutateAsync>[0],
+    options: { conflictPrompt: string; archiveMigrationPrompt?: string },
+  ) {
+    try {
+      return await mutations.upsertWorkspace.mutateAsync(payload);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        const errorCode = error.code ?? "";
+        const needsArchiveMigration =
+          errorCode === "conflict" &&
+          error.message.includes("requires migrating inherited tenant access");
+        if (needsArchiveMigration && options.archiveMigrationPrompt) {
+          const targetWorkspace = window.prompt(options.archiveMigrationPrompt, "");
+          if (!targetWorkspace || !targetWorkspace.trim()) {
+            throw error;
+          }
+          return mutations.upsertWorkspace.mutateAsync({
+            ...payload,
+            force_lifecycle_change: true,
+            migrate_inherited_access_to_workspace: targetWorkspace.trim(),
+          });
+        }
+        const confirmed = window.confirm(`${error.message}\n\n${options.conflictPrompt}`);
+        if (!confirmed) {
+          throw error;
+        }
+        return mutations.upsertWorkspace.mutateAsync({
+          ...payload,
+          force_lifecycle_change: true,
+        });
+      }
+      throw error;
+    }
+  }
+
   async function submitWorkspace(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!isAdminFull) {
@@ -173,7 +234,8 @@ export function TenantAdminClientPage() {
     setWorkspaceError(null);
     setWorkspaceFeedback(null);
     try {
-      await mutations.upsertWorkspace.mutateAsync({
+      await saveWorkspaceWithLifecycleOverride(
+        {
         tenant_id: activeScope.tenantId,
         workspace: activeScope.workspace,
         target_workspace: targetWorkspace,
@@ -185,7 +247,14 @@ export function TenantAdminClientPage() {
         status: workspaceForm.status,
         created_by: workspaceForm.createdBy.trim() || undefined,
         updated_by: workspaceForm.updatedBy.trim() || undefined,
-      });
+        },
+        {
+          conflictPrompt:
+            "Confirm that you want to force this lifecycle change even though inherited tenant access still depends on this workspace.",
+          archiveMigrationPrompt:
+            "Enter the active workspace that should become the new inherited-access source before archiving this workspace.",
+        },
+      );
       const message = editingWorkspace ? "Workspace updated." : "Workspace registered.";
       setEditingWorkspace(null);
       setWorkspaceForm(workspaceDefaults(activeScope, auth.user?.email ?? null));
@@ -245,6 +314,61 @@ export function TenantAdminClientPage() {
       setBindingFeedback(`Binding removed for ${item.user_id}.`);
     } catch (error) {
       setBindingError(apiErrorMessage("Failed to delete binding", error));
+    }
+  }
+
+  async function quickSetWorkspaceStatus(item: TenantWorkspaceItem, status: string) {
+    if (!isAdminFull || item.status === status) {
+      return;
+    }
+    const sourcedBindings = bindingItems.filter(
+      (binding) => binding.source_workspace === item.workspace,
+    ).length;
+    const targetWorkspaceMessage =
+      item.workspace === activeScope.workspace
+        ? " This is also the current anchor workspace for your tenant admin session."
+        : "";
+    const bindingMessage =
+      sourcedBindings > 0
+        ? ` ${sourcedBindings} inherited access binding(s) currently use this workspace as their source.`
+        : "";
+    const actionMessage =
+      status === "archived"
+        ? `Archive workspace ${item.workspace}?${bindingMessage}${targetWorkspaceMessage}`
+        : status === "suspended"
+          ? `Suspend workspace ${item.workspace}?${bindingMessage}${targetWorkspaceMessage}`
+          : `Activate workspace ${item.workspace}?`;
+    const confirmed = window.confirm(actionMessage);
+    if (!confirmed) {
+      return;
+    }
+    setWorkspaceError(null);
+    setWorkspaceFeedback(null);
+    try {
+      await saveWorkspaceWithLifecycleOverride(
+        {
+          tenant_id: activeScope.tenantId,
+          workspace: activeScope.workspace,
+          target_workspace: item.workspace,
+          display_name: item.display_name ?? undefined,
+          provider: item.provider,
+          scope_kind: item.scope_kind,
+          scope_native_id: item.scope_native_id ?? undefined,
+          environment: item.environment ?? undefined,
+          status,
+          created_by: item.created_by ?? undefined,
+          updated_by: auth.user?.email ?? undefined,
+        },
+        {
+          conflictPrompt:
+            "Confirm that you want to force this lifecycle change and keep moving this workspace even with inherited access dependencies still attached to it.",
+          archiveMigrationPrompt:
+            "Enter the active workspace that should become the new inherited-access source before archiving this workspace.",
+        },
+      );
+      setWorkspaceFeedback(`Workspace ${item.workspace} marked ${status}.`);
+    } catch (error) {
+      setWorkspaceError(apiErrorMessage(`Failed to mark workspace ${status}`, error));
     }
   }
 
@@ -395,6 +519,29 @@ export function TenantAdminClientPage() {
                             >
                               Edit
                             </button>
+                            <button
+                              type="button"
+                              className="ml-2 rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs font-semibold uppercase tracking-wide text-slate-700 transition hover:bg-slate-100"
+                              onClick={() => {
+                                void quickSetWorkspaceStatus(
+                                  item,
+                                  item.status === "active" ? "suspended" : "active",
+                                );
+                              }}
+                            >
+                              {item.status === "active" ? "Suspend" : "Activate"}
+                            </button>
+                            {item.status !== "archived" ? (
+                              <button
+                                type="button"
+                                className="ml-2 rounded-lg border border-rose-300 bg-rose-50 px-2.5 py-1 text-xs font-semibold uppercase tracking-wide text-rose-700 transition hover:bg-rose-100"
+                                onClick={() => {
+                                  void quickSetWorkspaceStatus(item, "archived");
+                                }}
+                              >
+                                Archive
+                              </button>
+                            ) : null}
                           </td>
                         </tr>
                       ))}
@@ -765,6 +912,60 @@ export function TenantAdminClientPage() {
                   </span>
                 </div>
 
+                <div className="mt-3 grid gap-3 md:grid-cols-2">
+                  <label className="block text-sm">
+                    <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">
+                      Search
+                    </span>
+                    <input
+                      value={auditQuery}
+                      onChange={(event) => setAuditQuery(event.target.value)}
+                      placeholder="workspace, actor, entity, event"
+                      className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
+                    />
+                  </label>
+                  <label className="block text-sm">
+                    <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">
+                      Workspace
+                    </span>
+                    <input
+                      value={auditTargetWorkspace}
+                      onChange={(event) => setAuditTargetWorkspace(event.target.value)}
+                      placeholder="prod"
+                      className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
+                    />
+                  </label>
+                  <label className="block text-sm">
+                    <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">
+                      Event Category
+                    </span>
+                    <select
+                      value={auditEventCategory}
+                      onChange={(event) => setAuditEventCategory(event.target.value)}
+                      className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
+                    >
+                      <option value="">all</option>
+                      <option value="tenant_admin">tenant_admin</option>
+                      <option value="rbac">rbac</option>
+                    </select>
+                  </label>
+                  <label className="block text-sm">
+                    <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-600">
+                      Entity Type
+                    </span>
+                    <select
+                      value={auditEntityType}
+                      onChange={(event) => setAuditEntityType(event.target.value)}
+                      className="w-full rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-slate-900 outline-none transition focus:border-cyan-500 focus:ring-2 focus:ring-cyan-200"
+                    >
+                      <option value="">all</option>
+                      <option value="tenant_workspace">tenant_workspace</option>
+                      <option value="tenant_role_binding">tenant_role_binding</option>
+                      <option value="user_role_assignment">user_role_assignment</option>
+                    </select>
+                  </label>
+                </div>
+
                 {audit.isLoading ? (
                   <p className="mt-3 text-sm text-slate-600">Loading audit history...</p>
                 ) : null}
@@ -773,6 +974,38 @@ export function TenantAdminClientPage() {
                     {apiErrorMessage("Failed to load audit history", audit.error)}
                   </p>
                 ) : null}
+
+                <div className="mt-3 flex items-center justify-between text-sm">
+                  <p className="text-slate-600">
+                    Showing {auditTotal === 0 ? 0 : auditOffset + 1}-
+                    {Math.min(auditOffset + auditItems.length, auditTotal)} of {auditTotal}
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition hover:bg-slate-100 disabled:opacity-50"
+                      disabled={!auditCanPrev}
+                      onClick={() => {
+                        setAuditOffset((current) => Math.max(0, current - auditLimit));
+                      }}
+                    >
+                      Previous
+                    </button>
+                    <span className="rounded-md bg-slate-100 px-2 py-1 text-xs text-slate-700">
+                      Page {auditPage} / {auditTotalPages}
+                    </span>
+                    <button
+                      type="button"
+                      className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition hover:bg-slate-100 disabled:opacity-50"
+                      disabled={!auditCanNext}
+                      onClick={() => {
+                        setAuditOffset((current) => current + auditLimit);
+                      }}
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
 
                 <div className="mt-3 space-y-3">
                   {auditItems.length ? (

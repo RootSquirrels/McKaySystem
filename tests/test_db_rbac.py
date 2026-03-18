@@ -446,6 +446,43 @@ def test_upsert_tenant_role_binding_is_idempotent_and_scoped() -> None:
     assert "on conflict (tenant_id, workspace, user_id)" in sql
 
 
+def test_list_inherited_tenant_access_bindings_for_source_workspace_is_scoped(
+    monkeypatch: Any,
+) -> None:
+    """Source-workspace binding lookup should keep tenant and anchor scoping."""
+    captured: dict[str, Any] = {}
+
+    def _fake_fetch_all(
+        _conn: object, sql: str, params: Sequence[Any] | None = None
+    ) -> list[dict[str, Any]]:
+        captured["sql"] = sql
+        captured["params"] = params
+        return [{"user_id": "u-1"}]
+
+    monkeypatch.setattr(db_rbac, "fetch_all_dict_conn", _fake_fetch_all)
+
+    row = db_rbac.list_inherited_tenant_access_bindings_for_source_workspace(
+        object(),
+        tenant_id="acme",
+        anchor_workspace="prod",
+        source_workspace="sandbox",
+    )
+
+    assert row == [{"user_id": "u-1"}]
+    assert captured["params"] == (
+        "acme",
+        db_rbac.TENANT_POLICY_WORKSPACE,
+        "sandbox",
+        "acme",
+        "prod",
+        "acme",
+        "prod",
+    )
+    sql = str(captured["sql"]).lower()
+    assert "from tenant_role_bindings" in sql
+    assert "source_workspace = %s" in sql
+
+
 def test_bootstrap_rbac_scope_copies_template_scope_idempotently() -> None:
     cursor = _FakeCursor()
     conn = _FakeConn(cursor)

@@ -56,7 +56,7 @@ def test_bootstrap_scope_admin_assigns_user_role(monkeypatch: Any) -> None:
     )
     monkeypatch.setattr(
         scope_bootstrap.db_rbac,
-        "apply_tenant_role_bindings_to_workspace",
+        "apply_inherited_tenant_access_to_workspace",
         lambda *_args, **kwargs: calls.__setitem__("applied_bindings", kwargs),
     )
     monkeypatch.setattr(
@@ -137,7 +137,7 @@ def test_bootstrap_scope_admin_can_issue_api_key(monkeypatch: Any) -> None:
     )
     monkeypatch.setattr(
         scope_bootstrap.db_rbac,
-        "apply_tenant_role_bindings_to_workspace",
+        "apply_inherited_tenant_access_to_workspace",
         lambda *_args, **_kwargs: [],
     )
     monkeypatch.setattr(
@@ -200,7 +200,7 @@ def test_bootstrap_scope_admin_fails_when_role_missing(monkeypatch: Any) -> None
     )
     monkeypatch.setattr(
         scope_bootstrap.db_rbac,
-        "apply_tenant_role_bindings_to_workspace",
+        "apply_inherited_tenant_access_to_workspace",
         lambda *_args, **_kwargs: [],
     )
     monkeypatch.setattr(scope_bootstrap.db_rbac, "get_role_by_id", lambda *_args, **_kwargs: None)
