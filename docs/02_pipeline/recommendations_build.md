@@ -70,7 +70,12 @@ Invoke-RestMethod `
    - free text from checker
    - explanatory
    - not workflow-contract
-2. `recommendations API item`:
+2. `recommendation candidate`:
+   - open finding that matches current recommendation eligibility rules
+   - useful for KPI and pipeline coverage
+   - not yet the same thing as a final recommendation object
+   - may still overlap with other candidates
+3. `recommendations API item`:
    - normalized plan (`recommendation_type`, `action_type`, `target`, `priority`, `requires_approval`)
    - confidence model v1 with:
      - `confidence` / `confidence_label` for backward compatibility
@@ -87,11 +92,16 @@ Invoke-RestMethod `
      - `graph_package.package_estimated_monthly_savings`
      - `graph_package.savings_owner_fingerprint`
    - workflow-contract for queueing/approval/remediation
-3. `recommendations API package view item`:
+4. `recommendations API package view item`:
    - one package-native recommendation object per cluster or standalone leaf
    - includes `package_estimated_monthly_savings`, `member_count`,
      `primary_recommendation`, and `member_recommendations`
    - preserves graph package semantics while giving clients one object to act on
+5. `potential savings`:
+   - customer-facing estimate of what could be saved if the primary actionable
+     opportunities were implemented
+   - should come from deduplicated recommendation/package ownership semantics
+   - should not be a blind sum of all findings or all recommendation candidates
 
 ## Future option (if needed)
 

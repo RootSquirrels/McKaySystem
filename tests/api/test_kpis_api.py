@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from typing import Any, Literal
 
 from apps.flask_api import auth_middleware, flask_app
+from apps.flask_api.blueprints import kpis as kpis_blueprint
 from services.rbac_service import AuthContext
 
 
@@ -45,6 +46,19 @@ def test_kpis_initial_value_returns_explicit_metric_families(monkeypatch) -> Non
     """KPI endpoint should keep findings, recommendations, realized, and coverage separate."""
 
     _disable_runtime_guards(monkeypatch)
+    monkeypatch.setattr(
+        kpis_blueprint,
+        "_potential_savings_kpis",
+        lambda *_args, **_kwargs: {
+            "source": "recommendations packages",
+            "definition": "Deduplicated actionable savings from the recommendation action layer.",
+            "actionable_opportunity_count": 4,
+            "package_count": 6,
+            "suppressed_leaf_count": 3,
+            "estimated_monthly_savings": 72.5,
+            "estimated_annual_savings": 870.0,
+        },
+    )
 
     def _fake_fetch_one(
         _conn: object, sql: str, params: Sequence[Any] | None = None
@@ -143,6 +157,7 @@ def test_kpis_initial_value_returns_explicit_metric_families(monkeypatch) -> Non
     kpis = body.get("kpis") or {}
     findings = kpis.get("findings") or {}
     recommendations = kpis.get("recommendations") or {}
+    potential_savings = kpis.get("potential_savings") or {}
     realized = kpis.get("realized") or {}
     coverage = kpis.get("coverage") or {}
     trend = body.get("trend") or {}
@@ -154,6 +169,12 @@ def test_kpis_initial_value_returns_explicit_metric_families(monkeypatch) -> Non
     assert recommendations.get("eligible_recommendations_count") == 7
     assert recommendations.get("priority_p1_count") == 3
     assert recommendations.get("estimated_monthly_savings") == 85.0
+
+    assert potential_savings.get("actionable_opportunity_count") == 4
+    assert potential_savings.get("package_count") == 6
+    assert potential_savings.get("suppressed_leaf_count") == 3
+    assert potential_savings.get("estimated_monthly_savings") == 72.5
+    assert potential_savings.get("estimated_annual_savings") == 870.0
 
     assert realized.get("actions_count") == 5
     assert realized.get("realized_total_monthly_savings") == 70.0

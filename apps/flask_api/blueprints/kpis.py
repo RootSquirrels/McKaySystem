@@ -163,14 +163,14 @@ def _findings_trend(
 
 
 def _recommendations_kpis(conn: Any, *, tenant_id: str, workspace: str) -> dict[str, Any]:
-    """Return recommendation-eligible KPI family from current findings."""
+    """Return recommendation-candidate KPI family from current findings."""
 
     eligible_check_ids = _recommendation_rule_ids()
     p1_check_ids = _priority_p1_rule_ids()
     if not eligible_check_ids:
         return {
             "source": "finding_current + recommendation_rules",
-            "definition": "Open findings that are eligible for recommendation materialization under current recommendation rules.",
+            "definition": "Open findings currently eligible to become recommendation candidates under the active recommendation policy.",
             "eligible_recommendations_count": 0,
             "priority_p1_count": 0,
             "estimated_monthly_savings": 0.0,
@@ -201,7 +201,7 @@ def _recommendations_kpis(conn: Any, *, tenant_id: str, workspace: str) -> dict[
     ) or {}
     return {
         "source": "finding_current + recommendation_rules",
-        "definition": "Open findings eligible for recommendation normalization. This KPI does not depend on graph packaging or suppression.",
+        "definition": "Open findings currently eligible to become recommendation candidates. This is a pipeline-coverage KPI, not the final deduplicated recommendation layer.",
         "eligible_recommendations_count": int(row.get("eligible_recommendations_count") or 0),
         "priority_p1_count": int(row.get("priority_p1_count") or 0),
         "estimated_monthly_savings": float(row.get("estimated_monthly_savings") or 0.0),
@@ -216,12 +216,12 @@ def _recommendations_trend(
     latest_run_id: str,
     previous_run_id: str,
 ) -> dict[str, Any]:
-    """Return recommendation-eligible run-snapshot deltas between the latest two ready runs."""
+    """Return recommendation-candidate run-snapshot deltas between ready runs."""
 
     eligible_check_ids = _recommendation_rule_ids()
     if not eligible_check_ids:
         return {
-            "definition": "Run-to-run recommendation eligibility deltas derived from finding snapshots under current recommendation rules.",
+            "definition": "Run-to-run recommendation-candidate deltas derived from finding snapshots under the active recommendation policy.",
             "eligible_count_delta": 0,
             "estimated_monthly_savings_delta": 0.0,
         }
@@ -258,9 +258,89 @@ def _recommendations_trend(
     latest_savings = float(latest_row.get("estimated_monthly_savings") or 0.0)
     previous_savings = float(previous_row.get("estimated_monthly_savings") or 0.0)
     return {
-        "definition": "Run-to-run recommendation eligibility deltas derived from finding snapshots under current recommendation rules.",
+        "definition": "Run-to-run recommendation-candidate deltas derived from finding snapshots under the active recommendation policy.",
         "eligible_count_delta": latest_count - previous_count,
         "estimated_monthly_savings_delta": round(latest_savings - previous_savings, 2),
+    }
+
+
+def _potential_savings_kpis(conn: Any, *, tenant_id: str, workspace: str) -> dict[str, Any]:
+    """Return deduplicated potential-savings KPI family from recommendation packages."""
+
+    where, params = recommendations_module._build_recommendations_where_from_values(
+        tenant_id,
+        workspace,
+        effective_states=["open"],
+        severities=None,
+        services=None,
+        check_ids=None,
+        categories=None,
+        regions=None,
+        account_ids=None,
+        query_str=None,
+        min_savings=None,
+        fingerprints=None,
+    )
+    rows = fetch_all_dict_conn(
+        conn,
+        f"""
+        SELECT
+          fc.tenant_id, fc.workspace, fc.fingerprint, fc.check_id, fc.service, fc.severity,
+          fc.category, fc.title, fc.estimated_monthly_savings, fc.region, fc.account_id,
+          fc.detected_at, fc.effective_state, fc.payload,
+          to_jsonb(r) AS run_meta
+        FROM finding_current fc
+        LEFT JOIN runs r
+          ON r.tenant_id = fc.tenant_id
+         AND r.workspace = fc.workspace
+         AND r.run_id = fc.run_id
+        WHERE {' AND '.join(where)}
+        ORDER BY estimated_monthly_savings DESC NULLS LAST, detected_at DESC, fingerprint
+        """,
+        params,
+    )
+    if not rows:
+        return {
+            "source": "recommendations action layer",
+            "definition": "Deduplicated actionable savings from the current recommendation layer, using primary package ownership when overlaps exist.",
+            "actionable_opportunity_count": 0,
+            "package_count": 0,
+            "suppressed_leaf_count": 0,
+            "estimated_monthly_savings": 0.0,
+            "estimated_annual_savings": 0.0,
+        }
+
+    graph_packages = recommendations_module._load_graph_packages_for_rows(
+        conn,
+        tenant_id=tenant_id,
+        workspace=workspace,
+        rows=rows,
+    )
+    items = [
+        recommendations_module._build_recommendation_item(row, graph_packages=graph_packages)
+        for row in rows
+    ]
+    packages = recommendations_module._build_recommendation_packages(items)
+    actionable_packages = [
+        package
+        for package in packages
+        if float(package.get("package_estimated_monthly_savings") or 0.0) > 0.0
+    ]
+    suppressed_leaf_count = sum(
+        int(package.get("suppressed_member_count") or 0) for package in packages
+    )
+    estimated_monthly_savings = round(
+        sum(float(package.get("package_estimated_monthly_savings") or 0.0) for package in actionable_packages),
+        2,
+    )
+    return {
+        "source": "recommendations packages",
+        "definition": "Deduplicated actionable savings from the recommendation action layer, using one primary savings owner per package when overlaps exist.",
+        "actionable_opportunity_count": len(actionable_packages),
+        "package_count": len(packages),
+        "suppressed_leaf_count": suppressed_leaf_count,
+        "estimated_monthly_savings": estimated_monthly_savings,
+        "estimated_annual_savings": round(estimated_monthly_savings * 12.0, 2),
     }
 
 
@@ -393,6 +473,7 @@ def api_kpis_initial_value() -> Any:
             ready_runs = _latest_two_ready_runs(conn, tenant_id=tenant_id, workspace=workspace)
             findings = _findings_kpis(conn, tenant_id=tenant_id, workspace=workspace)
             recommendations = _recommendations_kpis(conn, tenant_id=tenant_id, workspace=workspace)
+            potential_savings = _potential_savings_kpis(conn, tenant_id=tenant_id, workspace=workspace)
             realized = _realized_kpis(conn, tenant_id=tenant_id, workspace=workspace)
             coverage = _coverage_kpis(conn, tenant_id=tenant_id, workspace=workspace)
             trend = None
@@ -434,13 +515,16 @@ def api_kpis_initial_value() -> Any:
                 "kpis": {
                     "findings": findings,
                     "recommendations": recommendations,
+                    "potential_savings": potential_savings,
                     "realized": realized,
                     "coverage": coverage,
                 },
                 "trend": trend,
                 "notes": [
                     "KPI families are parallel views of value and trust, not additive components of one total.",
-                    "Findings reflect detected open waste signals, recommendations reflect rule-eligible actions, realized reflects tracked remediation outcomes, and coverage reflects assessment completeness.",
+                    "Potential savings is the customer-facing savings KPI and comes from the deduplicated recommendation action layer.",
+                    "Findings reflect detected open waste signals, the recommendations KPI currently reflects recommendation candidates rather than the final deduplicated action layer, realized reflects tracked remediation outcomes, and coverage reflects assessment completeness.",
+                    "Potential savings should come from deduplicated actionable opportunities, not from a blind sum of findings or recommendation candidates.",
                 ],
             }
         )

@@ -105,8 +105,8 @@ export function DashboardClientPage() {
               <p className="text-xs font-semibold uppercase tracking-[0.3em] text-cyan-700">Initial Value Reporting</p>
               <h1 className="mt-2 text-3xl font-semibold tracking-tight text-slate-900">Platform KPI Dashboard</h1>
               <p className="mt-3 max-w-3xl text-sm leading-6 text-slate-600">
-                This page keeps findings, recommendations, realized savings, and coverage as separate KPI families so
-                we can prove value without mixing incompatible signals.
+                This page keeps findings, recommendation candidates, potential savings, realized savings, and coverage
+                as separate KPI families so we can prove value without mixing incompatible signals.
               </p>
               <div className="mt-4 flex flex-wrap gap-3 text-xs text-slate-500">
                 <span className="rounded-full border border-slate-200 bg-white/70 px-3 py-1">
@@ -162,7 +162,7 @@ export function DashboardClientPage() {
 
         {kpis ? (
           <>
-            <section className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+            <section className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-5">
               <article className={`finops-panel rounded-2xl border p-4 ${panelTone("cyan")}`}>
                 <p className="text-sm font-medium text-slate-600">Detected Waste</p>
                 <p className="mt-2 text-3xl font-semibold text-slate-900">{kpis.findings.open_findings_count}</p>
@@ -176,18 +176,32 @@ export function DashboardClientPage() {
               </article>
 
               <article className={`finops-panel rounded-2xl border p-4 ${panelTone("violet")}`}>
-                <p className="text-sm font-medium text-slate-600">Recommendation Ready</p>
+                <p className="text-sm font-medium text-slate-600">Recommendation Candidates</p>
                 <p className="mt-2 text-3xl font-semibold text-slate-900">
                   {kpis.recommendations.eligible_recommendations_count}
                 </p>
                 <p className="mt-2 text-sm text-slate-700">
-                  Eligible recommendation savings: {formatMoney(kpis.recommendations.estimated_monthly_savings)}
+                  Candidate-estimated savings: {formatMoney(kpis.recommendations.estimated_monthly_savings)}
                 </p>
                 <p className="mt-1 text-xs text-slate-500">
                   Priority P1: {kpis.recommendations.priority_p1_count}
                   {trend
                     ? ` | Delta vs previous run: ${trend.recommendations.eligible_count_delta >= 0 ? "+" : ""}${trend.recommendations.eligible_count_delta}`
                     : ""}
+                </p>
+              </article>
+
+              <article className={`finops-panel rounded-2xl border p-4 ${panelTone("amber")}`}>
+                <p className="text-sm font-medium text-slate-600">Potential Savings</p>
+                <p className="mt-2 text-3xl font-semibold text-slate-900">
+                  {formatMoney(kpis.potential_savings.estimated_monthly_savings)}
+                </p>
+                <p className="mt-2 text-sm text-slate-700">
+                  Annualized: {formatMoney(kpis.potential_savings.estimated_annual_savings)}
+                </p>
+                <p className="mt-1 text-xs text-slate-500">
+                  Primary opportunities: {kpis.potential_savings.actionable_opportunity_count} | Suppressed overlaps:{" "}
+                  {kpis.potential_savings.suppressed_leaf_count}
                 </p>
               </article>
 
@@ -232,9 +246,14 @@ export function DashboardClientPage() {
                     <p className="mt-2 text-xs text-slate-500">Source: {kpis.findings.source}</p>
                   </div>
                   <div className="rounded-2xl border border-slate-200 bg-white/70 p-4">
-                    <p className="text-sm font-semibold text-slate-900">Recommendations</p>
+                    <p className="text-sm font-semibold text-slate-900">Recommendation Candidates</p>
                     <p className="mt-2 text-sm leading-6 text-slate-600">{kpis.recommendations.definition}</p>
                     <p className="mt-2 text-xs text-slate-500">Source: {kpis.recommendations.source}</p>
+                  </div>
+                  <div className="rounded-2xl border border-slate-200 bg-white/70 p-4">
+                    <p className="text-sm font-semibold text-slate-900">Potential Savings</p>
+                    <p className="mt-2 text-sm leading-6 text-slate-600">{kpis.potential_savings.definition}</p>
+                    <p className="mt-2 text-xs text-slate-500">Source: {kpis.potential_savings.source}</p>
                   </div>
                   <div className="rounded-2xl border border-slate-200 bg-white/70 p-4">
                     <p className="text-sm font-semibold text-slate-900">Realized</p>

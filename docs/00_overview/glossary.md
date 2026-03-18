@@ -23,6 +23,10 @@ This glossary:
 
 If a term is not defined here, it should not be relied upon as stable.
 
+For the higher-level relationship between findings, recommendation candidates,
+recommendations, potential savings, realized savings, and coverage, see also:
+- [product_surface_contract.md](/c:/Users/SK6564/OneDrive%20-%20ENGIE/Documents/GitHub/FinOps/McKaySystem/docs/00_overview/product_surface_contract.md)
+
 ---
 
 ## Core concepts
@@ -179,6 +183,53 @@ The recommendations API is the normalized execution contract for product/workflo
 Rule:
 - `advice`/`recommendation` text is explanatory.
 - recommendation action-plan fields drive queueing, approvals, and remediations.
+
+---
+
+### Recommendation Candidate
+
+A **Recommendation Candidate** is an open finding that matches the current
+recommendation eligibility rules.
+
+It is not yet the same thing as a final recommendation object exposed to users
+as the curated action layer.
+
+Recommendation candidates are useful for:
+
+- measuring how much of the finding layer is eligible to become actions
+- building KPI trend lines
+- understanding recommendation pipeline coverage
+
+Recommendation candidates are not yet guaranteed to be:
+
+- deduplicated
+- package-native
+- suppression-aware
+- visible as final recommendation objects
+
+---
+
+### Potential savings
+
+**Potential savings** is the customer-facing estimate of what could be saved if
+the primary actionable opportunities were implemented.
+
+It should be based on:
+
+- deduplicated action opportunities
+- one primary savings owner when overlaps exist
+- suppression of secondary overlapping rows
+
+It should not be a blind sum of all findings, because findings may overlap.
+
+It should not be a blind sum of all recommendation candidates, because
+candidates may still be one-per-finding and may still overlap.
+
+Recommended platform split:
+
+- `detected savings` = raw open finding-estimated savings
+- `potential savings` = deduplicated actionable savings
+- `realized savings` = verified post-remediation savings
 
 ---
 

@@ -26,6 +26,16 @@ export interface RecommendationsKpiFamily {
   estimated_monthly_savings: number;
 }
 
+export interface PotentialSavingsKpiFamily {
+  source: string;
+  definition: string;
+  actionable_opportunity_count: number;
+  package_count: number;
+  suppressed_leaf_count: number;
+  estimated_monthly_savings: number;
+  estimated_annual_savings: number;
+}
+
 export interface RealizedKpiFamily {
   source: string;
   definition: string;
@@ -65,6 +75,7 @@ export interface InitialValueKpisResponse {
   kpis: {
     findings: FindingsKpiFamily;
     recommendations: RecommendationsKpiFamily;
+    potential_savings: PotentialSavingsKpiFamily;
     realized: RealizedKpiFamily;
     coverage: CoverageKpiFamily;
   };
@@ -128,6 +139,14 @@ function normalizeResponse(response: InitialValueKpisResponse): InitialValueKpis
         eligible_recommendations_count: asNumber(response.kpis.recommendations.eligible_recommendations_count),
         priority_p1_count: asNumber(response.kpis.recommendations.priority_p1_count),
         estimated_monthly_savings: asNumber(response.kpis.recommendations.estimated_monthly_savings),
+      },
+      potential_savings: {
+        ...response.kpis.potential_savings,
+        actionable_opportunity_count: asNumber(response.kpis.potential_savings.actionable_opportunity_count),
+        package_count: asNumber(response.kpis.potential_savings.package_count),
+        suppressed_leaf_count: asNumber(response.kpis.potential_savings.suppressed_leaf_count),
+        estimated_monthly_savings: asNumber(response.kpis.potential_savings.estimated_monthly_savings),
+        estimated_annual_savings: asNumber(response.kpis.potential_savings.estimated_annual_savings),
       },
       realized: {
         ...response.kpis.realized,
