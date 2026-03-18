@@ -172,7 +172,30 @@ def test_provisioned_throughput_underutilized_emits(monkeypatch: pytest.MonkeyPa
     checker = EFSFileSystemsChecker(account_id="111111111111", cfg=cfg)
     findings = list(checker.run(ctx))
 
-    assert any(f.check_id == "aws.efs.filesystems.provisioned.throughput.underutilized" for f in findings)
+    hits = [f for f in findings if f.check_id == "aws.efs.filesystems.provisioned.throughput.underutilized"]
+    assert len(hits) == 1
+    assert hits[0].dimensions.get("suggested_throughput_mode") == "elastic_or_bursting"
+
+
+def test_archive_review_emits_when_ia_exists_without_archive(monkeypatch: pytest.MonkeyPatch) -> None:
+    import checks.aws.efs_filesystems as mod
+
+    monkeypatch.setattr(mod, "now_utc", lambda: datetime(2026, 1, 27, 12, 0, 0, tzinfo=timezone.utc))
+
+    efs = FakeEFS(
+        region="eu-west-1",
+        file_systems=[_fs(fs_id="fs-1")],
+        lifecycle_by_id={"fs-1": {"LifecyclePolicies": [{"TransitionToIA": "AFTER_30_DAYS"}]}},
+    )
+    ctx = _mk_ctx(efs=efs, cloudwatch=None)
+
+    checker = EFSFileSystemsChecker(account_id="111111111111", cfg=EFSFileSystemsConfig())
+    findings = list(checker.run(ctx))
+
+    hits = [f for f in findings if f.check_id == "aws.efs.filesystems.lifecycle.archive.review"]
+    assert len(hits) == 1
+    assert hits[0].dimensions["transition_to_ia"] == "true"
+    assert hits[0].dimensions["transition_to_archive"] == "false"
 
 
 def test_backup_disabled_emits(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -629,10 +629,10 @@ class ElbV2LoadBalancersChecker:
             else:
                 is_idle = False
 
-            if is_idle and emitted["idle"] < cfg.max_findings_per_type:
-                emitted["idle"] += 1
+            idle_finding: FindingDraft | None = None
+            if is_idle:
                 metric = "RequestCount" if lb_type == "application" else "NewFlowCount"
-                yield FindingDraft(
+                idle_finding = FindingDraft(
                     check_id="aws.elbv2.load.balancers.idle",
                     check_name=self._CHECK_NAME,
                     category="cost",
@@ -737,6 +737,7 @@ class ElbV2LoadBalancersChecker:
                     issue_key={"check_id": "aws.elbv2.load.balancers.no.registered.targets", "lb_arn": arn},
                     dimensions=lb_dimensions,
                 )
+                idle_finding = None
 
             if any_targets and not any_healthy and emitted["no_healthy_targets"] < cfg.max_findings_per_type:
                 emitted["no_healthy_targets"] += 1
@@ -757,6 +758,10 @@ class ElbV2LoadBalancersChecker:
                     issue_key={"check_id": "aws.elbv2.load.balancers.no.healthy.targets", "lb_arn": arn},
                     dimensions=lb_dimensions,
                 )
+
+            if idle_finding is not None and emitted["idle"] < cfg.max_findings_per_type:
+                emitted["idle"] += 1
+                yield idle_finding
 
 
 @register_checker("checks.aws.elbv2_load_balancers:ElbV2LoadBalancersChecker")

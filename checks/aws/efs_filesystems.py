@@ -8,15 +8,19 @@ Signals (cost / optimization)
    - Low/no observed IO (DataReadIOBytes + DataWriteIOBytes) over N days
    - AND no client connections (ClientConnections) over N days
 
-2) Provisioned throughput underutilized (best-effort)
+2) Provisioned throughput mode misfit (best-effort)
    - If ThroughputMode == 'provisioned'
    - And p95 PercentIOLimit is consistently below a threshold
 
+3) Archive lifecycle opportunity (best-effort)
+   - If IA transition exists
+   - But no archive transition is configured
+
 Signals (governance)
 --------------------
-3) Lifecycle policy missing (IA/Archive transitions)
-4) Backups disabled
-5) Unencrypted file system (rare; but enforceable)
+4) Lifecycle policy missing (IA/Archive transitions)
+5) Backups disabled
+6) Unencrypted file system (rare; but enforceable)
 
 Notes
 -----
@@ -383,7 +387,7 @@ class EFSFileSystemsChecker(Checker):
                         issue_key={"check_id": check_id, "file_system_id": fs_id},
                     )
 
-            # 2) Provisioned throughput underutilized (PercentIOLimit)
+            # 2) Provisioned throughput mode misfit (PercentIOLimit)
             throughput_mode = _safe_str(fs.get("ThroughputMode")).lower()
             if throughput_mode == "provisioned":
                 p95_vals = m.get("p95", []) or []
@@ -398,30 +402,58 @@ class EFSFileSystemsChecker(Checker):
                             category=self._CATEGORY_COST,
                             status="fail",
                             severity=Severity(level="medium", score=650),
-                            title="Provisioned throughput appears underutilized",
+                            title="EFS throughput mode may be overprovisioned for observed demand",
                             scope=scope,
                             message=(
-                                "Provisioned throughput appears underutilized based on PercentIOLimit. "
-                                "Consider switching to bursting or reducing provisioned throughput."
+                                "Provisioned throughput mode appears oversized for observed demand based on "
+                                "PercentIOLimit. Review whether elastic or bursting throughput would fit this "
+                                "filesystem better."
                             ),
-                            recommendation="If performance allows, switch to bursting or reduce provisioned throughput to lower cost.",
+                            recommendation=(
+                                "If performance allows, switch to elastic or bursting throughput, or reduce the "
+                                "provisioned throughput setting to lower cost."
+                            ),
                             tags=tags,
                             dimensions={
                                 "lookback_days": str(cfg.lookback_days),
                                 "p95_percent_io_limit_max": f"{p95_pct:.2f}",
                                 "throughput_mode": throughput_mode,
                                 "provisioned_throughput_mibps": _safe_str(fs.get("ProvisionedThroughputInMibps")),
+                                "suggested_throughput_mode": "elastic_or_bursting",
                             },
                             issue_key={"check_id": check_id, "file_system_id": fs_id},
                         )
 
-            # 3) Lifecycle missing
+            # 3) Lifecycle missing / archive opportunity
             check_id = "aws.efs.filesystems.lifecycle.missing"
             try:
                 lc = efs.describe_lifecycle_configuration(FileSystemId=fs_id)
                 policies = lc.get("LifecyclePolicies", []) if isinstance(lc, Mapping) else []
                 has_ia = any(str(p.get("TransitionToIA") or "").strip() for p in (policies or []) if isinstance(p, Mapping))
                 has_archive = any(str(p.get("TransitionToArchive") or "").strip() for p in (policies or []) if isinstance(p, Mapping))
+                if has_ia and not has_archive:
+                    archive_check_id = "aws.efs.filesystems.lifecycle.archive.review"
+                    if not _cap(archive_check_id):
+                        yield FindingDraft(
+                            check_id=archive_check_id,
+                            check_name=self._CHECK_NAME,
+                            category=self._CATEGORY_COST,
+                            status="info",
+                            severity=Severity(level="low", score=360),
+                            title="EFS lifecycle may benefit from archive transition review",
+                            scope=scope,
+                            message=(
+                                "EFS lifecycle already transitions to IA but does not transition colder files to "
+                                "Archive. Review whether long-retention, infrequently accessed data can move deeper."
+                            ),
+                            recommendation=(
+                                "Review whether an EFS archive transition is appropriate for older, rarely accessed "
+                                "files after IA."
+                            ),
+                            tags=tags,
+                            dimensions={"transition_to_ia": "true", "transition_to_archive": "false"},
+                            issue_key={"check_id": archive_check_id, "file_system_id": fs_id},
+                        )
                 if not has_ia and not has_archive:
                     if not _cap(check_id):
                         yield FindingDraft(

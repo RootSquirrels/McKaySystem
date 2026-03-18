@@ -248,6 +248,45 @@ def test_no_registered_targets_emits(monkeypatch: pytest.MonkeyPatch) -> None:
     assert hits[0].dimensions["target_group_arns"] == "tg-1"
 
 
+def test_no_registered_targets_suppresses_duplicate_idle_savings(monkeypatch: pytest.MonkeyPatch) -> None:
+    import checks.aws.elbv2_load_balancers as mod
+
+    now = datetime(2026, 1, 24, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(mod, "now_utc", lambda: now)
+
+    arn = _lb_arn("app/idle-notargets/123")
+    lb = {
+        "LoadBalancerArn": arn,
+        "LoadBalancerName": "idle-notargets",
+        "Type": "application",
+        "Scheme": "internal",
+        "CreatedTime": now - timedelta(days=10),
+    }
+
+    listener = {"ListenerArn": "lst-1", "DefaultActions": [{"Type": "forward", "TargetGroupArn": "tg-1"}]}
+    tg = {"TargetGroupArn": "tg-1", "TargetType": "instance"}
+
+    elbv2 = FakeElbv2(
+        region="eu-west-3",
+        pages_by_op={
+            "describe_load_balancers": [{"LoadBalancers": [lb]}],
+            "describe_listeners": [{"Listeners": [listener]}],
+            "describe_target_groups": [{"TargetGroups": [tg]}],
+        },
+    )
+    elbv2.set_target_health("tg-1", [])
+
+    cw = FakeCloudWatch(by_id={"m0": [0.0] * 14})
+    ctx = _mk_ctx(elbv2=elbv2, cloudwatch=cw, pricing=FakePricing())
+
+    cfg = ElbV2LoadBalancersConfig(lookback_days=14, idle_p95_daily_requests_threshold=1.0)
+    checker = ElbV2LoadBalancersChecker(account_id="123", billing_account_id="123", cfg=cfg)
+    findings = list(checker.run(ctx))
+
+    assert len([f for f in findings if f.check_id == "aws.elbv2.load.balancers.no.registered.targets"]) == 1
+    assert len([f for f in findings if f.check_id == "aws.elbv2.load.balancers.idle"]) == 0
+
+
 def test_no_healthy_targets_emits(monkeypatch: pytest.MonkeyPatch) -> None:
     import checks.aws.elbv2_load_balancers as mod
 

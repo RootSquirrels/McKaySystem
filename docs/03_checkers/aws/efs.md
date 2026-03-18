@@ -18,6 +18,7 @@ Detect EFS lifecycle, security, backup, and utilization inefficiencies.
 
 - `aws.efs.filesystems.unused`
 - `aws.efs.filesystems.provisioned.throughput.underutilized`
+- `aws.efs.filesystems.lifecycle.archive.review`
 - `aws.efs.filesystems.lifecycle.missing`
 - `aws.efs.filesystems.unencrypted`
 - `aws.efs.filesystems.backup.disabled`
@@ -26,7 +27,8 @@ Detect EFS lifecycle, security, backup, and utilization inefficiencies.
 ## Key signals
 
 - Low/no activity filesystems (usage-based idle signal).
-- Provisioned throughput significantly above observed demand.
+- Provisioned throughput mode that appears oversized relative to observed demand.
+- Filesystems already using IA transitions but not archive transitions.
 - Missing lifecycle policy, missing encryption, disabled backups.
 - Informational access-error findings on permission gaps.
 
