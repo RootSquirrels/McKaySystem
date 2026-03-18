@@ -78,7 +78,10 @@ function bindingDefaults(scope: { workspace: string }, email: string | null) {
 export function TenantAdminClientPage() {
   const router = useRouter();
   const scope = getStoredScope();
+  const scopeTenantId = scope?.tenantId ?? "";
+  const scopeWorkspace = scope?.workspace ?? "";
   const auth = useAuth();
+  const userEmail = auth.user?.email ?? null;
   const permissions = useMemo(() => new Set(auth.user?.permissions ?? []), [auth.user?.permissions]);
   const isAdminFull = permissions.has("admin:full");
   const [auditEventCategory, setAuditEventCategory] = useState("");
@@ -121,10 +124,10 @@ export function TenantAdminClientPage() {
   const [bindingFeedback, setBindingFeedback] = useState<string | null>(null);
   const [editingWorkspace, setEditingWorkspace] = useState<string | null>(null);
   const [workspaceForm, setWorkspaceForm] = useState(() =>
-    workspaceDefaults({ workspace: scope?.workspace ?? "" }, auth.user?.email ?? null),
+    workspaceDefaults({ workspace: scopeWorkspace }, userEmail),
   );
   const [bindingForm, setBindingForm] = useState(() =>
-    bindingDefaults({ workspace: scope?.workspace ?? "" }, auth.user?.email ?? null),
+    bindingDefaults({ workspace: scopeWorkspace }, userEmail),
   );
 
   useEffect(() => {
@@ -135,21 +138,47 @@ export function TenantAdminClientPage() {
     if (!auth.isLoading && !auth.isAuthenticated) {
       router.replace("/login");
     }
-  }, [auth.isAuthenticated, auth.isLoading, router, scope]);
+  }, [auth.isAuthenticated, auth.isLoading, router, scopeTenantId, scopeWorkspace]);
 
   useEffect(() => {
-    if (!scope) {
+    if (!scopeWorkspace) {
       return;
     }
     if (!editingWorkspace) {
-      setWorkspaceForm(workspaceDefaults(scope, auth.user?.email ?? null));
+      const nextWorkspaceDefaults = workspaceDefaults({ workspace: scopeWorkspace }, userEmail);
+      setWorkspaceForm((current) => {
+        if (
+          current.targetWorkspace === nextWorkspaceDefaults.targetWorkspace &&
+          current.displayName === nextWorkspaceDefaults.displayName &&
+          current.provider === nextWorkspaceDefaults.provider &&
+          current.scopeKind === nextWorkspaceDefaults.scopeKind &&
+          current.scopeNativeId === nextWorkspaceDefaults.scopeNativeId &&
+          current.environment === nextWorkspaceDefaults.environment &&
+          current.status === nextWorkspaceDefaults.status &&
+          current.updatedBy === nextWorkspaceDefaults.updatedBy &&
+          current.createdBy === nextWorkspaceDefaults.createdBy
+        ) {
+          return current;
+        }
+        return nextWorkspaceDefaults;
+      });
     }
-    setBindingForm((current) => ({
-      ...current,
-      sourceWorkspace: current.sourceWorkspace || scope.workspace,
-      grantedBy: current.grantedBy || auth.user?.email || "",
-    }));
-  }, [auth.user?.email, editingWorkspace, scope]);
+    setBindingForm((current) => {
+      const nextSourceWorkspace = current.sourceWorkspace || scopeWorkspace;
+      const nextGrantedBy = current.grantedBy || userEmail || "";
+      if (
+        nextSourceWorkspace === current.sourceWorkspace &&
+        nextGrantedBy === current.grantedBy
+      ) {
+        return current;
+      }
+      return {
+        ...current,
+        sourceWorkspace: nextSourceWorkspace,
+        grantedBy: nextGrantedBy,
+      };
+    });
+  }, [editingWorkspace, scopeWorkspace, userEmail]);
 
   if (!scope) {
     return null;
