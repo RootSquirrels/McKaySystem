@@ -82,6 +82,35 @@ export interface TenantAdminAuditResponse {
   items: TenantAdminAuditItem[];
 }
 
+export interface TenantDirectoryUserItem {
+  tenant_id: string;
+  user_id: string;
+  email: string;
+  full_name: string | null;
+  auth_provider: string | null;
+  is_active: boolean;
+  is_superadmin: boolean;
+  last_login_at: string | null;
+  workspace_count: number;
+  active_workspace_count: number;
+  workspaces: string[];
+  inherited_role_id: string | null;
+  inherited_source_workspace: string | null;
+  applies_to_future_workspaces: boolean;
+}
+
+export interface TenantDirectoryResponse {
+  ok: true;
+  tenant_id: string;
+  workspace: string;
+  limit: number;
+  offset: number;
+  q: string | null;
+  include_inactive: boolean;
+  total: number;
+  items: TenantDirectoryUserItem[];
+}
+
 interface WorkspaceEntryResponse {
   ok: true;
   workspace_entry: TenantWorkspaceItem;
@@ -147,6 +176,22 @@ function auditQueryKey(
     options.entityType,
     options.targetWorkspace,
     options.q,
+  ] as const;
+}
+
+function directoryQueryKey(
+  scope: { tenantId?: string; workspace?: string },
+  options: { limit: number; offset: number; q: string; includeInactive: boolean },
+) {
+  return [
+    "tenant-admin",
+    "users",
+    scope.tenantId,
+    scope.workspace,
+    options.limit,
+    options.offset,
+    options.q,
+    options.includeInactive,
   ] as const;
 }
 
@@ -217,6 +262,38 @@ export function useTenantAdminAudit(
           entity_type: entityType || undefined,
           target_workspace: targetWorkspace || undefined,
           q: q || undefined,
+        },
+      });
+    },
+  });
+}
+
+/**
+ * Query tenant-wide user directory aggregated across workspaces.
+ */
+export function useTenantDirectory(
+  options: { limit?: number; offset?: number; q?: string; includeInactive?: boolean } = {},
+  enabled = true,
+) {
+  const scope = getStoredScope();
+  const limit = options.limit ?? 50;
+  const offset = options.offset ?? 0;
+  const q = options.q ?? "";
+  const includeInactive = options.includeInactive ?? false;
+
+  return useQuery({
+    queryKey: directoryQueryKey(
+      { tenantId: scope?.tenantId, workspace: scope?.workspace },
+      { limit, offset, q, includeInactive },
+    ),
+    enabled: Boolean(scope?.tenantId && scope?.workspace && enabled),
+    queryFn: async () => {
+      return apiClient.get<TenantDirectoryResponse>("/tenant-admin/users", {
+        query: {
+          limit,
+          offset,
+          q: q || undefined,
+          include_inactive: includeInactive,
         },
       });
     },

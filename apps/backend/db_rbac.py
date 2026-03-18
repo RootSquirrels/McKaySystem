@@ -94,6 +94,18 @@ class UserListQuery:
 
 
 @dataclass(frozen=True)
+class TenantUserDirectoryQuery:
+    """Input payload for tenant-wide user directory queries."""
+
+    tenant_id: str
+    anchor_workspace: str
+    limit: int = 100
+    offset: int = 0
+    query: str | None = None
+    include_inactive: bool = False
+
+
+@dataclass(frozen=True)
 class TenantWorkspaceUpsert:
     """Input payload for idempotent tenant workspace registry operations."""
 
@@ -1141,6 +1153,147 @@ def list_tenant_admin_audit_events(
         """,
         tuple(params),
     )
+    total = int((count_row or {}).get("n") or 0)
+    return rows, total
+
+
+def list_tenant_user_directory(
+    conn: Any,
+    *,
+    query: TenantUserDirectoryQuery,
+) -> tuple[list[dict[str, Any]], int]:
+    """List tenant-wide users aggregated across workspaces with deterministic paging."""
+    where = ["u.tenant_id = %s"]
+    params: list[Any] = [query.tenant_id]
+
+    if query.query:
+        where.append(
+            "(u.user_id ILIKE %s OR u.email ILIKE %s OR COALESCE(u.full_name, '') ILIKE %s)"
+        )
+        pattern = f"%{query.query}%"
+        params.extend([pattern, pattern, pattern])
+
+    scoped_where = " AND ".join(where)
+    visibility_guard = """
+        (
+          EXISTS (
+            SELECT 1
+            FROM tenant_workspaces anchor
+            WHERE anchor.tenant_id = %s
+              AND anchor.workspace = %s
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM roles anchor_role
+            WHERE anchor_role.tenant_id = %s
+              AND anchor_role.workspace = %s
+          )
+        )
+    """
+
+    having_clauses: list[str] = []
+    if not query.include_inactive:
+        having_clauses.append("BOOL_OR(u.is_active)")
+    having_sql = f"HAVING {' AND '.join(having_clauses)}" if having_clauses else ""
+
+    sql_items = f"""
+        WITH scoped_users AS (
+          SELECT
+            u.tenant_id,
+            u.workspace,
+            u.user_id,
+            u.email,
+            u.full_name,
+            u.auth_provider,
+            u.is_active,
+            u.is_superadmin,
+            u.last_login_at
+          FROM users u
+          WHERE {scoped_where}
+            AND {visibility_guard}
+        )
+        SELECT
+          u.tenant_id,
+          u.user_id,
+          u.email,
+          MAX(u.full_name) AS full_name,
+          MAX(u.auth_provider) AS auth_provider,
+          BOOL_OR(u.is_active) AS is_active,
+          BOOL_OR(u.is_superadmin) AS is_superadmin,
+          MAX(u.last_login_at) AS last_login_at,
+          COUNT(*)::int AS workspace_count,
+          COUNT(*) FILTER (WHERE u.is_active)::int AS active_workspace_count,
+          ARRAY_AGG(DISTINCT u.workspace ORDER BY u.workspace) AS workspaces,
+          trb.role_id AS inherited_role_id,
+          trb.source_workspace AS inherited_source_workspace,
+          trb.applies_to_future_workspaces AS applies_to_future_workspaces
+        FROM scoped_users u
+        LEFT JOIN tenant_role_bindings trb
+          ON trb.tenant_id = u.tenant_id
+         AND trb.workspace = %s
+         AND trb.user_id = u.user_id
+        GROUP BY
+          u.tenant_id,
+          u.user_id,
+          u.email,
+          trb.role_id,
+          trb.source_workspace,
+          trb.applies_to_future_workspaces
+        {having_sql}
+        ORDER BY u.email ASC, u.user_id ASC
+        LIMIT %s OFFSET %s
+    """
+    sql_count = f"""
+        WITH scoped_users AS (
+          SELECT
+            u.tenant_id,
+            u.workspace,
+            u.user_id,
+            u.email,
+            u.full_name,
+            u.auth_provider,
+            u.is_active,
+            u.is_superadmin,
+            u.last_login_at
+          FROM users u
+          WHERE {scoped_where}
+            AND {visibility_guard}
+        ),
+        grouped AS (
+          SELECT
+            u.user_id,
+            u.email
+          FROM scoped_users u
+          LEFT JOIN tenant_role_bindings trb
+            ON trb.tenant_id = u.tenant_id
+           AND trb.workspace = %s
+           AND trb.user_id = u.user_id
+          GROUP BY
+            u.user_id,
+            u.email,
+            trb.role_id,
+            trb.source_workspace,
+            trb.applies_to_future_workspaces
+          {having_sql}
+        )
+        SELECT COUNT(*)::bigint AS n
+        FROM grouped
+    """
+
+    visibility_params = [
+        query.tenant_id,
+        query.anchor_workspace,
+        query.tenant_id,
+        query.anchor_workspace,
+    ]
+    items_params = tuple(
+        params
+        + visibility_params
+        + [TENANT_POLICY_WORKSPACE, query.limit, query.offset]
+    )
+    count_params = tuple(params + visibility_params + [TENANT_POLICY_WORKSPACE])
+    rows = fetch_all_dict_conn(conn, sql_items, items_params)
+    count_row = fetch_one_dict_conn(conn, sql_count, count_params)
     total = int((count_row or {}).get("n") or 0)
     return rows, total
 

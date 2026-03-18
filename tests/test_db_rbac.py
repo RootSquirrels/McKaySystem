@@ -145,6 +145,69 @@ def test_list_users_page_applies_scope_and_count(monkeypatch: Any) -> None:
     assert "count(*)::bigint" in str(captured["count_sql"]).lower()
 
 
+def test_list_tenant_user_directory_applies_scope_and_count(monkeypatch: Any) -> None:
+    """Tenant user directory should apply tenant anchor scope and aggregate paging."""
+    captured: dict[str, Any] = {}
+
+    def _fake_fetch_all(
+        _conn: object, sql: str, params: Sequence[Any] | None = None
+    ) -> list[dict[str, Any]]:
+        captured["items_sql"] = sql
+        captured["items_params"] = params
+        return [{"user_id": "u-1", "email": "u-1@acme.io"}]
+
+    def _fake_fetch_one(
+        _conn: object, sql: str, params: Sequence[Any] | None = None
+    ) -> dict[str, Any]:
+        captured["count_sql"] = sql
+        captured["count_params"] = params
+        return {"n": 1}
+
+    monkeypatch.setattr(db_rbac, "fetch_all_dict_conn", _fake_fetch_all)
+    monkeypatch.setattr(db_rbac, "fetch_one_dict_conn", _fake_fetch_one)
+
+    rows, total = db_rbac.list_tenant_user_directory(
+        object(),
+        query=db_rbac.TenantUserDirectoryQuery(
+            tenant_id="acme",
+            anchor_workspace="prod",
+            limit=20,
+            offset=0,
+            query="alice",
+            include_inactive=False,
+        ),
+    )
+
+    assert rows == [{"user_id": "u-1", "email": "u-1@acme.io"}]
+    assert total == 1
+    assert captured["items_params"] == (
+        "acme",
+        "%alice%",
+        "%alice%",
+        "%alice%",
+        "acme",
+        "prod",
+        "acme",
+        "prod",
+        db_rbac.TENANT_POLICY_WORKSPACE,
+        20,
+        0,
+    )
+    assert captured["count_params"] == (
+        "acme",
+        "%alice%",
+        "%alice%",
+        "%alice%",
+        "acme",
+        "prod",
+        "acme",
+        "prod",
+        db_rbac.TENANT_POLICY_WORKSPACE,
+    )
+    assert "from users u" in str(captured["items_sql"]).lower()
+    assert "count(*)::bigint" in str(captured["count_sql"]).lower()
+
+
 def test_list_roles_applies_scope_and_returns_permissions(monkeypatch: Any) -> None:
     captured: dict[str, Any] = {}
 

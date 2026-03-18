@@ -112,6 +112,30 @@ def _public_audit_event(row: dict[str, Any] | None) -> dict[str, Any] | None:
     }
 
 
+def _public_tenant_directory_user(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return public tenant-wide user directory payload."""
+    if row is None:
+        return None
+    workspaces_raw = row.get("workspaces")
+    workspaces = [str(item) for item in workspaces_raw] if isinstance(workspaces_raw, list) else []
+    return {
+        "tenant_id": row.get("tenant_id"),
+        "user_id": row.get("user_id"),
+        "email": row.get("email"),
+        "full_name": row.get("full_name"),
+        "auth_provider": row.get("auth_provider"),
+        "is_active": bool(row.get("is_active")),
+        "is_superadmin": bool(row.get("is_superadmin")),
+        "last_login_at": row.get("last_login_at"),
+        "workspace_count": int(row.get("workspace_count") or 0),
+        "active_workspace_count": int(row.get("active_workspace_count") or 0),
+        "workspaces": workspaces,
+        "inherited_role_id": row.get("inherited_role_id"),
+        "inherited_source_workspace": row.get("inherited_source_workspace"),
+        "applies_to_future_workspaces": bool(row.get("applies_to_future_workspaces")),
+    }
+
+
 def _workspace_upsert_from_payload(
     *,
     payload: dict[str, Any],
@@ -567,6 +591,48 @@ def api_tenant_admin_role_bindings_list() -> Any:
                 "workspace": workspace,
                 "total": len(rows),
                 "items": [_public_tenant_binding(row) for row in rows],
+            }
+        )
+    except ValueError as exc:
+        return _err("bad_request", str(exc), status=400)
+
+
+@tenant_admin_bp.route("/api/tenant-admin/users", methods=["GET"])
+@require_permission("admin:full")
+def api_tenant_admin_users_list() -> Any:
+    """List tenant-wide users aggregated across workspaces."""
+    try:
+        tenant_id, workspace = _require_scope_from_query()
+        limit = _parse_int(_q("limit"), default=50, min_v=1, max_v=500)
+        offset = _parse_int(_q("offset"), default=0, min_v=0, max_v=5_000_000)
+        query = _coerce_optional_text(_q("q"))
+        include_inactive = _parse_bool(
+            _q("include_inactive"),
+            field_name="include_inactive",
+            default=False,
+        )
+        with db_conn() as conn:
+            rows, total = db_rbac.list_tenant_user_directory(
+                conn,
+                query=db_rbac.TenantUserDirectoryQuery(
+                    tenant_id=tenant_id,
+                    anchor_workspace=workspace,
+                    limit=limit,
+                    offset=offset,
+                    query=query,
+                    include_inactive=include_inactive,
+                ),
+            )
+        return _ok(
+            {
+                "tenant_id": tenant_id,
+                "workspace": workspace,
+                "limit": limit,
+                "offset": offset,
+                "q": query,
+                "include_inactive": include_inactive,
+                "total": total,
+                "items": [_public_tenant_directory_user(row) for row in rows],
             }
         )
     except ValueError as exc:

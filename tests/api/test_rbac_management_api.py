@@ -718,6 +718,55 @@ def test_tenant_admin_workspaces_list_success(monkeypatch: Any) -> None:
     assert items[0].get("provider") == "aws"
 
 
+def test_tenant_admin_users_list_success(monkeypatch: Any) -> None:
+    """Tenant admin user directory should return tenant-wide aggregated users."""
+    _disable_runtime_guards(monkeypatch)
+    monkeypatch.setattr(
+        auth_middleware,
+        "authenticate_request",
+        lambda: _context_with_permissions("admin:full"),
+    )
+    monkeypatch.setattr(
+        tenant_admin_blueprint.db_rbac,
+        "list_tenant_user_directory",
+        lambda *_args, **_kwargs: (
+            [
+                {
+                    "tenant_id": "acme",
+                    "user_id": "u-1",
+                    "email": "u-1@acme.io",
+                    "full_name": "User One",
+                    "auth_provider": "local",
+                    "is_active": True,
+                    "is_superadmin": False,
+                    "last_login_at": None,
+                    "workspace_count": 2,
+                    "active_workspace_count": 2,
+                    "workspaces": ["dev", "prod"],
+                    "inherited_role_id": "viewer",
+                    "inherited_source_workspace": "prod",
+                    "applies_to_future_workspaces": True,
+                }
+            ],
+            1,
+        ),
+    )
+
+    client = flask_app.app.test_client()
+    resp = client.get(
+        "/api/tenant-admin/users?tenant_id=acme&workspace=prod&limit=20&offset=0&q=user"
+    )
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 200
+    assert payload.get("ok") is True
+    assert payload.get("total") == 1
+    items = payload.get("items") or []
+    assert items[0].get("user_id") == "u-1"
+    assert items[0].get("workspace_count") == 2
+    assert items[0].get("inherited_role_id") == "viewer"
+
+
 def test_tenant_admin_workspace_update_blocks_lifecycle_without_force(monkeypatch: Any) -> None:
     """Tenant admin workspace lifecycle change should conflict when bindings depend on it."""
     _disable_runtime_guards(monkeypatch)
