@@ -28,6 +28,7 @@ Detect EC2 utilization, lifecycle, security, and tagging inefficiencies.
 ## Key signals
 
 - Low-utilization running instances.
+- Schedule-aware underutilization, using the same hourly CloudWatch series to distinguish business-hours or weekday-only usage from general downsizing candidates.
 - Long-stopped instances with ongoing storage cost.
 - Legacy instance families and burst-credit pressure, with clearer guidance for downsize vs schedule vs modernization actions.
 - IMDSv1 allowed and publicly exposed SSH/RDP.
@@ -58,6 +59,7 @@ Optional for improved cost-confidence:
 
 - Metric-dependent findings require CloudWatch coverage.
 - Optimization focus is strengthened using existing inventory, tag, and CloudWatch data only; no extra API calls are added.
+- Schedule-aware logic is heuristic and conservative: it only emits explicit schedule-oriented focus when activity is strongly concentrated in weekday business hours or weekdays generally.
 - Estimates are directional and intended for optimization triage.
 - Empty or malformed inputs are handled without terminating the run.
 

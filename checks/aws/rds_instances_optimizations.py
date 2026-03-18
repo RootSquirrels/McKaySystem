@@ -50,6 +50,12 @@ from checks.aws.defaults import (
     RDS_REPLICA_MIN_DATAPOINTS,
     RDS_REPLICA_PERIOD_SECONDS,
     RDS_REPLICA_READ_IOPS_P95_THRESHOLD,
+    RDS_REPLICA_SCHEDULE_BUSINESS_HOUR_SHARE_THRESHOLD,
+    RDS_REPLICA_SCHEDULE_MIN_ACTIVE_HOURS,
+    RDS_REPLICA_SCHEDULE_OFF_HOUR_SHARE_THRESHOLD,
+    RDS_REPLICA_SCHEDULE_PERIOD_SECONDS,
+    RDS_REPLICA_SCHEDULE_WEEKEND_SHARE_THRESHOLD,
+    RDS_REPLICA_SCHEDULE_WINDOW_DAYS,
     RDS_REPLICA_UNUSED_WINDOW_DAYS,
     RDS_STORAGE_GB_MONTH_PRICE_USD,
     RDS_STORAGE_MIN_COVERAGE_RATIO,
@@ -179,6 +185,29 @@ def _replica_optimization_focus(*, p95_read_iops: float, p95_connections: float 
     )
 
 
+def _replica_optimization_focus_with_schedule(
+    *,
+    p95_read_iops: float,
+    p95_connections: float | None,
+    schedule_pattern: str,
+) -> tuple[str, str]:
+    """Return action guidance for unused replicas with schedule-aware refinement."""
+    if schedule_pattern == "business_hours":
+        return (
+            "schedule_business_hours_replica_review",
+            "This replica behaves like a business-hours reporting dependency; review whether it can be created on demand, stopped outside office hours, or replaced with a narrower reporting path.",
+        )
+    if schedule_pattern == "weekdays_only":
+        return (
+            "schedule_weekday_replica_review",
+            "This replica behaves like a weekday-only dependency; review whether it can be limited to reporting windows, started only on weekdays, or replaced with a lighter analytics path.",
+        )
+    return _replica_optimization_focus(
+        p95_read_iops=p95_read_iops,
+        p95_connections=p95_connections,
+    )
+
+
 def _norm_engine(engine: str) -> str:
     return (engine or "").strip().lower()
 
@@ -283,6 +312,23 @@ class _CloudWatchBatchMetrics:
         self._cw = cw
         # Cache within a run: (metric, stat, period, start_iso, end_iso, instance_id) -> values
         self._cache: dict[tuple[str, str, int, str, str, str], list[float]] = {}
+        self._series_cache: dict[
+            tuple[str, str, int, str, str, str], list[tuple[datetime, float]]
+        ] = {}
+
+    @staticmethod
+    def _normalize_metric_points(
+        timestamps: Sequence[Any],
+        values: Sequence[Any],
+    ) -> list[tuple[datetime, float]]:
+        """Return timestamped numeric CloudWatch datapoints sorted ascending."""
+        points: list[tuple[datetime, float]] = []
+        for timestamp, value in zip(timestamps, values):
+            if not isinstance(timestamp, datetime) or not isinstance(value, (int, float)):
+                continue
+            points.append((timestamp.replace(tzinfo=timestamp.tzinfo or UTC), float(value)))
+        points.sort(key=lambda item: item[0])
+        return points
 
     def fetch_values_by_instance(
         self,
@@ -380,6 +426,170 @@ class _CloudWatchBatchMetrics:
 
         return results
 
+    def fetch_points_by_instance(
+        self,
+        *,
+        namespace: str,
+        metric_name: str,
+        stat: str,
+        period: int,
+        start: datetime,
+        end: datetime,
+        instance_ids: Sequence[str],
+    ) -> dict[str, list[tuple[datetime, float]]]:
+        """Fetch timestamped metric datapoints for each instance in large batches."""
+        start_key = start.isoformat()
+        end_key = end.isoformat()
+
+        results: dict[str, list[tuple[datetime, float]]] = {}
+        to_query: list[str] = []
+
+        for iid in instance_ids:
+            key = (metric_name, stat, period, start_key, end_key, iid)
+            cached = self._series_cache.get(key)
+            if cached is not None:
+                results[iid] = list(cached)
+            else:
+                to_query.append(iid)
+
+        if not to_query:
+            return results
+
+        batch_size = 400
+        for i in range(0, len(to_query), batch_size):
+            batch = to_query[i : i + batch_size]
+            metric_data_queries: list[dict[str, Any]] = []
+            id_to_instance: dict[str, str] = {}
+
+            for idx, iid in enumerate(batch):
+                qid = f"m{idx}"
+                id_to_instance[qid] = iid
+                metric_data_queries.append(
+                    {
+                        "Id": qid,
+                        "MetricStat": {
+                            "Metric": {
+                                "Namespace": namespace,
+                                "MetricName": metric_name,
+                                "Dimensions": [{"Name": "DBInstanceIdentifier", "Value": iid}],
+                            },
+                            "Period": period,
+                            "Stat": stat,
+                        },
+                        "ReturnData": True,
+                    }
+                )
+
+            next_token: str | None = None
+            while True:
+                kwargs: dict[str, Any] = {
+                    "MetricDataQueries": metric_data_queries,
+                    "StartTime": start,
+                    "EndTime": end,
+                    "ScanBy": "TimestampAscending",
+                }
+                if next_token:
+                    kwargs["NextToken"] = next_token
+
+                resp = self._cw.get_metric_data(**kwargs)
+                for result in resp.get("MetricDataResults", []) or []:
+                    qid = str(result.get("Id") or "")
+                    iid = id_to_instance.get(qid)
+                    if not iid:
+                        continue
+                    points = self._normalize_metric_points(
+                        result.get("Timestamps", []) or [],
+                        result.get("Values", []) or [],
+                    )
+                    if points:
+                        results.setdefault(iid, []).extend(points)
+
+                next_token = resp.get("NextToken")
+                if not next_token:
+                    break
+
+        for iid, points in results.items():
+            deduped = sorted(set(points), key=lambda item: item[0])
+            key = (metric_name, stat, period, start_key, end_key, iid)
+            self._series_cache[key] = list(deduped)
+            results[iid] = deduped
+
+        for iid in instance_ids:
+            results.setdefault(iid, [])
+
+        return results
+
+
+def _is_business_hour_bucket(ts: datetime) -> bool:
+    """Return True when the timestamp falls within weekday office hours."""
+    local_ts = ts.astimezone(UTC)
+    if local_ts.weekday() >= 5:
+        return False
+    return 8 <= local_ts.hour < 19
+
+
+def _replica_schedule_pattern_from_points(
+    *,
+    read_iops_points: Sequence[tuple[datetime, float]],
+    connection_points: Sequence[tuple[datetime, float]],
+    min_active_hours: int,
+    business_hour_share_threshold: float,
+    off_hour_share_threshold: float,
+    weekend_share_threshold: float,
+    read_iops_activity_threshold: float,
+    connection_activity_threshold: float,
+) -> dict[str, float | int | str]:
+    """Infer whether a lightly used replica follows a business-hours schedule."""
+    active_hours: dict[datetime, dict[str, float]] = {}
+
+    for timestamp, value in read_iops_points:
+        if float(value) < read_iops_activity_threshold:
+            continue
+        bucket = timestamp.replace(minute=0, second=0, microsecond=0)
+        active_hours.setdefault(bucket, {})["read_iops"] = float(value)
+
+    for timestamp, value in connection_points:
+        if float(value) < connection_activity_threshold:
+            continue
+        bucket = timestamp.replace(minute=0, second=0, microsecond=0)
+        active_hours.setdefault(bucket, {})["connections"] = float(value)
+
+    active_timestamps = sorted(active_hours)
+    active_count = len(active_timestamps)
+    if active_count < int(min_active_hours):
+        return {
+            "pattern": "",
+            "active_hourly_datapoints": active_count,
+            "business_hour_share": 0.0,
+            "off_hour_share": 0.0,
+            "weekend_share": 0.0,
+        }
+
+    business_hours = sum(1 for ts in active_timestamps if _is_business_hour_bucket(ts))
+    weekend_hours = sum(1 for ts in active_timestamps if ts.astimezone(UTC).weekday() >= 5)
+    off_hours = active_count - business_hours
+    business_share = business_hours / float(active_count)
+    weekend_share = weekend_hours / float(active_count)
+    off_hour_share = off_hours / float(active_count)
+
+    pattern = ""
+    if (
+        business_share >= float(business_hour_share_threshold)
+        and off_hour_share <= float(off_hour_share_threshold)
+        and weekend_share <= float(weekend_share_threshold)
+    ):
+        pattern = "business_hours"
+    elif weekend_share <= float(weekend_share_threshold) and business_share >= 0.55:
+        pattern = "weekdays_only"
+
+    return {
+        "pattern": pattern,
+        "active_hourly_datapoints": active_count,
+        "business_hour_share": business_share,
+        "off_hour_share": off_hour_share,
+        "weekend_share": weekend_share,
+    }
+
 
 class RDSInstancesOptimizationsChecker:
     checker_id = "aws.rds.instances.optimizations"
@@ -397,6 +607,12 @@ class RDSInstancesOptimizationsChecker:
         replica_period_seconds: int = RDS_REPLICA_PERIOD_SECONDS,
         replica_read_iops_p95_threshold: float = RDS_REPLICA_READ_IOPS_P95_THRESHOLD,
         replica_min_datapoints: int = RDS_REPLICA_MIN_DATAPOINTS,  # at least ~1 week with daily period
+        replica_schedule_window_days: int = RDS_REPLICA_SCHEDULE_WINDOW_DAYS,
+        replica_schedule_period_seconds: int = RDS_REPLICA_SCHEDULE_PERIOD_SECONDS,
+        replica_schedule_min_active_hours: int = RDS_REPLICA_SCHEDULE_MIN_ACTIVE_HOURS,
+        replica_schedule_business_hour_share_threshold: float = RDS_REPLICA_SCHEDULE_BUSINESS_HOUR_SHARE_THRESHOLD,
+        replica_schedule_off_hour_share_threshold: float = RDS_REPLICA_SCHEDULE_OFF_HOUR_SHARE_THRESHOLD,
+        replica_schedule_weekend_share_threshold: float = RDS_REPLICA_SCHEDULE_WEEKEND_SHARE_THRESHOLD,
         storage_min_datapoints: int | None = None,
         storage_min_coverage_ratio: float = RDS_STORAGE_MIN_COVERAGE_RATIO,
         replica_min_coverage_ratio: float = RDS_REPLICA_MIN_COVERAGE_RATIO,
@@ -415,6 +631,12 @@ class RDSInstancesOptimizationsChecker:
         self._replica_period_seconds = int(replica_period_seconds)
         self._replica_read_iops_p95_threshold = float(replica_read_iops_p95_threshold)
         self._replica_min_datapoints = int(replica_min_datapoints)
+        self._replica_schedule_window_days = int(replica_schedule_window_days)
+        self._replica_schedule_period_seconds = int(replica_schedule_period_seconds)
+        self._replica_schedule_min_active_hours = int(replica_schedule_min_active_hours)
+        self._replica_schedule_business_hour_share_threshold = float(replica_schedule_business_hour_share_threshold)
+        self._replica_schedule_off_hour_share_threshold = float(replica_schedule_off_hour_share_threshold)
+        self._replica_schedule_weekend_share_threshold = float(replica_schedule_weekend_share_threshold)
         self._storage_min_datapoints = int(storage_min_datapoints) if storage_min_datapoints is not None else None
         self._storage_min_coverage_ratio = float(storage_min_coverage_ratio)
         self._replica_min_coverage_ratio = float(replica_min_coverage_ratio)
@@ -503,10 +725,19 @@ class RDSInstancesOptimizationsChecker:
         ids_for_storage: Sequence[str],
         ids_for_replicas: Sequence[str],
         region: str,
-    ) -> tuple[dict[str, list[float]], dict[str, list[float]], dict[str, list[float]], FindingDraft | None]:
+    ) -> tuple[
+        dict[str, list[float]],
+        dict[str, list[float]],
+        dict[str, list[float]],
+        dict[str, list[tuple[datetime, float]]],
+        dict[str, list[tuple[datetime, float]]],
+        FindingDraft | None,
+    ]:
         storage_metrics: dict[str, list[float]] = {}
         replica_read_iops: dict[str, list[float]] = {}
         replica_connections: dict[str, list[float]] = {}
+        replica_schedule_read_iops: dict[str, list[tuple[datetime, float]]] = {}
+        replica_schedule_connections: dict[str, list[tuple[datetime, float]]] = {}
 
         if metric_fetcher is not None and ids_for_storage:
             end = common.now_utc()
@@ -526,6 +757,8 @@ class RDSInstancesOptimizationsChecker:
                     {iid: [] for iid in ids_for_storage},
                     replica_read_iops,
                     replica_connections,
+                    replica_schedule_read_iops,
+                    replica_schedule_connections,
                     self._access_error(ctx, region, "cloudwatch:GetMetricData FreeStorageSpace", exc),
                 )
 
@@ -551,15 +784,44 @@ class RDSInstancesOptimizationsChecker:
                     end=end,
                     instance_ids=ids_for_replicas,
                 )
+                schedule_end = end
+                schedule_start = schedule_end - timedelta(days=self._replica_schedule_window_days)
+                replica_schedule_read_iops = metric_fetcher.fetch_points_by_instance(
+                    namespace="AWS/RDS",
+                    metric_name="ReadIOPS",
+                    stat="Average",
+                    period=self._replica_schedule_period_seconds,
+                    start=schedule_start,
+                    end=schedule_end,
+                    instance_ids=ids_for_replicas,
+                )
+                replica_schedule_connections = metric_fetcher.fetch_points_by_instance(
+                    namespace="AWS/RDS",
+                    metric_name="DatabaseConnections",
+                    stat="Average",
+                    period=self._replica_schedule_period_seconds,
+                    start=schedule_start,
+                    end=schedule_end,
+                    instance_ids=ids_for_replicas,
+                )
             except ClientError as exc:
                 return (
                     storage_metrics,
                     {iid: [] for iid in ids_for_replicas},
                     {iid: [] for iid in ids_for_replicas},
+                    {iid: [] for iid in ids_for_replicas},
+                    {iid: [] for iid in ids_for_replicas},
                     self._access_error(ctx, region, "cloudwatch:GetMetricData replica metrics", exc),
                 )
 
-        return storage_metrics, replica_read_iops, replica_connections, None
+        return (
+            storage_metrics,
+            replica_read_iops,
+            replica_connections,
+            replica_schedule_read_iops,
+            replica_schedule_connections,
+            None,
+        )
 
     def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
         _LOGGER.info("Starting RDS instances optimizations check")
@@ -595,7 +857,14 @@ class RDSInstancesOptimizationsChecker:
         # so we avoid fetching tags for every instance.
         tags_by_id: dict[str, dict[str, str]] = {}
 
-        storage_metrics, replica_read_iops, replica_connections, metric_access_error = self._fetch_prefetched_metrics(
+        (
+            storage_metrics,
+            replica_read_iops,
+            replica_connections,
+            replica_schedule_read_iops,
+            replica_schedule_connections,
+            metric_access_error,
+        ) = self._fetch_prefetched_metrics(
             ctx=ctx,
             metric_fetcher=metric_fetcher,
             ids_for_storage=ids_for_storage,
@@ -621,6 +890,8 @@ class RDSInstancesOptimizationsChecker:
                 free_storage_values=storage_metrics.get(instance_id, []),
                 replica_read_iops_values=replica_read_iops.get(instance_id, []),
                 replica_conn_values=replica_connections.get(instance_id, []),
+                replica_schedule_read_iops_points=replica_schedule_read_iops.get(instance_id, []),
+                replica_schedule_conn_points=replica_schedule_connections.get(instance_id, []),
             )
 
     def _list_db_instances(self, rds: Any) -> Iterator[dict[str, Any]]:
@@ -671,6 +942,8 @@ class RDSInstancesOptimizationsChecker:
         free_storage_values: Sequence[float],
         replica_read_iops_values: Sequence[float],
         replica_conn_values: Sequence[float],
+        replica_schedule_read_iops_points: Sequence[tuple[datetime, float]],
+        replica_schedule_conn_points: Sequence[tuple[datetime, float]],
     ) -> Iterable[FindingDraft]:
         instance_id = str(inst.get("DBInstanceIdentifier") or "")
         arn = str(inst.get("DBInstanceArn") or "")
@@ -895,9 +1168,24 @@ class RDSInstancesOptimizationsChecker:
                 )
                 if rr is not None:
                     p95_read_iops, dp_count, p95_conns = rr
-                    optimization_focus, focus_note = _replica_optimization_focus(
+                    schedule_analysis = _replica_schedule_pattern_from_points(
+                        read_iops_points=replica_schedule_read_iops_points,
+                        connection_points=replica_schedule_conn_points,
+                        min_active_hours=self._replica_schedule_min_active_hours,
+                        business_hour_share_threshold=self._replica_schedule_business_hour_share_threshold,
+                        off_hour_share_threshold=self._replica_schedule_off_hour_share_threshold,
+                        weekend_share_threshold=self._replica_schedule_weekend_share_threshold,
+                        read_iops_activity_threshold=max(
+                            0.05,
+                            self._replica_read_iops_p95_threshold * 0.5,
+                        ),
+                        connection_activity_threshold=0.25,
+                    )
+                    schedule_pattern = str(schedule_analysis["pattern"] or "")
+                    optimization_focus, focus_note = _replica_optimization_focus_with_schedule(
                         p95_read_iops=p95_read_iops,
                         p95_connections=p95_conns,
+                        schedule_pattern=schedule_pattern,
                     )
                     # Cost is meaningful with PricingService; if available we emit a best-effort savings estimate.
                     hrs = _hours_per_month()
@@ -952,6 +1240,11 @@ class RDSInstancesOptimizationsChecker:
                             "p95_connections": (f"{p95_conns:.3f}" if p95_conns is not None else ""),
                             "replica_source": str(inst.get("ReadReplicaSourceDBInstanceIdentifier") or ""),
                             "optimization_focus": optimization_focus,
+                            "schedule_pattern": schedule_pattern,
+                            "active_hourly_datapoints": str(schedule_analysis["active_hourly_datapoints"]),
+                            "business_hour_activity_share": f"{float(schedule_analysis['business_hour_share']):.2f}",
+                            "off_hour_activity_share": f"{float(schedule_analysis['off_hour_share']):.2f}",
+                            "weekend_activity_share": f"{float(schedule_analysis['weekend_share']):.2f}",
                         },
                     ).with_issue(check="unused_read_replica", account_id=self._account.account_id, region=region, resource_type="db_instance", resource_id=instance_id, db_instance=instance_id)
 

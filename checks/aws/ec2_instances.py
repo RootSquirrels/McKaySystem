@@ -64,6 +64,9 @@ from checks.aws._common import (
 from checks.aws.defaults import (
     EC2_MAX_FINDINGS_PER_TYPE,
     EC2_REQUIRED_INSTANCE_TAG_KEYS,
+    EC2_SCHEDULE_AWARE_BUSINESS_HOUR_SHARE_THRESHOLD,
+    EC2_SCHEDULE_AWARE_MIN_ACTIVE_HOURLY_DATAPOINTS,
+    EC2_SCHEDULE_AWARE_OFF_HOUR_SHARE_THRESHOLD,
     EC2_STOPPED_LONG_AGE_DAYS,
     EC2_T_CREDIT_BALANCE_MIN_THRESHOLD,
     EC2_T_CREDIT_LOOKBACK_DAYS,
@@ -90,6 +93,9 @@ class EC2InstancesConfig:
     underutilized_lookback_days: int = EC2_UNDERUTILIZED_LOOKBACK_DAYS
     underutilized_cpu_avg_threshold: float = EC2_UNDERUTILIZED_CPU_AVG_THRESHOLD
     underutilized_net_avg_kib_per_hour_threshold: float = EC2_UNDERUTILIZED_NET_AVG_KIB_PER_HOUR_THRESHOLD  # ~12 MiB/day
+    schedule_aware_min_active_hourly_datapoints: int = EC2_SCHEDULE_AWARE_MIN_ACTIVE_HOURLY_DATAPOINTS
+    schedule_aware_business_hour_share_threshold: float = EC2_SCHEDULE_AWARE_BUSINESS_HOUR_SHARE_THRESHOLD
+    schedule_aware_off_hour_share_threshold: float = EC2_SCHEDULE_AWARE_OFF_HOUR_SHARE_THRESHOLD
 
     stopped_long_age_days: int = EC2_STOPPED_LONG_AGE_DAYS
 
@@ -226,8 +232,13 @@ def _underutilized_optimization_focus(
     cpu_threshold: float,
     net_threshold: float,
     recommended_instance_type: str | None,
+    schedule_pattern: str | None,
 ) -> str:
     """Return the primary optimization focus for an underutilized EC2 instance."""
+    if schedule_pattern == "business_hours":
+        return "schedule_business_hours_candidate"
+    if schedule_pattern == "weekdays_only":
+        return "schedule_weekday_candidate"
     _family, size = _split_instance_type(instance_type)
     if (
         cpu_avg <= max(1.0, float(cpu_threshold) * 0.25)
@@ -427,7 +438,7 @@ def _fetch_utilization_metrics(
     region: str,
     instance_ids: Sequence[str],
     lookback_days: int,
-) -> dict[str, dict[str, float]]:
+) -> dict[str, dict[str, Any]]:
     """Return per-instance utilization summary.
 
     Result shape: {instance_id: {"cpu_avg": ..., "net_kib_per_hour": ...}}
@@ -440,7 +451,7 @@ def _fetch_utilization_metrics(
     end = now_utc()
     start = end - timedelta(days=int(max(1, lookback_days)))
 
-    out: dict[str, dict[str, float]] = {}
+    out: dict[str, dict[str, Any]] = {}
 
     # CloudWatch GetMetricData limit is 500 MetricDataQueries per request.
     # We use 3 queries per instance (cpu, netin, netout) -> 50 instances per request.
@@ -468,6 +479,9 @@ def _fetch_utilization_metrics(
             cpu_vals = list(results.get(f"cpu{i}", {}).get("Values", []) or [])
             ni_vals = list(results.get(f"ni{i}", {}).get("Values", []) or [])
             no_vals = list(results.get(f"no{i}", {}).get("Values", []) or [])
+            cpu_timestamps = list(results.get(f"cpu{i}", {}).get("Timestamps", []) or [])
+            ni_timestamps = list(results.get(f"ni{i}", {}).get("Timestamps", []) or [])
+            no_timestamps = list(results.get(f"no{i}", {}).get("Timestamps", []) or [])
             if not cpu_vals and not ni_vals and not no_vals:
                 continue
             cpu_avg = float(sum(cpu_vals) / max(1, len(cpu_vals))) if cpu_vals else 0.0
@@ -475,9 +489,101 @@ def _fetch_utilization_metrics(
             net_total_bytes = float(sum(ni_vals) + sum(no_vals)) if (ni_vals or no_vals) else 0.0
             datapoints = max(len(ni_vals), len(no_vals), 1)
             net_kib_per_hour = (net_total_bytes / 1024.0) / float(datapoints)
-            out[iid] = {"cpu_avg": cpu_avg, "net_kib_per_hour": net_kib_per_hour}
+            out[iid] = {
+                "cpu_avg": cpu_avg,
+                "net_kib_per_hour": net_kib_per_hour,
+                "cpu_values": cpu_vals,
+                "cpu_timestamps": cpu_timestamps,
+                "network_in_values": ni_vals,
+                "network_in_timestamps": ni_timestamps,
+                "network_out_values": no_vals,
+                "network_out_timestamps": no_timestamps,
+            }
 
     return out
+
+
+def _business_hour_bucket(ts: datetime) -> str:
+    """Return the deterministic activity bucket for one UTC timestamp."""
+
+    normalized = ts.astimezone(UTC)
+    if normalized.weekday() >= 5:
+        return "weekend"
+    if 8 <= normalized.hour < 18:
+        return "business_hours"
+    return "off_hours"
+
+
+def _schedule_pattern_from_metric_series(
+    *,
+    cpu_values: Sequence[float],
+    cpu_timestamps: Sequence[Any],
+    network_in_values: Sequence[float],
+    network_in_timestamps: Sequence[Any],
+    network_out_values: Sequence[float],
+    network_out_timestamps: Sequence[Any],
+    cpu_threshold: float,
+    net_threshold: float,
+    min_active_hourly_datapoints: int,
+    business_hour_share_threshold: float,
+    off_hour_share_threshold: float,
+) -> dict[str, Any]:
+    """Infer a simple schedule pattern from hourly CPU/network series."""
+
+    bucket_counts = {"business_hours": 0, "off_hours": 0, "weekend": 0}
+    cpu_activity_threshold = max(1.0, float(cpu_threshold) * 0.30)
+    network_activity_threshold_bytes = max(64.0 * 1024.0, float(net_threshold) * 1024.0 * 0.25)
+
+    def _accumulate(values: Sequence[Any], timestamps: Sequence[Any], threshold: float) -> None:
+        for raw_value, raw_ts in zip(values, timestamps):
+            ts = utc(raw_ts)
+            if ts is None:
+                continue
+            try:
+                value = float(raw_value)
+            except (TypeError, ValueError):
+                continue
+            if value < threshold:
+                continue
+            bucket_counts[_business_hour_bucket(ts)] += 1
+
+    _accumulate(cpu_values, cpu_timestamps, cpu_activity_threshold)
+    _accumulate(network_in_values, network_in_timestamps, network_activity_threshold_bytes)
+    _accumulate(network_out_values, network_out_timestamps, network_activity_threshold_bytes)
+
+    active_total = sum(bucket_counts.values())
+    if active_total < max(1, int(min_active_hourly_datapoints)):
+        return {
+            "pattern": None,
+            "active_hourly_datapoints": active_total,
+            "business_hour_share": 0.0,
+            "off_hour_share": 0.0,
+            "weekend_share": 0.0,
+        }
+
+    business_hour_share = bucket_counts["business_hours"] / float(active_total)
+    off_hour_share = bucket_counts["off_hours"] / float(active_total)
+    weekend_share = bucket_counts["weekend"] / float(active_total)
+
+    pattern: str | None = None
+    if (
+        business_hour_share >= float(business_hour_share_threshold)
+        and (off_hour_share + weekend_share) <= float(off_hour_share_threshold)
+    ):
+        pattern = "business_hours"
+    elif (
+        (business_hour_share + off_hour_share) >= float(business_hour_share_threshold)
+        and weekend_share <= float(off_hour_share_threshold)
+    ):
+        pattern = "weekdays_only"
+
+    return {
+        "pattern": pattern,
+        "active_hourly_datapoints": active_total,
+        "business_hour_share": business_hour_share,
+        "off_hour_share": off_hour_share,
+        "weekend_share": weekend_share,
+    }
 
 
 # -----------------------------
@@ -636,6 +742,19 @@ class EC2InstancesChecker:
             estimate_notes = "; ".join(estimate_notes_parts)
             estimate_confidence = min(int(conf), int(rec_conf)) if rec_type else int(conf)
             estimated_savings = rightsizing_savings if rightsizing_savings is not None else cost
+            schedule_analysis = _schedule_pattern_from_metric_series(
+                cpu_values=m.get("cpu_values", []) or [],
+                cpu_timestamps=m.get("cpu_timestamps", []) or [],
+                network_in_values=m.get("network_in_values", []) or [],
+                network_in_timestamps=m.get("network_in_timestamps", []) or [],
+                network_out_values=m.get("network_out_values", []) or [],
+                network_out_timestamps=m.get("network_out_timestamps", []) or [],
+                cpu_threshold=cfg.underutilized_cpu_avg_threshold,
+                net_threshold=cfg.underutilized_net_avg_kib_per_hour_threshold,
+                min_active_hourly_datapoints=cfg.schedule_aware_min_active_hourly_datapoints,
+                business_hour_share_threshold=cfg.schedule_aware_business_hour_share_threshold,
+                off_hour_share_threshold=cfg.schedule_aware_off_hour_share_threshold,
+            )
             optimization_focus = _underutilized_optimization_focus(
                 instance_type=itype,
                 cpu_avg=cpu,
@@ -643,7 +762,18 @@ class EC2InstancesChecker:
                 cpu_threshold=cfg.underutilized_cpu_avg_threshold,
                 net_threshold=cfg.underutilized_net_avg_kib_per_hour_threshold,
                 recommended_instance_type=rec_type,
+                schedule_pattern=str(schedule_analysis.get("pattern") or "") or None,
             )
+            if str(schedule_analysis.get("pattern") or "") == "business_hours":
+                recommendation = (
+                    "Observed activity is concentrated in weekday business hours. "
+                    "Consider a scheduled stop/start policy before downsizing or deletion."
+                )
+            elif str(schedule_analysis.get("pattern") or "") == "weekdays_only":
+                recommendation = (
+                    "Observed activity is concentrated on weekdays with very low weekend use. "
+                    "Consider a weekday-only schedule before downsizing or deletion."
+                )
 
             scope = build_scope(
                 ctx,
@@ -684,6 +814,11 @@ class EC2InstancesChecker:
                         "cpu_avg": f"{cpu:.2f}",
                         "net_kib_per_hour": f"{net_kib_h:.2f}",
                         "lookback_days": str(cfg.underutilized_lookback_days),
+                        "schedule_pattern": str(schedule_analysis.get("pattern") or ""),
+                        "active_hourly_datapoints": str(int(schedule_analysis.get("active_hourly_datapoints") or 0)),
+                        "business_hour_activity_share": f"{float(schedule_analysis.get('business_hour_share') or 0.0):.2f}",
+                        "off_hour_activity_share": f"{float(schedule_analysis.get('off_hour_share') or 0.0):.2f}",
+                        "weekend_activity_share": f"{float(schedule_analysis.get('weekend_share') or 0.0):.2f}",
                         "optimization_focus": optimization_focus,
                     },
                     issue_key={"instance_id": iid, "signal": "underutilized"},

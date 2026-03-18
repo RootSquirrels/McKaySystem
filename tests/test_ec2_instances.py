@@ -41,14 +41,21 @@ class FakeEC2:
 
 
 class FakeCloudWatch:
-    def __init__(self, *, results_by_id: Dict[str, List[float]]) -> None:
+    def __init__(self, *, results_by_id: Dict[str, List[float]], timestamps_by_id: Optional[Dict[str, List[Any]]] = None) -> None:
         self._results_by_id = results_by_id
+        self._timestamps_by_id = timestamps_by_id or {}
 
     def get_metric_data(self, *, MetricDataQueries: List[Mapping[str, Any]], **_kwargs: Any) -> Mapping[str, Any]:
         out = []
         for q in MetricDataQueries:
             qid = str(q.get("Id"))
-            out.append({"Id": qid, "Values": list(self._results_by_id.get(qid, []))})
+            out.append(
+                {
+                    "Id": qid,
+                    "Values": list(self._results_by_id.get(qid, [])),
+                    "Timestamps": list(self._timestamps_by_id.get(qid, [])),
+                }
+            )
         return {"MetricDataResults": out}
 
 
@@ -194,6 +201,69 @@ def test_underutilized_includes_rightsizing_target_and_delta(monkeypatch: pytest
     assert (f.dimensions or {}).get("recommended_instance_type") == "m5.xlarge"
     assert (f.dimensions or {}).get("rightsizing_monthly_savings_usd") == "146.00"
     assert (f.dimensions or {}).get("optimization_focus") == "downsize_candidate"
+
+
+def test_underutilized_detects_business_hour_schedule_pattern(monkeypatch: pytest.MonkeyPatch) -> None:
+    import checks.aws.ec2_instances as mod
+
+    monkeypatch.setattr(mod, "now_utc", lambda: datetime(2026, 1, 24, 12, 0, 0, tzinfo=timezone.utc))
+
+    ec2 = FakeEC2(
+        region="eu-west-3",
+        pages_by_op={
+            "describe_instances": [
+                {
+                    "Reservations": [
+                        {
+                            "Instances": [
+                                {
+                                    "InstanceId": "i-schedule",
+                                    "InstanceType": "m5.large",
+                                    "State": {"Name": "running"},
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ],
+            "describe_security_groups": [{"SecurityGroups": []}],
+            "describe_network_interfaces": [{"NetworkInterfaces": []}],
+        },
+    )
+
+    timestamps = [
+        datetime(2026, 1, 12, 9, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 1, 13, 10, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 1, 14, 11, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 1, 15, 9, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 1, 16, 10, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 1, 19, 11, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 1, 20, 9, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 1, 21, 10, 0, 0, tzinfo=timezone.utc),
+    ]
+    cw = FakeCloudWatch(
+        results_by_id={
+            "cpu0": [5.0] * len(timestamps),
+            "ni0": [256.0 * 1024.0] * len(timestamps),
+            "no0": [256.0 * 1024.0] * len(timestamps),
+        },
+        timestamps_by_id={
+            "cpu0": timestamps,
+            "ni0": timestamps,
+            "no0": timestamps,
+        },
+    )
+    pricing = FakePricingByType({"m5.large": 0.10, "m5.medium": 0.05})
+    ctx = _mk_ctx(ec2=ec2, cloudwatch=cw, pricing=pricing)
+
+    checker = EC2InstancesChecker(account=mod.AwsAccountContext(account_id="123", billing_account_id="123"))
+    findings = list(checker.run(ctx))
+    hit = next(f for f in findings if f.check_id == "aws.ec2.instances.underutilized")
+    assert hit.dimensions["schedule_pattern"] == "business_hours"
+    assert hit.dimensions["optimization_focus"] == "schedule_business_hours_candidate"
+    assert hit.dimensions["active_hourly_datapoints"] == "24"
+    assert hit.dimensions["business_hour_activity_share"] == "1.00"
+    assert "scheduled stop/start policy" in hit.recommendation
 
 
 def test_stopped_long_emits_with_storage_estimate(monkeypatch: pytest.MonkeyPatch) -> None:

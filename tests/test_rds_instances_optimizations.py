@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import pytest
@@ -29,9 +29,17 @@ class _FakeCloudWatchClient:
     It inspects MetricDataQueries and returns the configured values for each:
       (MetricName, DBInstanceIdentifier) -> values
     """
-    def __init__(self, *, series_by_metric_and_instance: dict[str, dict[str, list[float]]] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        series_by_metric_and_instance: dict[str, dict[str, list[float]]] | None = None,
+        timestamped_series_by_metric_and_instance: dict[
+            str, dict[str, list[tuple[datetime, float]]]
+        ] | None = None,
+    ) -> None:
         # e.g. {"FreeStorageSpace": {"db2":[...bytes...]}, "ReadIOPS":{"replica1":[...]} }
         self._data = series_by_metric_and_instance or {}
+        self._timestamped_data = timestamped_series_by_metric_and_instance or {}
 
     def get_metric_data(self, **kwargs: Any) -> dict[str, Any]:
         queries: Sequence[dict[str, Any]] = kwargs.get("MetricDataQueries", []) or []
@@ -42,6 +50,7 @@ class _FakeCloudWatchClient:
             metric_stat = q.get("MetricStat", {}) or {}
             metric = metric_stat.get("Metric", {}) or {}
             metric_name = metric.get("MetricName")
+            period = int(metric_stat.get("Period") or 0)
             dims = metric.get("Dimensions", []) or []
             iid = ""
             for d in dims:
@@ -49,15 +58,25 @@ class _FakeCloudWatchClient:
                     iid = str(d.get("Value") or "")
                     break
 
-            values = []
+            values: list[float] = []
+            timestamps: list[datetime] = []
             if metric_name and iid:
-                values = list(self._data.get(str(metric_name), {}).get(iid, []))
+                timestamped = []
+                if period and period < 86400:
+                    timestamped = list(
+                        self._timestamped_data.get(str(metric_name), {}).get(iid, [])
+                    )
+                if timestamped:
+                    timestamps = [point[0] for point in timestamped]
+                    values = [point[1] for point in timestamped]
+                else:
+                    values = list(self._data.get(str(metric_name), {}).get(iid, []))
 
             results.append(
                 {
                     "Id": qid,
                     "Values": values,
-                    "Timestamps": [],
+                    "Timestamps": timestamps,
                     "StatusCode": "Complete",
                 }
             )
@@ -467,6 +486,28 @@ def test_old_generation_sqlserver_prefers_general_newer_generation() -> None:
         ],
         tags_by_arn={arn: {"env": "dev"}},
     )
+
+
+def _hourly_points(
+    *,
+    start: datetime,
+    hours: Sequence[int],
+    days: int,
+    value: float,
+) -> list[tuple[datetime, float]]:
+    points: list[tuple[datetime, float]] = []
+    for day_offset in range(days):
+        base_day = start + timedelta(days=day_offset)
+        if base_day.weekday() >= 5:
+            continue
+        for hour in hours:
+            points.append(
+                (
+                    base_day.replace(hour=hour, minute=0, second=0, microsecond=0),
+                    value,
+                )
+            )
+    return points
     cw = _FakeCloudWatchClient(series_by_metric_and_instance={})
     ctx = make_run_ctx(rds=rds, cloudwatch=cw)
 
@@ -506,6 +547,98 @@ def test_unused_read_replica_with_some_connections_prefers_schedule_review() -> 
     findings = list(_mk_checker().run(ctx))
     hit = next(f for f in findings if f.check_id == "aws.rds.read.replica.unused")
     assert hit.dimensions["optimization_focus"] == "schedule_or_reporting_review"
+
+
+def test_unused_read_replica_detects_business_hour_schedule_pattern() -> None:
+    arn = "arn:aws:rds:eu-west-3:111111111111:db:replica_business_hours"
+    hourly_start = datetime(2026, 3, 2, 0, 0, 0, tzinfo=UTC)
+    business_hour_points = _hourly_points(
+        start=hourly_start,
+        hours=[9, 10, 11, 14, 15, 16],
+        days=5,
+        value=1.0,
+    )
+    cw = _FakeCloudWatchClient(
+        series_by_metric_and_instance={
+            "ReadIOPS": {"replica_business_hours": [0.0] * 14},
+            "DatabaseConnections": {"replica_business_hours": [0.0] * 14},
+        },
+        timestamped_series_by_metric_and_instance={
+            "ReadIOPS": {"replica_business_hours": business_hour_points},
+            "DatabaseConnections": {"replica_business_hours": business_hour_points},
+        },
+    )
+    rds = FakeRdsClient(
+        region="eu-west-3",
+        instances=[
+            {
+                "DBInstanceIdentifier": "replica_business_hours",
+                "DBInstanceArn": arn,
+                "DBInstanceStatus": "available",
+                "AllocatedStorage": 20,
+                "MultiAZ": False,
+                "DBInstanceClass": "db.t3.medium",
+                "Engine": "postgres",
+                "EngineVersion": "15.4",
+                "ReadReplicaSourceDBInstanceIdentifier": "primary1",
+                "InstanceCreateTime": datetime(2020, 1, 1, 0, 0, 0, tzinfo=UTC),
+            }
+        ],
+        tags_by_arn={arn: {"env": "dev"}},
+    )
+    ctx = make_run_ctx(rds=rds, cloudwatch=cw)
+
+    findings = list(_mk_checker().run(ctx))
+    hit = next(f for f in findings if f.check_id == "aws.rds.read.replica.unused")
+    assert hit.dimensions["schedule_pattern"] == "business_hours"
+    assert hit.dimensions["optimization_focus"] == "schedule_business_hours_replica_review"
+    assert hit.dimensions["active_hourly_datapoints"] == "30"
+    assert hit.dimensions["business_hour_activity_share"] == "1.00"
+
+
+def test_unused_read_replica_detects_weekday_schedule_pattern() -> None:
+    arn = "arn:aws:rds:eu-west-3:111111111111:db:replica_weekday"
+    hourly_start = datetime(2026, 3, 2, 0, 0, 0, tzinfo=UTC)
+    mixed_weekday_points = _hourly_points(
+        start=hourly_start,
+        hours=[7, 8, 9, 18, 19],
+        days=5,
+        value=0.8,
+    )
+    cw = _FakeCloudWatchClient(
+        series_by_metric_and_instance={
+            "ReadIOPS": {"replica_weekday": [0.0] * 14},
+            "DatabaseConnections": {"replica_weekday": [0.0] * 14},
+        },
+        timestamped_series_by_metric_and_instance={
+            "ReadIOPS": {"replica_weekday": mixed_weekday_points},
+            "DatabaseConnections": {"replica_weekday": mixed_weekday_points},
+        },
+    )
+    rds = FakeRdsClient(
+        region="eu-west-3",
+        instances=[
+            {
+                "DBInstanceIdentifier": "replica_weekday",
+                "DBInstanceArn": arn,
+                "DBInstanceStatus": "available",
+                "AllocatedStorage": 20,
+                "MultiAZ": False,
+                "DBInstanceClass": "db.t3.medium",
+                "Engine": "postgres",
+                "EngineVersion": "15.4",
+                "ReadReplicaSourceDBInstanceIdentifier": "primary1",
+                "InstanceCreateTime": datetime(2020, 1, 1, 0, 0, 0, tzinfo=UTC),
+            }
+        ],
+        tags_by_arn={arn: {"env": "dev"}},
+    )
+    ctx = make_run_ctx(rds=rds, cloudwatch=cw)
+
+    findings = list(_mk_checker().run(ctx))
+    hit = next(f for f in findings if f.check_id == "aws.rds.read.replica.unused")
+    assert hit.dimensions["schedule_pattern"] == "weekdays_only"
+    assert hit.dimensions["optimization_focus"] == "schedule_weekday_replica_review"
 
 
 def test_unused_read_replica_suppressed_by_purpose_tag() -> None:

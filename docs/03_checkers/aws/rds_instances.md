@@ -31,6 +31,7 @@ Detect RDS instance optimization and governance opportunities using inventory an
 - Non-production Multi-AZ posture opportunities.
 - Legacy instance family and engine-version policy drift, with clearer modernization focus for Graviton-first vs general newer-generation refresh.
 - Unused read replicas by sustained low read IOPS, with sharper guidance for delete-candidate vs schedule/reporting review.
+- Schedule-aware read replica review using a short hourly CloudWatch window to distinguish business-hours or weekday-only reporting patterns from truly deletable replicas.
 
 ## Configuration and defaults
 
@@ -38,6 +39,7 @@ Defaults are sourced from `checks/aws/defaults.py`, including:
 - storage analysis windows/coverage thresholds
 - overprovisioning thresholds
 - replica lookback and p95 read-IOPS thresholds
+- replica schedule-analysis window and activity-share thresholds
 - blocked/allowed engine-version policy bounds
 
 ## IAM permissions
@@ -53,7 +55,7 @@ Optional for improved cost-confidence:
 ## Determinism and limitations
 
 - CloudWatch-dependent findings require metric coverage thresholds.
-- Modernization and read-replica guidance are strengthened using existing inventory and CloudWatch data only; no extra metric/API calls are added.
+- Read-replica guidance is strengthened with a bounded hourly schedule pass over replica candidates, so business-hours reporting replicas are less likely to be treated like always-on delete candidates.
 - Cost estimates are best-effort and should be refined by CUR enrichment.
 - Access gaps surface as informational findings instead of hard failures.
 
