@@ -77,6 +77,22 @@ def _round_hourly(value: float) -> float:
     return round(float(value), 4)
 
 
+def _coverage_gap_focus(*, type_counts: Mapping[str, int]) -> tuple[str, str]:
+    """Return the primary recommendation focus for a Savings Plans coverage gap."""
+    distinct_types = len([itype for itype, count in type_counts.items() if int(count) > 0])
+    if distinct_types >= 2:
+        return ("compute_sp_candidate", "Compute Savings Plan")
+    return ("ec2_instance_sp_candidate", "EC2 Instance Savings Plan")
+
+
+def _utilization_low_focus(*, plan_types: Mapping[str, int]) -> tuple[str, str]:
+    """Return the primary recommendation focus for low Savings Plans utilization."""
+    normalized = {str(plan_type).strip().lower() for plan_type, count in plan_types.items() if int(count) > 0}
+    if normalized == {"ec2instance"}:
+        return ("future_compute_sp_rebalance", "future Compute Savings Plan flexibility")
+    return ("future_commitment_reduction", "future commitment reduction")
+
+
 class EC2SavingsPlansChecker:
     """Detect EC2 Savings Plan coverage/utilization opportunities."""
 
@@ -174,6 +190,7 @@ class EC2SavingsPlansChecker:
             potential_monthly_savings = money(
                 monthly_uncovered_cost * float(cfg.potential_savings_discount_factor)
             )
+            optimization_focus, recommended_commitment = _coverage_gap_focus(type_counts=type_counts)
             findings.append(
                 FindingDraft(
                     check_id="aws.ec2.savings.plans.coverage.gap",
@@ -190,7 +207,7 @@ class EC2SavingsPlansChecker:
                     ),
                     recommendation=(
                         f"Increase Savings Plan commitment by about ${uncovered_hourly:.4f}/hr after validating "
-                        "steady-state usage and term/payment flexibility."
+                        f"steady-state usage and term/payment flexibility. Start with {recommended_commitment}."
                     ),
                     estimated_monthly_cost=monthly_uncovered_cost,
                     estimated_monthly_savings=potential_monthly_savings,
@@ -209,6 +226,8 @@ class EC2SavingsPlansChecker:
                         "uncovered_usd_per_hour": f"{uncovered_hourly:.4f}",
                         "coverage_pct": f"{coverage_pct:.2f}",
                         "target_coverage_pct": "90.00",
+                        "optimization_focus": optimization_focus,
+                        "recommended_commitment_type": recommended_commitment,
                     },
                     issue_key={"signal": "savings_plans_coverage_gap", "portfolio": "ec2"},
                 )
@@ -218,6 +237,7 @@ class EC2SavingsPlansChecker:
             monthly_unused_commitment = money(
                 unused_hourly * 730.0 * float(cfg.unused_commitment_cost_factor)
             )
+            optimization_focus, recommendation_target = _utilization_low_focus(plan_types=plan_types)
             findings.append(
                 FindingDraft(
                     check_id="aws.ec2.savings.plans.utilization.low",
@@ -234,7 +254,7 @@ class EC2SavingsPlansChecker:
                     ),
                     recommendation=(
                         "Review Savings Plan utilization and rebalance workloads to covered usage. "
-                        "If persistent, adjust future commitments and term strategy."
+                        f"If persistent, adjust future commitments and term strategy with focus on {recommendation_target}."
                     ),
                     estimated_monthly_cost=monthly_unused_commitment,
                     estimated_monthly_savings=None,
@@ -252,6 +272,7 @@ class EC2SavingsPlansChecker:
                         "unused_usd_per_hour": f"{unused_hourly:.4f}",
                         "utilization_pct": f"{utilization_pct:.2f}",
                         "target_utilization_pct": f"{cfg.low_utilization_threshold_pct:.2f}",
+                        "optimization_focus": optimization_focus,
                     },
                     issue_key={"signal": "savings_plans_utilization_low", "portfolio": "ec2"},
                 )

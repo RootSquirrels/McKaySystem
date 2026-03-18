@@ -102,6 +102,25 @@ def _instance_monthly_cost(
     )
 
 
+def _ri_coverage_gap_focus(*, uncovered_azs: set[str], has_regional_reserved: bool) -> tuple[str, str]:
+    """Return the primary recommendation focus for an RI coverage gap."""
+    if has_regional_reserved:
+        return ("regional_ri_or_compute_sp", "regional RI or Compute Savings Plan")
+    normalized_azs = {str(az).strip().lower() for az in uncovered_azs if str(az).strip() and str(az).strip().lower() != "unknown"}
+    if len(normalized_azs) >= 2:
+        return ("regional_ri_or_compute_sp", "regional RI or Compute Savings Plan")
+    if len(normalized_azs) == 1:
+        return ("az_scoped_ri_candidate", "AZ-scoped RI")
+    return ("regional_ri_review", "regional RI")
+
+
+def _ri_utilization_focus(*, unused_count: int, reserved_count: int) -> str:
+    """Return the primary recommendation focus for low RI utilization."""
+    if reserved_count > 0 and (float(unused_count) / float(reserved_count)) >= 0.5:
+        return "modification_or_marketplace_review"
+    return "workload_rebalance_review"
+
+
 class EC2ReservedInstancesChecker:
     """Analyze EC2 Reserved Instance coverage and utilization."""
 
@@ -246,6 +265,11 @@ class EC2ReservedInstancesChecker:
             unused = max(0, reserved_count - used_reserved)
             coverage_pct = (100.0 * float(used_reserved) / float(running_count)) if running_count > 0 else 100.0
             utilization_pct = (100.0 * float(used_reserved) / float(reserved_count)) if reserved_count > 0 else 100.0
+            uncovered_azs = {
+                key_az[3]
+                for key_az, count in running_remaining.items()
+                if key_az[:3] == base and int(count) > 0
+            }
 
             monthly_on_demand, pricing_conf, pricing_notes = _cost_for(instance_type)
             coverage_gap_cost = None
@@ -271,6 +295,10 @@ class EC2ReservedInstancesChecker:
             )
 
             if uncovered >= int(max(1, cfg.min_coverage_gap_instances)):
+                optimization_focus, recommended_commitment = _ri_coverage_gap_focus(
+                    uncovered_azs=uncovered_azs,
+                    has_regional_reserved=bool(reserved_regional.get(base, 0)),
+                )
                 findings.append(
                     FindingDraft(
                         check_id="aws.ec2.ri.coverage.gap",
@@ -290,7 +318,7 @@ class EC2ReservedInstancesChecker:
                         ),
                         recommendation=(
                             f"Increase RI coverage for {instance_type} by ~{uncovered} instance(s) after validating "
-                            "steady-state usage and commitment term flexibility."
+                            f"steady-state usage and commitment term flexibility. Start with {recommended_commitment}."
                         ),
                         estimated_monthly_cost=coverage_gap_cost,
                         estimated_monthly_savings=potential_savings,
@@ -309,6 +337,8 @@ class EC2ReservedInstancesChecker:
                             "uncovered_count": str(uncovered),
                             "coverage_pct": f"{coverage_pct:.2f}",
                             "target_coverage_pct": "90.00",
+                            "optimization_focus": optimization_focus,
+                            "recommended_commitment_type": recommended_commitment,
                         },
                         issue_key={
                             "instance_type": instance_type,
@@ -320,6 +350,7 @@ class EC2ReservedInstancesChecker:
                 )
 
             if reserved_count > 0 and unused > 0 and utilization_pct < float(cfg.utilization_low_threshold_pct):
+                optimization_focus = _ri_utilization_focus(unused_count=unused, reserved_count=reserved_count)
                 findings.append(
                     FindingDraft(
                         check_id="aws.ec2.ri.utilization.low",
@@ -358,6 +389,7 @@ class EC2ReservedInstancesChecker:
                             "unused_count": str(unused),
                             "utilization_pct": f"{utilization_pct:.2f}",
                             "target_utilization_pct": f"{cfg.utilization_low_threshold_pct:.2f}",
+                            "optimization_focus": optimization_focus,
                         },
                         issue_key={
                             "instance_type": instance_type,

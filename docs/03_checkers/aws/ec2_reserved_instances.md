@@ -28,6 +28,7 @@ Detect EC2 Reserved Instance commitment inefficiencies:
   - platform
   - tenancy
 - Apply AZ-scoped reservations first, then regional reservations.
+- Coverage and utilization findings now indicate whether AZ-scoped RI, regional RI / Compute SP, workload rebalance, or modification / marketplace review is the stronger next action.
 
 ## Estimation model
 
@@ -46,6 +47,7 @@ Typical read-only permissions:
 
 - Output is deterministic and sorted by key.
 - Matching is best-effort and does not model every RI/SP discount nuance.
+- Recommendation focus is derived from the same running inventory and RI scope data already loaded; no extra API calls are added.
 - Empty and malformed payloads are tolerated without crashing.
 
 ## Related tests

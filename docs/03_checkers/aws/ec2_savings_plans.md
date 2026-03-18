@@ -25,6 +25,7 @@ Detect EC2 Savings Plan commitment opportunities:
 
 - Uses running EC2 inventory and best-effort on-demand pricing to estimate hourly demand.
 - Compares estimated demand to active Savings Plan commitment (`Compute` + `EC2Instance` plans).
+- Coverage and utilization findings now indicate whether the stronger next move is EC2 Instance SP, Compute SP, or future commitment reduction.
 
 ## Estimation model
 
@@ -43,6 +44,7 @@ Typical read-only permissions:
 
 - Deterministic output with stable ordering.
 - Uses estimated EC2 demand baseline; does not replace billing-grade Cost Explorer analytics.
+- Recommendation focus is derived from the same running-instance mix and active plan types already loaded; no extra API calls are added.
 - Malformed commitment values are tolerated and ignored.
 
 ## Related tests
