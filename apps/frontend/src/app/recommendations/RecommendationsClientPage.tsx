@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 
 import { RunCoverageBanner } from "@/components/coverage/RunCoverageBanner";
 import { ResourceGraphContextPanel } from "@/components/graph/ResourceGraphContextPanel";
@@ -97,6 +97,34 @@ function stateBadgeClass(value: string): string {
   return "border-zinc-300 bg-zinc-100 text-zinc-700";
 }
 
+function packageOwnerBadgeClass(isOwner: boolean): string {
+  if (isOwner) {
+    return "border-emerald-300 bg-emerald-50 text-emerald-800";
+  }
+  return "border-amber-300 bg-amber-50 text-amber-800";
+}
+
+function recommendationPackageGroupKey(item: RecommendationItem): string {
+  return item.graph_package?.package_cluster_key ?? item.graph_package?.package_key ?? `item:${item.fingerprint}`;
+}
+
+function recommendationPackageGroupTitle(item: RecommendationItem): string {
+  return item.graph_package?.package_title ?? "Standalone recommendation";
+}
+
+function defaultCollapsedGroupKeys(
+  groups: Array<{
+    key: string;
+    items: RecommendationItem[];
+  }>,
+): Record<string, boolean> {
+  const next: Record<string, boolean> = {};
+  for (const group of groups) {
+    next[group.key] = group.items.length > 1;
+  }
+  return next;
+}
+
 export function RecommendationsClientPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -118,6 +146,9 @@ export function RecommendationsClientPage() {
   const [checkIdInput, setCheckIdInput] = useState(checkIdFilter);
   const [minSavingsInput, setMinSavingsInput] = useState(minSavingsRaw);
   const [selectedFingerprint, setSelectedFingerprint] = useState<string | null>(null);
+  const [hideSuppressed, setHideSuppressed] = useState(false);
+  const [groupByPackage, setGroupByPackage] = useState(true);
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     setSearchInput(queryFilter);
@@ -172,6 +203,52 @@ export function RecommendationsClientPage() {
   const canReadFindings = permissions.has("admin:full") || permissions.has("findings:read");
   const canReadRuns = permissions.has("admin:full") || permissions.has("runs:read");
   const latestCoverage = useRunCoverageLatest(canReadRuns);
+  const recommendationItems = recommendations.data?.items ?? [];
+  const visibleRecommendations = useMemo(
+    () => (hideSuppressed ? recommendationItems.filter((item) => item.is_primary_package_savings_owner) : recommendationItems),
+    [hideSuppressed, recommendationItems],
+  );
+  const recommendationGroups = useMemo(() => {
+    const groups = new Map<
+      string,
+      {
+        key: string;
+        title: string;
+        items: RecommendationItem[];
+        effectiveMonthlySavings: number;
+        suppressedCount: number;
+      }
+    >();
+    for (const item of visibleRecommendations) {
+      const key = recommendationPackageGroupKey(item);
+      const existing = groups.get(key);
+      if (existing) {
+        existing.items.push(item);
+        existing.effectiveMonthlySavings += item.effective_estimated_monthly_savings ?? 0;
+        existing.suppressedCount += item.is_primary_package_savings_owner ? 0 : 1;
+      } else {
+        groups.set(key, {
+          key,
+          title: recommendationPackageGroupTitle(item),
+          items: [item],
+          effectiveMonthlySavings: item.effective_estimated_monthly_savings ?? 0,
+          suppressedCount: item.is_primary_package_savings_owner ? 0 : 1,
+        });
+      }
+    }
+    return Array.from(groups.values());
+  }, [visibleRecommendations]);
+
+  useEffect(() => {
+    setCollapsedGroups((current) => {
+      const defaults = defaultCollapsedGroupKeys(recommendationGroups);
+      const next: Record<string, boolean> = {};
+      for (const group of recommendationGroups) {
+        next[group.key] = current[group.key] ?? defaults[group.key] ?? false;
+      }
+      return next;
+    });
+  }, [recommendationGroups]);
 
   if (!scope) {
     return null;
@@ -185,13 +262,16 @@ export function RecommendationsClientPage() {
   const canPrev = page > 1;
   const canNext = page < totalPages;
   const pageStart = total === 0 ? 0 : offset + 1;
-  const pageEnd = total === 0 ? 0 : Math.min(offset + (recommendations.data?.items.length ?? 0), total);
-  const pageSavings = (recommendations.data?.items ?? []).reduce(
-    (acc, item) => acc + (item.estimated_monthly_savings ?? 0),
+  const pageEnd = total === 0 ? 0 : Math.min(offset + recommendationItems.length, total);
+  const pageSavings = visibleRecommendations.reduce(
+    (acc, item) => acc + (item.effective_estimated_monthly_savings ?? 0),
     0,
   );
-  const approvalRequiredCount = (recommendations.data?.items ?? []).filter(
+  const approvalRequiredCount = visibleRecommendations.filter(
     (item) => item.requires_approval,
+  ).length;
+  const suppressedCount = recommendationItems.filter(
+    (item) => !item.is_primary_package_savings_owner,
   ).length;
 
   function pushWithParams(updates: Record<string, string | null>) {
@@ -220,6 +300,23 @@ export function RecommendationsClientPage() {
 
   function openRecommendation(item: RecommendationItem) {
     setSelectedFingerprint(item.fingerprint);
+  }
+
+  function togglePrimaryOwnersMode() {
+    setHideSuppressed((current) => {
+      const next = !current;
+      if (next) {
+        setGroupByPackage(false);
+      }
+      return next;
+    });
+  }
+
+  function toggleGroupCollapsed(groupKey: string) {
+    setCollapsedGroups((current) => ({
+      ...current,
+      [groupKey]: !current[groupKey],
+    }));
   }
 
   return (
@@ -289,7 +386,7 @@ export function RecommendationsClientPage() {
         </div>
       </header>
 
-      <section className="mb-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+      <section className="mb-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-5">
         <article className="rounded-xl border border-cyan-300/35 bg-slate-900/45 p-3">
           <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-cyan-100/85">Total</p>
           <p className="font-display mt-1 text-2xl font-semibold text-white">{total}</p>
@@ -305,6 +402,10 @@ export function RecommendationsClientPage() {
         <article className="rounded-xl border border-cyan-300/35 bg-slate-900/45 p-3">
           <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-cyan-100/85">Needs Approval</p>
           <p className="font-display mt-1 text-2xl font-semibold text-white">{approvalRequiredCount}</p>
+        </article>
+        <article className="rounded-xl border border-cyan-300/35 bg-slate-900/45 p-3">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-cyan-100/85">Suppressed</p>
+          <p className="font-display mt-1 text-2xl font-semibold text-white">{suppressedCount}</p>
         </article>
       </section>
 
@@ -460,6 +561,34 @@ export function RecommendationsClientPage() {
             >
               Clear
             </button>
+            <label className="ml-auto inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700">
+              <input
+                type="checkbox"
+                checked={hideSuppressed}
+                onChange={(event) => {
+                  setHideSuppressed(event.target.checked);
+                }}
+              />
+              Hide suppressed
+            </label>
+            <label className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700">
+              <input
+                type="checkbox"
+                checked={groupByPackage}
+                onChange={(event) => {
+                  setGroupByPackage(event.target.checked);
+                }}
+                disabled={hideSuppressed}
+              />
+              Group by package
+            </label>
+            <button
+              type="button"
+              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-slate-700 transition hover:bg-slate-100"
+              onClick={togglePrimaryOwnersMode}
+            >
+              {hideSuppressed ? "Show all package members" : "Primary owners only"}
+            </button>
           </div>
         </form>
       </section>
@@ -488,66 +617,219 @@ export function RecommendationsClientPage() {
                 <tr>
                   <th className="px-3 py-2">Priority</th>
                   <th className="px-3 py-2">Recommendation</th>
+                  <th className="px-3 py-2">Package</th>
                   <th className="px-3 py-2">Action Type</th>
-                  <th className="px-3 py-2">Savings / month</th>
+                  <th className="px-3 py-2">Effective Savings / month</th>
                   <th className="px-3 py-2">Confidence</th>
                   <th className="px-3 py-2">Approval</th>
                   <th className="px-3 py-2">State</th>
                 </tr>
               </thead>
               <tbody>
-                {recommendations.data.items.map((item) => (
-                  <tr
-                    key={item.fingerprint}
-                    className={`border-t border-slate-100 transition ${selectedFingerprint === item.fingerprint ? "bg-cyan-50/70" : "hover:bg-slate-50/70"}`}
-                  >
-                    <td className="px-3 py-2">
-                      <span
-                        className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium ${priorityBadgeClass(item.priority)}`}
+                {(groupByPackage ? recommendationGroups : []).map((group) => (
+                  <Fragment key={group.key}>
+                    <tr key={`${group.key}:header`} className="border-t border-slate-200 bg-slate-100/80">
+                      <td className="px-3 py-2" colSpan={8}>
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-3">
+                            <button
+                              type="button"
+                              className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-300 bg-white text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                              onClick={() => {
+                                toggleGroupCollapsed(group.key);
+                              }}
+                              aria-label={collapsedGroups[group.key] ? "Expand package group" : "Collapse package group"}
+                            >
+                              {collapsedGroups[group.key] ? "+" : "-"}
+                            </button>
+                            <div>
+                              <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">Package</p>
+                              <p className="text-sm font-semibold text-slate-900">{group.title}</p>
+                            </div>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2 text-xs text-slate-600">
+                            <span>{group.items.length} item(s)</span>
+                            {group.items.length > 1 ? (
+                              <span>{collapsedGroups[group.key] ? "Collapsed" : "Expanded"}</span>
+                            ) : null}
+                            <span>{formatMoney(group.effectiveMonthlySavings)}</span>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                    {!collapsedGroups[group.key] &&
+                      group.items.map((item) => (
+                      <tr
+                        key={item.fingerprint}
+                        className={`border-t border-slate-100 transition ${selectedFingerprint === item.fingerprint ? "bg-cyan-50/70" : "hover:bg-slate-50/70"}`}
                       >
-                        {item.priority.toUpperCase()}
-                      </span>
-                    </td>
-                    <td className="px-3 py-2">
-                      <button
-                        type="button"
-                        className="text-left font-medium text-cyan-700 underline-offset-2 transition hover:text-cyan-900 hover:underline"
-                        onClick={() => {
-                          openRecommendation(item);
-                        }}
-                      >
-                        {item.title}
-                      </button>
-                      <p className="mt-0.5 text-xs text-zinc-600">
-                        {item.recommendation_type} | {item.service} | {item.check_id}
-                      </p>
-                    </td>
-                    <td className="px-3 py-2">
-                      <span className="inline-flex items-center rounded border border-zinc-300 bg-zinc-100 px-2 py-0.5 text-xs">
-                        {item.action_type}
-                      </span>
-                    </td>
-                    <td className="px-3 py-2">{formatMoney(item.estimated_monthly_savings)}</td>
-                    <td className="px-3 py-2">
-                      <span
-                        className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium ${confidenceBadgeClass(item.confidence_label)}`}
-                      >
-                        {item.confidence}% ({item.confidence_label})
-                      </span>
-                    </td>
-                    <td className="px-3 py-2">{item.requires_approval ? "Required" : "No"}</td>
-                    <td className="px-3 py-2">
-                      <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium ${stateBadgeClass(item.effective_state)}`}>
-                        {item.effective_state}
-                      </span>
-                    </td>
-                  </tr>
+                        <td className="px-3 py-2">
+                          <span
+                            className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium ${priorityBadgeClass(item.priority)}`}
+                          >
+                            {item.priority.toUpperCase()}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2">
+                          <button
+                            type="button"
+                            className="text-left font-medium text-cyan-700 underline-offset-2 transition hover:text-cyan-900 hover:underline"
+                            onClick={() => {
+                              openRecommendation(item);
+                            }}
+                          >
+                            {item.title}
+                          </button>
+                          <p className="mt-0.5 text-xs text-zinc-600">
+                            {item.recommendation_type} | {item.service} | {item.check_id}
+                          </p>
+                        </td>
+                        <td className="px-3 py-2">
+                          <div className="flex flex-col gap-1">
+                            <span
+                              className={`inline-flex w-fit items-center rounded border px-2 py-0.5 text-xs font-medium ${packageOwnerBadgeClass(item.is_primary_package_savings_owner)}`}
+                            >
+                              {item.is_primary_package_savings_owner ? "Primary owner" : "Suppressed"}
+                            </span>
+                            {item.graph_package ? (
+                              <p className="text-xs text-zinc-600">
+                                {item.graph_package.package_title}
+                              </p>
+                            ) : (
+                              <p className="text-xs text-zinc-500">No package context</p>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-3 py-2">
+                          <span className="inline-flex items-center rounded border border-zinc-300 bg-zinc-100 px-2 py-0.5 text-xs">
+                            {item.action_type}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2">
+                          <div className="flex flex-col gap-0.5">
+                            <span>{formatMoney(item.effective_estimated_monthly_savings)}</span>
+                            {!item.is_primary_package_savings_owner ? (
+                              <span className="text-xs text-amber-700">
+                                Counted in {item.suppressed_by_fingerprint}
+                              </span>
+                            ) : item.graph_package?.package_estimated_monthly_savings !== null &&
+                              item.graph_package?.package_estimated_monthly_savings !== undefined &&
+                              item.graph_package.package_estimated_monthly_savings !== item.estimated_monthly_savings ? (
+                              <span className="text-xs text-zinc-500">
+                                Package total {formatMoney(item.graph_package.package_estimated_monthly_savings)}
+                              </span>
+                            ) : (
+                              <span className="text-xs text-zinc-500">
+                                Raw {formatMoney(item.estimated_monthly_savings)}
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-3 py-2">
+                          <span
+                            className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium ${confidenceBadgeClass(item.confidence_label)}`}
+                          >
+                            {item.confidence}% ({item.confidence_label})
+                          </span>
+                        </td>
+                        <td className="px-3 py-2">{item.requires_approval ? "Required" : "No"}</td>
+                        <td className="px-3 py-2">
+                          <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium ${stateBadgeClass(item.effective_state)}`}>
+                            {item.effective_state}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </Fragment>
                 ))}
+                {!groupByPackage &&
+                  visibleRecommendations.map((item) => (
+                    <tr
+                      key={item.fingerprint}
+                      className={`border-t border-slate-100 transition ${selectedFingerprint === item.fingerprint ? "bg-cyan-50/70" : "hover:bg-slate-50/70"}`}
+                    >
+                      <td className="px-3 py-2">
+                        <span
+                          className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium ${priorityBadgeClass(item.priority)}`}
+                        >
+                          {item.priority.toUpperCase()}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2">
+                        <button
+                          type="button"
+                          className="text-left font-medium text-cyan-700 underline-offset-2 transition hover:text-cyan-900 hover:underline"
+                          onClick={() => {
+                            openRecommendation(item);
+                          }}
+                        >
+                          {item.title}
+                        </button>
+                        <p className="mt-0.5 text-xs text-zinc-600">
+                          {item.recommendation_type} | {item.service} | {item.check_id}
+                        </p>
+                      </td>
+                      <td className="px-3 py-2">
+                        <div className="flex flex-col gap-1">
+                          <span
+                            className={`inline-flex w-fit items-center rounded border px-2 py-0.5 text-xs font-medium ${packageOwnerBadgeClass(item.is_primary_package_savings_owner)}`}
+                          >
+                            {item.is_primary_package_savings_owner ? "Primary owner" : "Suppressed"}
+                          </span>
+                          {item.graph_package ? (
+                            <p className="text-xs text-zinc-600">
+                              {item.graph_package.package_title}
+                            </p>
+                          ) : (
+                            <p className="text-xs text-zinc-500">No package context</p>
+                          )}
+                        </div>
+                      </td>
+                      <td className="px-3 py-2">
+                        <span className="inline-flex items-center rounded border border-zinc-300 bg-zinc-100 px-2 py-0.5 text-xs">
+                          {item.action_type}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2">
+                        <div className="flex flex-col gap-0.5">
+                          <span>{formatMoney(item.effective_estimated_monthly_savings)}</span>
+                          {!item.is_primary_package_savings_owner ? (
+                            <span className="text-xs text-amber-700">
+                              Counted in {item.suppressed_by_fingerprint}
+                            </span>
+                          ) : item.graph_package?.package_estimated_monthly_savings !== null &&
+                            item.graph_package?.package_estimated_monthly_savings !== undefined &&
+                            item.graph_package.package_estimated_monthly_savings !== item.estimated_monthly_savings ? (
+                            <span className="text-xs text-zinc-500">
+                              Package total {formatMoney(item.graph_package.package_estimated_monthly_savings)}
+                            </span>
+                          ) : (
+                            <span className="text-xs text-zinc-500">
+                              Raw {formatMoney(item.estimated_monthly_savings)}
+                            </span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="px-3 py-2">
+                        <span
+                          className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium ${confidenceBadgeClass(item.confidence_label)}`}
+                        >
+                          {item.confidence}% ({item.confidence_label})
+                        </span>
+                      </td>
+                      <td className="px-3 py-2">{item.requires_approval ? "Required" : "No"}</td>
+                      <td className="px-3 py-2">
+                        <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium ${stateBadgeClass(item.effective_state)}`}>
+                          {item.effective_state}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
               </tbody>
             </table>
           </div>
 
-          {recommendations.data.items.length === 0 ? (
+          {visibleRecommendations.length === 0 ? (
             <p className="mt-3 rounded-xl bg-white/80 px-3 py-2 text-sm text-slate-600">
               No recommendations match the current filters.
             </p>
@@ -624,11 +906,47 @@ export function RecommendationsClientPage() {
               <p><span className="font-medium">Detected:</span> {formatUtcDateTime(selectedRecommendation.detected_at)}</p>
               <p><span className="font-medium">Region:</span> {selectedRecommendation.region ?? "-"}</p>
               <p><span className="font-medium">Account:</span> {selectedRecommendation.account_id ?? "-"}</p>
-              <p><span className="font-medium">Monthly Savings:</span> {formatMoney(selectedRecommendation.estimated_monthly_savings)}</p>
-              <p><span className="font-medium">Annual Savings:</span> {formatMoney(selectedRecommendation.estimated_annual_savings)}</p>
+              <p><span className="font-medium">Monthly Savings:</span> {formatMoney(selectedRecommendation.effective_estimated_monthly_savings)}</p>
+              <p><span className="font-medium">Annual Savings:</span> {formatMoney(selectedRecommendation.effective_estimated_annual_savings)}</p>
               <p><span className="font-medium">Confidence:</span> {selectedRecommendation.confidence}% ({selectedRecommendation.confidence_label})</p>
               <p><span className="font-medium">Approval:</span> {selectedRecommendation.requires_approval ? "Required" : "Not required"}</p>
             </div>
+
+            <section className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <h3 className="text-sm font-semibold text-slate-900">Package Context</h3>
+              {selectedRecommendation.graph_package ? (
+                <div className="mt-2 space-y-2 text-sm text-slate-700">
+                  <p><span className="font-medium">Package:</span> {selectedRecommendation.graph_package.package_title}</p>
+                  <p><span className="font-medium">Reason:</span> {selectedRecommendation.graph_package.package_reason}</p>
+                  <p>
+                    <span className="font-medium">Ownership:</span>{" "}
+                    {selectedRecommendation.is_primary_package_savings_owner
+                      ? "This item owns package savings."
+                      : `Savings are owned by ${selectedRecommendation.suppressed_by_fingerprint ?? "another item"}.`}
+                  </p>
+                  <p>
+                    <span className="font-medium">Blast Radius:</span>{" "}
+                    {selectedRecommendation.graph_package.blast_radius} ({selectedRecommendation.graph_package.related_resource_count} related resource(s))
+                  </p>
+                  <p>
+                    <span className="font-medium">Related Services:</span>{" "}
+                    {selectedRecommendation.graph_package.related_services.length > 0
+                      ? selectedRecommendation.graph_package.related_services.join(", ")
+                      : "-"}
+                  </p>
+                  <div>
+                    <p className="font-medium">Dependency Checklist</p>
+                    <ul className="mt-1 list-disc pl-5 text-sm text-slate-700">
+                      {selectedRecommendation.graph_package.dependency_checklist.map((entry) => (
+                        <li key={entry}>{entry}</li>
+                      ))}
+                    </ul>
+                  </div>
+                </div>
+              ) : (
+                <p className="mt-1 text-sm text-slate-600">No graph package context is available for this recommendation.</p>
+              )}
+            </section>
 
             <section className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
               <h3 className="text-sm font-semibold text-slate-900">Why This Recommendation</h3>

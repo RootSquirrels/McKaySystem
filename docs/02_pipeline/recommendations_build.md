@@ -13,6 +13,13 @@ In this system:
 2. Ingest persists findings into `finding_latest` / `finding_current`.
 3. `/api/recommendations*` derives normalized **action plans** from `finding_current`
    using recommendation rules in `apps/flask_api/blueprints/recommendations.py`.
+4. When current resource graph data exists, recommendation items may also include
+   bounded `graph_package` context derived from `resource_graph_*_current` to
+   show related resources, likely blast radius, package title, and dependency
+   checklist.
+5. When multiple recommendation items fall into the same graph-backed package
+   cluster, the API may assign one primary savings owner and expose suppression
+   metadata so clients can avoid double-counting overlapping savings.
 
 There is currently no separate worker "recommendations build step" table.
 
@@ -51,6 +58,15 @@ Invoke-RestMethod `
    - not workflow-contract
 2. `recommendations API item`:
    - normalized plan (`recommendation_type`, `action_type`, `target`, `priority`, `requires_approval`)
+   - optional bounded `graph_package` context for related-resource packaging
+     including package semantics such as `package_kind`, `package_title`,
+     `package_reason`, `related_services`, and `dependency_checklist`
+   - optional package-level savings metadata such as:
+     - `is_primary_package_savings_owner`
+     - `suppressed_by_fingerprint`
+     - `effective_estimated_monthly_savings`
+     - `graph_package.package_estimated_monthly_savings`
+     - `graph_package.savings_owner_fingerprint`
    - workflow-contract for queueing/approval/remediation
 
 ## Future option (if needed)

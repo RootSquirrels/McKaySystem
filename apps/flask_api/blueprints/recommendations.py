@@ -3,12 +3,14 @@
 Provides recommendation endpoints for FinOps optimization opportunities.
 """
 
+from collections import defaultdict
 from typing import Any
 
 from flask import Blueprint, request
 
 from apps.backend.db import db_conn, fetch_all_dict_conn, fetch_one_dict_conn
 from apps.flask_api.auth_middleware import require_permission
+from apps.flask_api.graph_context import graph_resource_key_from_payload
 from apps.flask_api.utils import (
     _coerce_non_negative_int,
     _coerce_optional_float,
@@ -186,6 +188,8 @@ _RECOMMENDATION_DEFAULT_RULE: dict[str, Any] = {
     "requires_approval": False,
 }
 
+_GRAPH_PACKAGE_SAMPLE_LIMIT = 3
+
 
 def _checker_advice(payload: dict[str, Any]) -> str:
     """Return checker-authored guidance text from canonical/adaptive payload fields."""
@@ -193,6 +197,460 @@ def _checker_advice(payload: dict[str, Any]) -> str:
     if advice:
         return advice
     return str(payload.get("recommendation") or "").strip()
+
+
+def _row_graph_resource_key(row: dict[str, Any]) -> str | None:
+    """Return the primary graph resource key for one recommendation row."""
+
+    payload = _payload_dict(row.get("payload"))
+    return graph_resource_key_from_payload(
+        payload,
+        account_id=str(row.get("account_id") or ""),
+        region=str(row.get("region") or ""),
+        service=str(row.get("service") or ""),
+    )
+
+
+def _package_kind_for_row(row: dict[str, Any], sample_neighbors: list[dict[str, Any]]) -> str:
+    """Return a deterministic package kind for one recommendation row."""
+
+    recommendation_type = str(_RECOMMENDATION_RULES.get(str(row.get("check_id") or ""), _RECOMMENDATION_DEFAULT_RULE)["recommendation_type"])
+    neighbor_types = {str(neighbor.get("resource_type") or "") for neighbor in sample_neighbors}
+    edge_types = {str(neighbor.get("edge_type") or "") for neighbor in sample_neighbors}
+
+    if recommendation_type == "cleanup.nat.gateway":
+        return "nat_dependency_package"
+    if "load_balancer" in neighbor_types or "target_group" in neighbor_types or "forwards_to" in edge_types:
+        return "ingress_dependency_package"
+    if "volume" in neighbor_types or "attached_to" in edge_types:
+        return "storage_lineage_package"
+    if recommendation_type.startswith("rightsizing.ec2") or "instance" in neighbor_types:
+        return "compute_dependency_package"
+    if recommendation_type.startswith("storage."):
+        return "storage_dependency_package"
+    return "resource_context_package"
+
+
+def _sorted_related_services(sample_neighbors: list[dict[str, Any]]) -> list[str]:
+    """Return stable related service ids from neighbor samples."""
+
+    return sorted(
+        {
+            str(neighbor.get("service") or "").strip()
+            for neighbor in sample_neighbors
+            if str(neighbor.get("service") or "").strip()
+        }
+    )
+
+
+def _package_reason(package_kind: str, total_neighbors: int) -> str:
+    """Return a deterministic explanation for the package."""
+
+    if package_kind == "nat_dependency_package":
+        return (
+            f"Graph context found {total_neighbors} directly related network resource(s), so NAT cleanup should be "
+            "validated against routing dependencies first."
+        )
+    if package_kind == "ingress_dependency_package":
+        return (
+            f"Graph context found {total_neighbors} directly related ingress resource(s), so the recommendation "
+            "should be reviewed as part of the load balancer and target chain."
+        )
+    if package_kind == "storage_lineage_package":
+        return (
+            f"Graph context found {total_neighbors} directly related storage lineage resource(s), so cleanup should "
+            "be validated against attached compute and recovery dependencies."
+        )
+    if package_kind == "compute_dependency_package":
+        return (
+            f"Graph context found {total_neighbors} directly related compute dependency resource(s), so rightsizing "
+            "or cleanup should be reviewed in workload context."
+        )
+    if package_kind == "storage_dependency_package":
+        return (
+            f"Graph context found {total_neighbors} directly related storage resource(s), so the recommendation "
+            "should be packaged with adjacent storage dependencies."
+        )
+    return f"Graph context found {total_neighbors} directly related resource(s) for this recommendation."
+
+
+def _package_title(package_kind: str) -> str:
+    """Return a short package title."""
+
+    titles = {
+        "nat_dependency_package": "Validate NAT routing dependencies before cleanup",
+        "ingress_dependency_package": "Review ingress dependency chain before remediation",
+        "storage_lineage_package": "Validate storage lineage before cleanup",
+        "compute_dependency_package": "Review compute dependencies before remediation",
+        "storage_dependency_package": "Review storage dependencies before remediation",
+        "resource_context_package": "Review related resources before remediation",
+    }
+    return titles.get(package_kind, "Review related resources before remediation")
+
+
+def _dependency_checklist(package_kind: str, sample_neighbors: list[dict[str, Any]]) -> list[str]:
+    """Return a stable bounded checklist for the package kind."""
+
+    neighbor_types = {str(neighbor.get("resource_type") or "") for neighbor in sample_neighbors}
+    edge_types = {str(neighbor.get("edge_type") or "") for neighbor in sample_neighbors}
+
+    if package_kind == "nat_dependency_package":
+        checklist = [
+            "Confirm private subnets have alternate egress or required VPC endpoints before deletion.",
+            "Validate route paths that still traverse this NAT gateway.",
+        ]
+        if "subnet" in neighbor_types or "routes_via" in edge_types:
+            checklist.append("Review impacted subnets and their outbound dependency paths.")
+        return checklist
+
+    if package_kind == "ingress_dependency_package":
+        checklist = [
+            "Validate target groups, listeners, and downstream compute before deleting or consolidating ingress.",
+            "Confirm health-check and forwarding configuration is intentionally removable.",
+        ]
+        if "target_group" in neighbor_types or "routes_to" in edge_types:
+            checklist.append("Check whether traffic is still expected to route through attached target groups.")
+        return checklist
+
+    if package_kind == "storage_lineage_package":
+        checklist = [
+            "Confirm attached or recently related compute no longer requires this storage asset.",
+            "Snapshot or preserve recovery lineage before deletion where required.",
+        ]
+        if "instance" in neighbor_types or "attached_to" in edge_types:
+            checklist.append("Verify instance lineage and mount expectations before cleanup.")
+        return checklist
+
+    if package_kind == "compute_dependency_package":
+        return [
+            "Validate workload dependencies and rollback path before rightsizing or cleanup.",
+            "Confirm adjacent storage and network dependencies are still compatible with the target state.",
+        ]
+
+    return [
+        "Review directly related resources before applying the remediation.",
+        "Validate rollback and owner alignment for connected infrastructure.",
+    ]
+
+
+def _build_graph_package(
+    *,
+    row: dict[str, Any],
+    resource_key: str,
+    sample_neighbors: list[dict[str, Any]],
+    total_neighbors: int,
+) -> dict[str, Any]:
+    """Build one graph-aware package summary for a recommendation row."""
+
+    package_kind = _package_kind_for_row(row, sample_neighbors)
+    return {
+        "package_key": f"pkg:{resource_key}",
+        "package_kind": package_kind,
+        "package_title": _package_title(package_kind),
+        "package_reason": _package_reason(package_kind, total_neighbors),
+        "related_resource_count": total_neighbors,
+        "blast_radius": _blast_radius_for_neighbors(total_neighbors),
+        "related_services": _sorted_related_services(sample_neighbors),
+        "dependency_checklist": _dependency_checklist(package_kind, sample_neighbors),
+        "sample_related_resources": sample_neighbors,
+    }
+
+
+def _cluster_package_rows(
+    *,
+    rows_by_resource_key: dict[str, list[dict[str, Any]]],
+    package_kind_by_resource_key: dict[str, str],
+    related_resource_keys_by_root: dict[str, set[str]],
+) -> dict[str, set[str]]:
+    """Build deterministic package clusters from overlapping graph neighborhoods."""
+
+    resource_keys = sorted(rows_by_resource_key)
+    parents = {resource_key: resource_key for resource_key in resource_keys}
+
+    def _find(resource_key: str) -> str:
+        while parents[resource_key] != resource_key:
+            parents[resource_key] = parents[parents[resource_key]]
+            resource_key = parents[resource_key]
+        return resource_key
+
+    def _union(left: str, right: str) -> None:
+        left_root = _find(left)
+        right_root = _find(right)
+        if left_root == right_root:
+            return
+        if left_root < right_root:
+            parents[right_root] = left_root
+        else:
+            parents[left_root] = right_root
+
+    for idx, left in enumerate(resource_keys):
+        left_kind = package_kind_by_resource_key.get(left, "")
+        left_related = related_resource_keys_by_root.get(left, {left})
+        for right in resource_keys[idx + 1 :]:
+            if package_kind_by_resource_key.get(right, "") != left_kind:
+                continue
+            right_related = related_resource_keys_by_root.get(right, {right})
+            if left_related.intersection(right_related):
+                _union(left, right)
+
+    clusters: dict[str, set[str]] = defaultdict(set)
+    for resource_key in resource_keys:
+        clusters[_find(resource_key)].add(resource_key)
+    return clusters
+
+
+def _row_confidence_for_sort(row: dict[str, Any]) -> int:
+    """Return one row confidence value for deterministic owner selection."""
+
+    payload = _payload_dict(row.get("payload"))
+    check_id = str(row.get("check_id") or "")
+    rule = _RECOMMENDATION_RULES.get(check_id, _RECOMMENDATION_DEFAULT_RULE)
+    confidence = _payload_estimated_confidence(payload)
+    if confidence is None:
+        confidence = int(rule.get("confidence") or 0)
+    return int(confidence)
+
+
+def _choose_cluster_owner(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Choose the deterministic savings owner for one package cluster."""
+
+    return sorted(
+        rows,
+        key=lambda row: (
+            -_as_float(row.get("estimated_monthly_savings"), default=0.0),
+            -_row_confidence_for_sort(row),
+            str(row.get("fingerprint") or ""),
+        ),
+    )[0]
+
+
+def _apply_package_savings_ownership(
+    *,
+    rows_by_resource_key: dict[str, list[dict[str, Any]]],
+    graph_packages: dict[str, dict[str, Any]],
+    package_kind_by_resource_key: dict[str, str],
+    related_resource_keys_by_root: dict[str, set[str]],
+) -> None:
+    """Annotate graph packages with package-level savings ownership metadata."""
+
+    clusters = _cluster_package_rows(
+        rows_by_resource_key=rows_by_resource_key,
+        package_kind_by_resource_key=package_kind_by_resource_key,
+        related_resource_keys_by_root=related_resource_keys_by_root,
+    )
+
+    for cluster_root in sorted(clusters):
+        cluster_resource_keys = sorted(clusters[cluster_root])
+        cluster_rows: list[dict[str, Any]] = []
+        for resource_key in cluster_resource_keys:
+            cluster_rows.extend(rows_by_resource_key.get(resource_key, []))
+        if not cluster_rows:
+            continue
+
+        owner_row = _choose_cluster_owner(cluster_rows)
+        owner_fingerprint = str(owner_row.get("fingerprint") or "")
+        package_monthly_savings = round(
+            sum(_as_float(row.get("estimated_monthly_savings"), default=0.0) for row in cluster_rows),
+            2,
+        )
+        package_annual_savings = round(package_monthly_savings * 12.0, 2)
+        suppressed_fingerprints = sorted(
+            {
+                str(row.get("fingerprint") or "")
+                for row in cluster_rows
+                if str(row.get("fingerprint") or "") and str(row.get("fingerprint") or "") != owner_fingerprint
+            }
+        )
+        package_cluster_key = f"pkgcluster:{cluster_root}"
+
+        for resource_key in cluster_resource_keys:
+            package = graph_packages.get(resource_key)
+            if package is None:
+                continue
+            package["package_cluster_key"] = package_cluster_key
+            package["package_estimated_monthly_savings"] = package_monthly_savings
+            package["package_estimated_annual_savings"] = package_annual_savings
+            package["savings_owner_fingerprint"] = owner_fingerprint
+            package["suppressed_fingerprints"] = suppressed_fingerprints
+
+    for resource_key, rows in rows_by_resource_key.items():
+        package = graph_packages.get(resource_key)
+        if package is None:
+            continue
+        owner_fingerprint = str(package.get("savings_owner_fingerprint") or "")
+        package_monthly_savings = _as_float(package.get("package_estimated_monthly_savings"), default=0.0)
+        package_annual_savings = _as_float(package.get("package_estimated_annual_savings"), default=0.0)
+        for row in rows:
+            fingerprint = str(row.get("fingerprint") or "")
+            is_owner = fingerprint == owner_fingerprint
+            row["_graph_package_owner"] = is_owner
+            row["_effective_estimated_monthly_savings"] = package_monthly_savings if is_owner else 0.0
+            row["_effective_estimated_annual_savings"] = package_annual_savings if is_owner else 0.0
+            row["_suppressed_by_fingerprint"] = None if is_owner else owner_fingerprint
+
+
+def _blast_radius_for_neighbors(total_neighbors: int) -> str:
+    """Return a bounded blast-radius hint from graph neighborhood size."""
+
+    if total_neighbors >= 6:
+        return "high"
+    if total_neighbors >= 3:
+        return "medium"
+    return "low"
+
+
+def _load_graph_packages_for_rows(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    rows: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Load bounded graph package summaries for recommendation rows."""
+
+    rows_by_resource_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        resource_key = _row_graph_resource_key(row)
+        if resource_key:
+            rows_by_resource_key[resource_key].append(row)
+
+    if not rows_by_resource_key:
+        return {}
+
+    resource_keys = sorted(rows_by_resource_key)
+    graph_rows = fetch_all_dict_conn(
+        conn,
+        """
+        WITH relevant AS (
+          SELECT
+            CASE
+              WHEN e.from_resource_key = ANY(%s) THEN e.from_resource_key
+              ELSE e.to_resource_key
+            END AS root_resource_key,
+            e.edge_type,
+            e.source_kind,
+            e.confidence,
+            CASE
+              WHEN e.from_resource_key = ANY(%s) THEN e.to_resource_key
+              ELSE e.from_resource_key
+            END AS neighbor_resource_key,
+            n.service AS neighbor_service,
+            n.resource_type AS neighbor_resource_type,
+            n.resource_name AS neighbor_resource_name
+          FROM resource_graph_edges_current e
+          JOIN resource_graph_nodes_current n
+            ON n.tenant_id = e.tenant_id
+           AND n.workspace = e.workspace
+           AND n.resource_key = CASE
+             WHEN e.from_resource_key = ANY(%s) THEN e.to_resource_key
+             ELSE e.from_resource_key
+           END
+          WHERE e.tenant_id = %s
+            AND e.workspace = %s
+            AND (e.from_resource_key = ANY(%s) OR e.to_resource_key = ANY(%s))
+        ),
+        ranked AS (
+          SELECT
+            root_resource_key,
+            edge_type,
+            source_kind,
+            confidence,
+            neighbor_resource_key,
+            neighbor_service,
+            neighbor_resource_type,
+            neighbor_resource_name,
+            ROW_NUMBER() OVER (
+              PARTITION BY root_resource_key
+              ORDER BY
+                CASE source_kind
+                  WHEN 'api_direct' THEN 0
+                  WHEN 'derived' THEN 1
+                  WHEN 'inferred' THEN 2
+                  ELSE 3
+                END,
+                CASE confidence
+                  WHEN 'high' THEN 0
+                  WHEN 'medium' THEN 1
+                  WHEN 'low' THEN 2
+                  ELSE 3
+                END,
+                edge_type,
+                neighbor_resource_key
+            ) AS rn,
+            COUNT(*) OVER (PARTITION BY root_resource_key) AS total_neighbors
+          FROM relevant
+        )
+        SELECT
+          root_resource_key,
+          edge_type,
+          source_kind,
+          confidence,
+          neighbor_resource_key,
+          neighbor_service,
+          neighbor_resource_type,
+          neighbor_resource_name,
+          total_neighbors
+        FROM ranked
+        WHERE rn <= %s
+        ORDER BY root_resource_key, rn
+        """,
+        (
+            resource_keys,
+            resource_keys,
+            resource_keys,
+            tenant_id,
+            workspace,
+            resource_keys,
+            resource_keys,
+            _GRAPH_PACKAGE_SAMPLE_LIMIT,
+        ),
+    )
+
+    grouped_neighbors: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    total_neighbors_by_root: dict[str, int] = {}
+    related_resource_keys_by_root: dict[str, set[str]] = defaultdict(set)
+    for graph_row in graph_rows:
+        root_resource_key = str(graph_row.get("root_resource_key") or "").strip()
+        if not root_resource_key:
+            continue
+        total_neighbors_by_root[root_resource_key] = int(graph_row.get("total_neighbors") or 0)
+        related_resource_keys_by_root[root_resource_key].add(root_resource_key)
+        neighbor_resource_key = str(graph_row.get("neighbor_resource_key") or "").strip()
+        if neighbor_resource_key:
+            related_resource_keys_by_root[root_resource_key].add(neighbor_resource_key)
+        grouped_neighbors[root_resource_key].append(
+            {
+                "resource_key": graph_row.get("neighbor_resource_key"),
+                "service": graph_row.get("neighbor_service"),
+                "resource_type": graph_row.get("neighbor_resource_type"),
+                "resource_name": graph_row.get("neighbor_resource_name"),
+                "edge_type": graph_row.get("edge_type"),
+                "source_kind": graph_row.get("source_kind"),
+                "confidence": graph_row.get("confidence"),
+            }
+        )
+
+    packages: dict[str, dict[str, Any]] = {}
+    package_kind_by_resource_key: dict[str, str] = {}
+    for resource_key, related_rows in rows_by_resource_key.items():
+        sample_neighbors = grouped_neighbors.get(resource_key, [])
+        if not sample_neighbors:
+            continue
+        total_neighbors = total_neighbors_by_root.get(resource_key, len(sample_neighbors))
+        package_kind_by_resource_key[resource_key] = _package_kind_for_row(related_rows[0], sample_neighbors)
+        packages[resource_key] = _build_graph_package(
+            row=related_rows[0],
+            resource_key=resource_key,
+            sample_neighbors=sample_neighbors,
+            total_neighbors=total_neighbors,
+        )
+    _apply_package_savings_ownership(
+        rows_by_resource_key=rows_by_resource_key,
+        graph_packages=packages,
+        package_kind_by_resource_key=package_kind_by_resource_key,
+        related_resource_keys_by_root=related_resource_keys_by_root,
+    )
+    return packages
 
 
 def _build_recommendations_where_from_values(
@@ -318,7 +776,11 @@ def _build_estimate_risk_warnings(
     return warnings
 
 
-def _build_recommendation_item(row: dict[str, Any]) -> dict[str, Any]:
+def _build_recommendation_item(
+    row: dict[str, Any],
+    *,
+    graph_packages: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Convert a finding_current row to a recommendation item payload."""
     check_id = str(row.get("check_id") or "")
     rule = _RECOMMENDATION_RULES.get(check_id, _RECOMMENDATION_DEFAULT_RULE)
@@ -436,6 +898,19 @@ def _build_recommendation_item(row: dict[str, Any]) -> dict[str, Any]:
                 "through workload alignment and commitment planning."
             )
 
+    resource_key = _row_graph_resource_key(row)
+    graph_package = None
+    if resource_key and graph_packages:
+        graph_package = graph_packages.get(resource_key)
+    effective_monthly_savings = _as_float(
+        row.get("_effective_estimated_monthly_savings"),
+        default=monthly_savings,
+    )
+    effective_annual_savings = _as_float(
+        row.get("_effective_estimated_annual_savings"),
+        default=annual_savings,
+    )
+
     return {
         "fingerprint": row.get("fingerprint"),
         "check_id": check_id,
@@ -459,6 +934,8 @@ def _build_recommendation_item(row: dict[str, Any]) -> dict[str, Any]:
         },
         "estimated_monthly_savings": monthly_savings,
         "estimated_annual_savings": annual_savings,
+        "effective_estimated_monthly_savings": effective_monthly_savings,
+        "effective_estimated_annual_savings": effective_annual_savings,
         "confidence": confidence,
         "confidence_label": "high" if confidence >= 80 else ("medium" if confidence >= 60 else "low"),
         "pricing_source": pricing_source,
@@ -468,6 +945,10 @@ def _build_recommendation_item(row: dict[str, Any]) -> dict[str, Any]:
         "account_id": row.get("account_id"),
         "detected_at": row.get("detected_at"),
         "effective_state": row.get("effective_state"),
+        "is_primary_package_savings_owner": bool(row.get("_graph_package_owner", True)),
+        "suppressed_by_fingerprint": row.get("_suppressed_by_fingerprint"),
+        "resource_key": resource_key,
+        "graph_package": graph_package,
         "payload": payload,
     }
 
@@ -530,8 +1011,14 @@ def api_recommendations() -> Any:
                 f"SELECT COUNT(*) AS n FROM finding_current fc WHERE {' AND '.join(where)}",
                 params,
             )
+            graph_packages = _load_graph_packages_for_rows(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                rows=rows,
+            )
 
-        items = [_build_recommendation_item(row) for row in rows]
+        items = [_build_recommendation_item(row, graph_packages=graph_packages) for row in rows]
         return _ok(
             {
                 "tenant_id": tenant_id,
@@ -720,9 +1207,15 @@ def api_recommendations_estimate() -> Any:
                 f"SELECT COUNT(*) AS n FROM finding_current fc WHERE {' AND '.join(where)}",
                 params,
             )
+            graph_packages = _load_graph_packages_for_rows(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                rows=rows,
+            )
 
-        items = [_build_recommendation_item(row) for row in rows]
-        total_monthly_savings = round(sum(_as_float(item.get("estimated_monthly_savings")) for item in items), 2)
+        items = [_build_recommendation_item(row, graph_packages=graph_packages) for row in rows]
+        total_monthly_savings = round(sum(_as_float(item.get("effective_estimated_monthly_savings")) for item in items), 2)
         total_annual_savings = round(total_monthly_savings * 12.0, 2)
         pricing_versions = sorted(
             {

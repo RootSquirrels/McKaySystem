@@ -151,6 +151,335 @@ def test_recommendations_response_is_enriched(monkeypatch) -> None:  # type: ign
     assert item.get("estimated_annual_savings") == 1206.0
 
 
+def test_recommendations_response_includes_graph_package_context(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Recommendations should include bounded graph package context when available."""
+    _disable_runtime_guards(monkeypatch)
+
+    def _fake_fetch_all(_conn: object, sql: str, _params: Sequence[Any] | None = None) -> list[dict[str, Any]]:
+        if "resource_graph_edges_current" in sql:
+            return [
+                {
+                    "root_resource_key": "aws:111111111111:us-east-1:ec2:instance:i-123",
+                    "edge_type": "attached_to",
+                    "source_kind": "api_direct",
+                    "confidence": "high",
+                    "neighbor_resource_key": "aws:111111111111:us-east-1:ec2:volume:vol-123",
+                    "neighbor_service": "ec2",
+                    "neighbor_resource_type": "volume",
+                    "neighbor_resource_name": "data-volume",
+                    "total_neighbors": 4,
+                },
+                {
+                    "root_resource_key": "aws:111111111111:us-east-1:ec2:instance:i-123",
+                    "edge_type": "member_of",
+                    "source_kind": "derived",
+                    "confidence": "high",
+                    "neighbor_resource_key": "aws:111111111111:us-east-1:vpc:subnet:subnet-123",
+                    "neighbor_service": "vpc",
+                    "neighbor_resource_type": "subnet",
+                    "neighbor_resource_name": "app-subnet-a",
+                    "total_neighbors": 4,
+                },
+            ]
+        return [
+            {
+                "fingerprint": "fp-graph",
+                "check_id": "aws.ec2.instances.underutilized",
+                "service": "ec2",
+                "severity": "medium",
+                "category": "rightsizing",
+                "title": "EC2 instance underutilized",
+                "estimated_monthly_savings": 40.0,
+                "region": "us-east-1",
+                "account_id": "111111111111",
+                "detected_at": "2026-02-14T00:00:00Z",
+                "effective_state": "open",
+                "payload": {
+                    "scope": {
+                        "account_id": "111111111111",
+                        "region": "us-east-1",
+                        "service": "ec2",
+                        "resource_type": "instance",
+                        "resource_id": "i-123",
+                    },
+                    "dimensions": {
+                        "instance_type": "m5.2xlarge",
+                        "recommended_instance_type": "m5.xlarge",
+                    },
+                },
+            }
+        ]
+
+    def _fake_fetch_one(_conn: object, _sql: str, _params: Sequence[Any] | None = None) -> dict[str, Any]:
+        return {"n": 1}
+
+    monkeypatch.setattr(flask_app, "fetch_all_dict_conn", _fake_fetch_all)
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+
+    client = flask_app.app.test_client()
+    resp = client.get("/api/recommendations?tenant_id=acme&workspace=prod")
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 200
+    item = (payload.get("items") or [])[0]
+    assert item.get("resource_key") == "aws:111111111111:us-east-1:ec2:instance:i-123"
+    graph_package = item.get("graph_package") or {}
+    assert graph_package.get("package_kind") == "storage_lineage_package"
+    assert graph_package.get("package_title") == "Validate storage lineage before cleanup"
+    assert graph_package.get("related_resource_count") == 4
+    assert graph_package.get("blast_radius") == "medium"
+    assert graph_package.get("related_services") == ["ec2", "vpc"]
+    checklist = graph_package.get("dependency_checklist") or []
+    assert "Confirm attached or recently related compute no longer requires this storage asset." in checklist
+    assert "Verify instance lineage and mount expectations before cleanup." in checklist
+    sample_related = graph_package.get("sample_related_resources") or []
+    assert len(sample_related) == 2
+    assert sample_related[0].get("resource_type") == "volume"
+
+
+def test_recommendations_response_uses_nat_specific_graph_package(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """NAT recommendations should expose a NAT-specific graph package title and checklist."""
+    _disable_runtime_guards(monkeypatch)
+
+    def _fake_fetch_all(_conn: object, sql: str, _params: Sequence[Any] | None = None) -> list[dict[str, Any]]:
+        if "resource_graph_edges_current" in sql:
+            return [
+                {
+                    "root_resource_key": "aws:111111111111:eu-west-1:vpc:nat_gateway:nat-123",
+                    "edge_type": "routes_via",
+                    "source_kind": "api_direct",
+                    "confidence": "high",
+                    "neighbor_resource_key": "aws:111111111111:eu-west-1:vpc:subnet:subnet-123",
+                    "neighbor_service": "vpc",
+                    "neighbor_resource_type": "subnet",
+                    "neighbor_resource_name": "private-a",
+                    "total_neighbors": 2,
+                }
+            ]
+        return [
+            {
+                "fingerprint": "fp-nat",
+                "check_id": "aws.ec2.nat.gateways.idle",
+                "service": "ec2",
+                "severity": "high",
+                "category": "cost",
+                "title": "Idle NAT gateway",
+                "estimated_monthly_savings": 32.4,
+                "region": "eu-west-1",
+                "account_id": "111111111111",
+                "detected_at": "2026-02-14T00:00:00Z",
+                "effective_state": "open",
+                "payload": {
+                    "scope": {
+                        "account_id": "111111111111",
+                        "region": "eu-west-1",
+                        "service": "ec2",
+                        "resource_type": "nat_gateway",
+                        "resource_id": "nat-123",
+                    },
+                    "dimensions": {},
+                },
+            }
+        ]
+
+    def _fake_fetch_one(_conn: object, _sql: str, _params: Sequence[Any] | None = None) -> dict[str, Any]:
+        return {"n": 1}
+
+    monkeypatch.setattr(flask_app, "fetch_all_dict_conn", _fake_fetch_all)
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+
+    client = flask_app.app.test_client()
+    resp = client.get("/api/recommendations?tenant_id=acme&workspace=prod")
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 200
+    item = (payload.get("items") or [])[0]
+    graph_package = item.get("graph_package") or {}
+    assert graph_package.get("package_kind") == "nat_dependency_package"
+    assert graph_package.get("package_title") == "Validate NAT routing dependencies before cleanup"
+    checklist = graph_package.get("dependency_checklist") or []
+    assert "Validate route paths that still traverse this NAT gateway." in checklist
+    assert "Review impacted subnets and their outbound dependency paths." in checklist
+
+
+def test_recommendations_response_uses_ingress_specific_graph_package(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Ingress-related recommendations should expose ingress-specific package context."""
+    _disable_runtime_guards(monkeypatch)
+
+    def _fake_fetch_all(_conn: object, sql: str, _params: Sequence[Any] | None = None) -> list[dict[str, Any]]:
+        if "resource_graph_edges_current" in sql:
+            return [
+                {
+                    "root_resource_key": "aws:111111111111:eu-west-1:elbv2:load_balancer:arn:aws:elasticloadbalancing:eu-west-1:111111111111:loadbalancer/app/test/123",
+                    "edge_type": "routes_to",
+                    "source_kind": "api_direct",
+                    "confidence": "high",
+                    "neighbor_resource_key": "aws:111111111111:eu-west-1:elbv2:target_group:arn:aws:elasticloadbalancing:eu-west-1:111111111111:targetgroup/test/456",
+                    "neighbor_service": "elbv2",
+                    "neighbor_resource_type": "target_group",
+                    "neighbor_resource_name": "tg-test",
+                    "total_neighbors": 1,
+                }
+            ]
+        return [
+            {
+                "fingerprint": "fp-elb",
+                "check_id": "aws.lambda.functions.unused",
+                "service": "lambda",
+                "severity": "medium",
+                "category": "cost",
+                "title": "Unused function with ingress path",
+                "estimated_monthly_savings": 5.0,
+                "region": "eu-west-1",
+                "account_id": "111111111111",
+                "detected_at": "2026-02-14T00:00:00Z",
+                "effective_state": "open",
+                "payload": {
+                    "scope": {
+                        "account_id": "111111111111",
+                        "region": "eu-west-1",
+                        "service": "elbv2",
+                        "resource_type": "load_balancer",
+                        "resource_arn": "arn:aws:elasticloadbalancing:eu-west-1:111111111111:loadbalancer/app/test/123",
+                    },
+                    "dimensions": {},
+                },
+            }
+        ]
+
+    def _fake_fetch_one(_conn: object, _sql: str, _params: Sequence[Any] | None = None) -> dict[str, Any]:
+        return {"n": 1}
+
+    monkeypatch.setattr(flask_app, "fetch_all_dict_conn", _fake_fetch_all)
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+
+    client = flask_app.app.test_client()
+    resp = client.get("/api/recommendations?tenant_id=acme&workspace=prod")
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 200
+    item = (payload.get("items") or [])[0]
+    graph_package = item.get("graph_package") or {}
+    assert graph_package.get("package_kind") == "ingress_dependency_package"
+    assert graph_package.get("package_title") == "Review ingress dependency chain before remediation"
+    checklist = graph_package.get("dependency_checklist") or []
+    assert "Validate target groups, listeners, and downstream compute before deleting or consolidating ingress." in checklist
+    assert "Check whether traffic is still expected to route through attached target groups." in checklist
+
+
+def test_recommendations_response_assigns_one_package_savings_owner(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Overlapping package members should expose one effective savings owner."""
+    _disable_runtime_guards(monkeypatch)
+
+    def _fake_fetch_all(_conn: object, sql: str, _params: Sequence[Any] | None = None) -> list[dict[str, Any]]:
+        if "resource_graph_edges_current" in sql:
+            return [
+                {
+                    "root_resource_key": "aws:111111111111:us-east-1:ec2:instance:i-123",
+                    "edge_type": "attached_to",
+                    "source_kind": "api_direct",
+                    "confidence": "high",
+                    "neighbor_resource_key": "aws:111111111111:us-east-1:ec2:volume:vol-123",
+                    "neighbor_service": "ec2",
+                    "neighbor_resource_type": "volume",
+                    "neighbor_resource_name": "data-volume",
+                    "total_neighbors": 1,
+                },
+                {
+                    "root_resource_key": "aws:111111111111:us-east-1:ec2:volume:vol-123",
+                    "edge_type": "attached_to",
+                    "source_kind": "api_direct",
+                    "confidence": "high",
+                    "neighbor_resource_key": "aws:111111111111:us-east-1:ec2:instance:i-123",
+                    "neighbor_service": "ec2",
+                    "neighbor_resource_type": "instance",
+                    "neighbor_resource_name": "app-1",
+                    "total_neighbors": 1,
+                },
+            ]
+        return [
+            {
+                "fingerprint": "fp-owner",
+                "check_id": "aws.ec2.instances.underutilized",
+                "service": "ec2",
+                "severity": "medium",
+                "category": "rightsizing",
+                "title": "EC2 instance underutilized",
+                "estimated_monthly_savings": 80.0,
+                "region": "us-east-1",
+                "account_id": "111111111111",
+                "detected_at": "2026-02-14T00:00:00Z",
+                "effective_state": "open",
+                "payload": {
+                    "scope": {
+                        "account_id": "111111111111",
+                        "region": "us-east-1",
+                        "service": "ec2",
+                        "resource_type": "instance",
+                        "resource_id": "i-123",
+                    },
+                    "dimensions": {
+                        "instance_type": "m5.2xlarge",
+                        "recommended_instance_type": "m5.xlarge",
+                    },
+                },
+            },
+            {
+                "fingerprint": "fp-suppressed",
+                "check_id": "aws.ec2.instances.underutilized",
+                "service": "ec2",
+                "severity": "medium",
+                "category": "rightsizing",
+                "title": "Related EBS-backed instance package member",
+                "estimated_monthly_savings": 30.0,
+                "region": "us-east-1",
+                "account_id": "111111111111",
+                "detected_at": "2026-02-14T00:00:00Z",
+                "effective_state": "open",
+                "payload": {
+                    "scope": {
+                        "account_id": "111111111111",
+                        "region": "us-east-1",
+                        "service": "ec2",
+                        "resource_type": "volume",
+                        "resource_id": "vol-123",
+                    },
+                    "dimensions": {},
+                },
+            },
+        ]
+
+    def _fake_fetch_one(_conn: object, _sql: str, _params: Sequence[Any] | None = None) -> dict[str, Any]:
+        return {"n": 2}
+
+    monkeypatch.setattr(flask_app, "fetch_all_dict_conn", _fake_fetch_all)
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+
+    client = flask_app.app.test_client()
+    resp = client.get("/api/recommendations?tenant_id=acme&workspace=prod")
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 200
+    items = payload.get("items") or []
+    owner = next(item for item in items if item.get("fingerprint") == "fp-owner")
+    suppressed = next(item for item in items if item.get("fingerprint") == "fp-suppressed")
+
+    assert owner.get("is_primary_package_savings_owner") is True
+    assert owner.get("effective_estimated_monthly_savings") == 110.0
+    assert owner.get("suppressed_by_fingerprint") is None
+    owner_package = owner.get("graph_package") or {}
+    assert owner_package.get("package_estimated_monthly_savings") == 110.0
+    assert owner_package.get("savings_owner_fingerprint") == "fp-owner"
+    assert owner_package.get("suppressed_fingerprints") == ["fp-suppressed"]
+
+    assert suppressed.get("is_primary_package_savings_owner") is False
+    assert suppressed.get("effective_estimated_monthly_savings") == 0.0
+    assert suppressed.get("suppressed_by_fingerprint") == "fp-owner"
+    suppressed_package = suppressed.get("graph_package") or {}
+    assert suppressed_package.get("package_cluster_key") == owner_package.get("package_cluster_key")
+    assert suppressed_package.get("savings_owner_fingerprint") == "fp-owner"
+
+
 def test_recommendations_checker_advice_falls_back_to_legacy_field(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """`checker_advice` should use payload.recommendation when payload.advice is missing."""
     _disable_runtime_guards(monkeypatch)
@@ -491,6 +820,101 @@ def test_recommendations_estimate_returns_totals_and_warnings(monkeypatch) -> No
     warning_codes = {str(w.get("code")) for w in warnings}
     assert "approval_required" in warning_codes
     assert "missing_or_ineligible" in warning_codes
+
+
+def test_recommendations_estimate_uses_effective_package_savings(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Estimate totals should follow package-level savings ownership when items overlap."""
+    _disable_runtime_guards(monkeypatch)
+
+    def _fake_fetch_all(_conn: object, sql: str, _params: Sequence[Any] | None = None) -> list[dict[str, Any]]:
+        if "resource_graph_edges_current" in sql:
+            return [
+                {
+                    "root_resource_key": "aws:111111111111:us-east-1:ec2:instance:i-123",
+                    "edge_type": "attached_to",
+                    "source_kind": "api_direct",
+                    "confidence": "high",
+                    "neighbor_resource_key": "aws:111111111111:us-east-1:ec2:volume:vol-123",
+                    "neighbor_service": "ec2",
+                    "neighbor_resource_type": "volume",
+                    "neighbor_resource_name": "data-volume",
+                    "total_neighbors": 1,
+                },
+                {
+                    "root_resource_key": "aws:111111111111:us-east-1:ec2:volume:vol-123",
+                    "edge_type": "attached_to",
+                    "source_kind": "api_direct",
+                    "confidence": "high",
+                    "neighbor_resource_key": "aws:111111111111:us-east-1:ec2:instance:i-123",
+                    "neighbor_service": "ec2",
+                    "neighbor_resource_type": "instance",
+                    "neighbor_resource_name": "app-1",
+                    "total_neighbors": 1,
+                },
+            ]
+        return [
+            {
+                "fingerprint": "fp-owner",
+                "check_id": "aws.ec2.instances.underutilized",
+                "service": "ec2",
+                "severity": "medium",
+                "category": "rightsizing",
+                "title": "EC2 instance underutilized",
+                "estimated_monthly_savings": 80.0,
+                "region": "us-east-1",
+                "account_id": "111111111111",
+                "detected_at": "2026-02-14T00:00:00Z",
+                "effective_state": "open",
+                "payload": {
+                    "scope": {
+                        "account_id": "111111111111",
+                        "region": "us-east-1",
+                        "service": "ec2",
+                        "resource_type": "instance",
+                        "resource_id": "i-123",
+                    },
+                    "dimensions": {},
+                },
+            },
+            {
+                "fingerprint": "fp-suppressed",
+                "check_id": "aws.ec2.instances.underutilized",
+                "service": "ec2",
+                "severity": "medium",
+                "category": "rightsizing",
+                "title": "Related package member",
+                "estimated_monthly_savings": 30.0,
+                "region": "us-east-1",
+                "account_id": "111111111111",
+                "detected_at": "2026-02-14T00:00:00Z",
+                "effective_state": "open",
+                "payload": {
+                    "scope": {
+                        "account_id": "111111111111",
+                        "region": "us-east-1",
+                        "service": "ec2",
+                        "resource_type": "volume",
+                        "resource_id": "vol-123",
+                    },
+                    "dimensions": {},
+                },
+            },
+        ]
+
+    def _fake_fetch_one(_conn: object, _sql: str, _params: Sequence[Any] | None = None) -> dict[str, Any]:
+        return {"n": 2}
+
+    monkeypatch.setattr(flask_app, "fetch_all_dict_conn", _fake_fetch_all)
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+
+    client = flask_app.app.test_client()
+    resp = client.post("/api/recommendations/estimate", json={"tenant_id": "acme", "workspace": "prod"})
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 200
+    totals = payload.get("totals") or {}
+    assert totals.get("estimated_monthly_savings") == 110.0
+    assert totals.get("estimated_annual_savings") == 1320.0
 
 
 def test_recommendations_preview_alias_points_to_estimate(monkeypatch) -> None:  # type: ignore[no-untyped-def]

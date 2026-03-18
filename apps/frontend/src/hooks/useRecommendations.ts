@@ -10,6 +10,33 @@ export interface RecommendationValue {
   value: string;
 }
 
+export interface RecommendationGraphRelatedResource {
+  resource_key: string | null;
+  service: string | null;
+  resource_type: string | null;
+  resource_name: string | null;
+  edge_type: string | null;
+  source_kind: string | null;
+  confidence: string | null;
+}
+
+export interface RecommendationGraphPackage {
+  package_key: string;
+  package_kind: string;
+  package_title: string;
+  package_reason: string;
+  related_resource_count: number;
+  blast_radius: string;
+  related_services: string[];
+  dependency_checklist: string[];
+  sample_related_resources: RecommendationGraphRelatedResource[];
+  package_cluster_key?: string | null;
+  package_estimated_monthly_savings?: number | null;
+  package_estimated_annual_savings?: number | null;
+  savings_owner_fingerprint?: string | null;
+  suppressed_fingerprints?: string[] | null;
+}
+
 export interface RecommendationItem {
   fingerprint: string;
   check_id: string;
@@ -26,6 +53,8 @@ export interface RecommendationItem {
   current: RecommendationValue;
   estimated_monthly_savings: number;
   estimated_annual_savings: number;
+  effective_estimated_monthly_savings: number;
+  effective_estimated_annual_savings: number;
   confidence: number;
   confidence_label: string;
   pricing_source: string;
@@ -35,6 +64,10 @@ export interface RecommendationItem {
   account_id: string | null;
   detected_at: string | null;
   effective_state: string;
+  is_primary_package_savings_owner: boolean;
+  suppressed_by_fingerprint: string | null;
+  resource_key: string | null;
+  graph_package: RecommendationGraphPackage | null;
   payload: Record<string, unknown> | null;
 }
 
