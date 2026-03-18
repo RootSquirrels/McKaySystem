@@ -230,6 +230,13 @@ def _is_nonprod(tags: dict[str, str]) -> bool:
     return False
 
 
+def _unused_optimization_focus(*, baseline_monthly_cost: float, storage_gib: int | None) -> str:
+    """Return the primary optimization focus for a possibly unused FSx file system."""
+    if float(baseline_monthly_cost) > 0.0 or (storage_gib is not None and int(storage_gib) > 0):
+        return "delete_candidate"
+    return "ownership_review"
+
+
 def _extract_deployment_type(fs: dict[str, Any]) -> str:
     # Many FSx types embed DeploymentType under their specific config blocks
     for key in ("WindowsConfiguration", "OntapConfiguration", "LustreConfiguration"):
@@ -260,6 +267,20 @@ def _extract_windows_cfg(fs: dict[str, Any]) -> dict[str, Any]:
     if isinstance(cfg, dict):
         return cfg
     return {}
+
+
+def _throughput_optimization_focus(*, p95_util: float, throughput_cfg: int | None) -> str:
+    """Return the primary optimization focus for underutilized FSx throughput."""
+    if throughput_cfg is not None and throughput_cfg > 0 and float(p95_util) < 10.0:
+        return "throughput_downsize_candidate"
+    return "throughput_review"
+
+
+def _large_inactive_optimization_focus(*, baseline_monthly_cost: float) -> str:
+    """Return the primary optimization focus for large inactive FSx storage."""
+    if float(baseline_monthly_cost) > 0.0:
+        return "delete_or_rebuild_smaller"
+    return "storage_footprint_review"
 
 
 # -----------------------------
@@ -609,7 +630,13 @@ class FSxFileSystemsChecker(Checker):
                         estimate_confidence=min(int(conf), pricing_conf),
                         estimate_notes=f"{pricing_notes} | Unused heuristic is best-effort via CloudWatch; verify mounts/clients before deletion.",
                         labels={"service": "fsx"},
-                        dimensions={"fs_type": fs_type},
+                        dimensions={
+                            "fs_type": fs_type,
+                            "optimization_focus": _unused_optimization_focus(
+                                baseline_monthly_cost=baseline_monthly_cost,
+                                storage_gib=storage_gib,
+                            ),
+                        },
                     )
 
             # -----------------------------
@@ -639,7 +666,13 @@ class FSxFileSystemsChecker(Checker):
                             estimate_confidence=min(65, pricing_conf),
                             estimate_notes=f"{pricing_notes} | Savings depends on target throughput tier; compute delta once you implement tier mapping.",
                             labels={"service": "fsx"},
-                            dimensions={"fs_type": fs_type},
+                            dimensions={
+                                "fs_type": fs_type,
+                                "optimization_focus": _throughput_optimization_focus(
+                                    p95_util=p95_util,
+                                    throughput_cfg=throughput_cfg,
+                                ),
+                            },
                             # keep numeric notes in details
                             links=[],
                         ).with_issue(p95_util_pct=p95_util)  # stable discriminator
@@ -672,7 +705,12 @@ class FSxFileSystemsChecker(Checker):
                         estimate_confidence=min(40, pricing_conf),
                         estimate_notes=f"{pricing_notes} | Storage overprovision is heuristic until per-type used-capacity metrics are integrated.",
                         labels={"service": "fsx"},
-                        dimensions={"fs_type": fs_type},
+                        dimensions={
+                            "fs_type": fs_type,
+                            "optimization_focus": _large_inactive_optimization_focus(
+                                baseline_monthly_cost=baseline_monthly_cost,
+                            ),
+                        },
                     )
 
             # -----------------------------
@@ -696,7 +734,7 @@ class FSxFileSystemsChecker(Checker):
                         issue_key={"fs_id": fs_id, "signal": "multi_az_nonprod"},
                         estimate_confidence=70,
                         labels={"service": "fsx"},
-                        dimensions={"fs_type": fs_type},
+                        dimensions={"fs_type": fs_type, "optimization_focus": "single_az_review"},
                     )
 
             # -----------------------------
@@ -899,7 +937,7 @@ class FSxFileSystemsChecker(Checker):
                             estimate_confidence=min(pricing_conf, 40),
                             estimate_notes=f"{pricing_notes} | StorageCapacity missing; cannot compute SSDâ†’HDD savings.",
                             labels={"service": "fsx"},
-                            dimensions={"fs_type": "WINDOWS"},
+                            dimensions={"fs_type": "WINDOWS", "optimization_focus": "hdd_storage_review"},
                         ).with_issue(
                             p95_util_pct=p95_util if p95_util is not None else "",
                             p95_rw_mib_s=p95_rw_mib_s if p95_rw_mib_s is not None else "",
@@ -947,7 +985,7 @@ class FSxFileSystemsChecker(Checker):
                         estimate_confidence=min(pricing_conf, hdd_conf, ssd_conf),
                         estimate_notes=f"{pricing_notes}; {ssd_notes}; {hdd_notes} | Validate IO before SSDâ†’HDD switch.",
                         labels={"service": "fsx"},
-                        dimensions={"fs_type": "WINDOWS"},
+                        dimensions={"fs_type": "WINDOWS", "optimization_focus": "hdd_storage_candidate"},
                         links=[],
                     ).with_issue(
                         p95_util_pct=p95_util if p95_util is not None else "",

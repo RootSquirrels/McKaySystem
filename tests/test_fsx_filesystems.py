@@ -86,7 +86,8 @@ def test_possible_unused_emits_when_metrics_zero(monkeypatch: pytest.MonkeyPatch
     checker = FSxFileSystemsChecker(account_id="111111111111", cfg=FSxFileSystemsConfig(unused_lookback_days=14))
     findings = list(checker.run(ctx))
 
-    assert any(f.check_id == "aws.fsx.filesystems.possible.unused" for f in findings)
+    hit = next(f for f in findings if f.check_id == "aws.fsx.filesystems.possible.unused")
+    assert hit.dimensions["optimization_focus"] == "delete_candidate"
 
 
 def test_multi_az_in_nonprod_emits(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -109,7 +110,8 @@ def test_multi_az_in_nonprod_emits(monkeypatch: pytest.MonkeyPatch) -> None:
     checker = FSxFileSystemsChecker(account_id="111111111111", cfg=FSxFileSystemsConfig())
     findings = list(checker.run(ctx))
 
-    assert any(f.check_id == "aws.fsx.filesystems.multi.az.in.nonprod" for f in findings)
+    hit = next(f for f in findings if f.check_id == "aws.fsx.filesystems.multi.az.in.nonprod")
+    assert hit.dimensions["optimization_focus"] == "single_az_review"
 
 
 def test_windows_backups_disabled_emits(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -235,7 +237,75 @@ def test_windows_storage_type_mismatch_emits_when_ssd_low_activity(monkeypatch: 
     checker = FSxFileSystemsChecker(account_id="111111111111", cfg=FSxFileSystemsConfig())
     findings = list(checker.run(ctx))
 
-    assert any(f.check_id == "aws.fsx.windows.storage.type.mismatch" for f in findings)
+    hit = next(f for f in findings if f.check_id == "aws.fsx.windows.storage.type.mismatch")
+    assert hit.dimensions["optimization_focus"] == "hdd_storage_candidate"
+
+
+def test_underutilized_throughput_emits_focus(monkeypatch: pytest.MonkeyPatch) -> None:
+    import checks.aws.fsx_filesystems as mod
+
+    monkeypatch.setattr(mod, "now_utc", lambda: datetime(2026, 1, 27, 12, 0, 0, tzinfo=timezone.utc))
+
+    fsx = FakeFSx(
+        region="eu-west-1",
+        file_systems=[
+            _fs(
+                fs_type="WINDOWS",
+                tags=[{"Key": "env", "Value": "prod"}, {"Key": "owner", "Value": "team-a"}],
+                windows_cfg={
+                    "StorageType": "SSD",
+                    "AutomaticBackupRetentionDays": 7,
+                    "CopyTagsToBackups": True,
+                    "ThroughputCapacity": 64,
+                },
+            )
+        ],
+    )
+    cw = FakeCloudWatch(
+        datapoints_by_metric={
+            "DataReadBytes": [{"Sum": 1.0}],
+            "ThroughputUtilization": [{"Average": 5.0}],
+        }
+    )
+    ctx = _mk_ctx(fsx=fsx, cloudwatch=cw)
+
+    checker = FSxFileSystemsChecker(account_id="111111111111", cfg=FSxFileSystemsConfig())
+    findings = list(checker.run(ctx))
+
+    hit = next(f for f in findings if f.check_id == "aws.fsx.filesystems.underutilized.throughput")
+    assert hit.dimensions["optimization_focus"] == "throughput_downsize_candidate"
+
+
+def test_large_inactive_emits_storage_focus(monkeypatch: pytest.MonkeyPatch) -> None:
+    import checks.aws.fsx_filesystems as mod
+
+    monkeypatch.setattr(mod, "now_utc", lambda: datetime(2026, 1, 27, 12, 0, 0, tzinfo=timezone.utc))
+
+    fsx = FakeFSx(
+        region="eu-west-1",
+        file_systems=[
+            _fs(
+                fs_type="WINDOWS",
+                tags=[{"Key": "env", "Value": "prod"}, {"Key": "owner", "Value": "team-a"}],
+                windows_cfg={"StorageType": "SSD", "AutomaticBackupRetentionDays": 7, "CopyTagsToBackups": True},
+                storage_capacity=8192,
+            )
+        ],
+    )
+    cw = FakeCloudWatch(
+        datapoints_by_metric={
+            "DataReadBytes": [{"Sum": 0.0}],
+            "DataWriteBytes": [{"Sum": 0.0}],
+            "ThroughputUtilization": [{"Average": 0.0}],
+        }
+    )
+    ctx = _mk_ctx(fsx=fsx, cloudwatch=cw)
+
+    checker = FSxFileSystemsChecker(account_id="111111111111", cfg=FSxFileSystemsConfig())
+    findings = list(checker.run(ctx))
+
+    hit = next(f for f in findings if f.check_id == "aws.fsx.filesystems.large.and.inactive")
+    assert hit.dimensions["optimization_focus"] == "delete_or_rebuild_smaller"
 
 
 def test_fsx_storage_pricing_uses_service_quote() -> None:

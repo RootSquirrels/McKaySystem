@@ -31,7 +31,7 @@ Detect FSx cost and governance opportunities across Windows and non-Windows file
 ## Key signals
 
 - Potentially unused or oversized FSx deployments.
-- Throughput underutilization and large inactive footprints.
+- Throughput underutilization and large inactive footprints, with clearer guidance for delete/rebuild-smaller vs throughput downsize vs HDD review.
 - Governance checks for required tags and non-prod HA posture.
 - Windows-focused backup/maintenance/storage configuration controls.
 
@@ -57,6 +57,7 @@ Optional for improved cost-confidence:
 ## Determinism and limitations
 
 - Signals rely on available CloudWatch/FSx metadata and can degrade under restricted IAM.
+- Optimization focus is strengthened using the same FSx and CloudWatch data already collected; no extra API calls are added.
 - Savings are approximate and intended for prioritization.
 - Findings are deterministic for equivalent inventory/metric input.
 
