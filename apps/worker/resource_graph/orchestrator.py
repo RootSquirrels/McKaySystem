@@ -18,6 +18,7 @@ from apps.worker.resource_graph.common import (
 from apps.worker.resource_graph.ebs import build_ebs_relationships
 from apps.worker.resource_graph.ec2 import build_ec2_instance_relationships
 from apps.worker.resource_graph.elb import build_elb_relationships
+from apps.worker.resource_graph.kinesis import build_kinesis_relationships
 from apps.worker.resource_graph.network import build_network_relationships
 from apps.worker.resource_graph.rds import build_rds_relationships
 
@@ -129,6 +130,15 @@ def build_graph_from_findings(
             resource_id=resource_id,
         )
         build_rds_relationships(
+            state,
+            primary_key=primary_key,
+            account_id=account_id,
+            region=region,
+            service=service,
+            resource_type=resource_type,
+            dimensions=dimensions,
+        )
+        build_kinesis_relationships(
             state,
             primary_key=primary_key,
             account_id=account_id,

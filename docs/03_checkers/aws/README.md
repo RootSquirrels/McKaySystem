@@ -19,6 +19,7 @@ Service-specific checker references:
 - `efs.md`
 - `elbv2.md`
 - `fsx.md`
+- `kinesis.md`
 - `lambda.md`
 - `nat_gateways.md`
 - `rds_instances.md`

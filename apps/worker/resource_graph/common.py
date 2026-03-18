@@ -185,6 +185,11 @@ def infer_resource_kind(resource_id: str | None, resource_arn: str | None) -> tu
         lowered = arn_text.lower()
         if ":elasticloadbalancing:" in lowered:
             return "load_balancer", "elbv2"
+        if ":kinesis:" in lowered:
+            if ":stream/" in lowered:
+                return "stream", "kinesis"
+            if ":consumer/" in lowered:
+                return "kinesis_consumer", "kinesis"
         if ":lambda:" in lowered:
             return "function", "lambda"
         if ":rds:" in lowered:
@@ -203,6 +208,8 @@ def infer_resource_kind(resource_id: str | None, resource_arn: str | None) -> tu
         return "nat_gateway", "vpc"
     if resource_text.startswith("sg-"):
         return "security_group", "ec2"
+    if resource_text.startswith("esm-"):
+        return "event_source_mapping", "lambda"
     if resource_text.startswith("rtb-"):
         return "route_table", "vpc"
     if resource_text.startswith("tg-"):
@@ -223,6 +230,9 @@ def normalize_resource_type(resource_type: str | None) -> str:
         "db_instance": "db_instance",
         "db_cluster": "db_cluster",
         "db_subnet_group": "db_subnet_group",
+        "stream": "stream",
+        "kinesis_consumer": "kinesis_consumer",
+        "event_source_mapping": "event_source_mapping",
     }
     return aliases.get(normalized, normalized)
 
@@ -241,7 +251,11 @@ def normalize_service(service: str | None, *, resource_type: str | None = None) 
         return "elbv2"
     if normalized_type in {"db_instance", "db_cluster", "db_subnet_group"}:
         return "rds"
+    if normalized_type in {"stream", "kinesis_consumer"}:
+        return "kinesis"
     if normalized_type == "function":
+        return "lambda"
+    if normalized_type == "event_source_mapping":
         return "lambda"
 
     aliases = {
@@ -253,6 +267,7 @@ def normalize_service(service: str | None, *, resource_type: str | None = None) 
         "elasticloadbalancingv2": "elbv2",
         "elbv2": "elbv2",
         "rds": "rds",
+        "kinesis": "kinesis",
         "awslambda": "lambda",
         "lambda": "lambda",
     }

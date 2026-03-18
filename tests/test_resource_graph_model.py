@@ -288,6 +288,160 @@ def test_build_graph_from_findings_derives_rds_relationships() -> None:
     ) in edge_pairs
 
 
+def test_build_graph_from_findings_derives_kinesis_consumer_relationships() -> None:
+    """Graph builder should derive stream-to-consumer relationships from Kinesis findings."""
+
+    findings = [
+        {
+            "title": "Kinesis consumers may be underused",
+            "check_id": "aws.kinesis.stream.enhanced_fanout.unused.review",
+            "severity": {"level": "low"},
+            "scope": {
+                "account_id": "123456789012",
+                "region": "eu-west-3",
+                "service": "kinesis",
+                "resource_type": "stream",
+                "resource_id": "orders-stream",
+                "resource_arn": "arn:aws:kinesis:eu-west-3:123456789012:stream/orders-stream",
+            },
+            "payload": {
+                "dimensions": {
+                    "consumer_names": "analytics-a,analytics-b",
+                    "consumer_arns": (
+                        "arn:aws:kinesis:eu-west-3:123456789012:stream/orders-stream/consumer/analytics-a:123,"
+                        "arn:aws:kinesis:eu-west-3:123456789012:stream/orders-stream/consumer/analytics-b:456"
+                    ),
+                }
+            },
+        }
+    ]
+
+    nodes, edges = build_graph_from_findings(
+        findings,
+        tenant_id="acme",
+        workspace="prod",
+        run_id="run-kinesis-1",
+    )
+
+    resource_keys = {item.resource_key for item in nodes}
+    edge_pairs = {
+        (item.edge_type, item.from_resource_key, item.to_resource_key)
+        for item in edges
+    }
+
+    stream_key = "aws:123456789012:eu-west-3:kinesis:stream:arn:aws:kinesis:eu-west-3:123456789012:stream/orders-stream"
+    consumer_a_key = (
+        "aws:123456789012:eu-west-3:kinesis:kinesis_consumer:"
+        "arn:aws:kinesis:eu-west-3:123456789012:stream/orders-stream/consumer/analytics-a:123"
+    )
+    consumer_b_key = (
+        "aws:123456789012:eu-west-3:kinesis:kinesis_consumer:"
+        "arn:aws:kinesis:eu-west-3:123456789012:stream/orders-stream/consumer/analytics-b:456"
+    )
+
+    assert stream_key in resource_keys
+    assert consumer_a_key in resource_keys
+    assert consumer_b_key in resource_keys
+    assert ("consumed_by", stream_key, consumer_a_key) in edge_pairs
+    assert ("consumed_by", stream_key, consumer_b_key) in edge_pairs
+
+
+def test_build_graph_from_findings_derives_kinesis_lambda_relationships() -> None:
+    """Graph builder should derive stream-to-mapping-to-Lambda relationships when mapping UUIDs exist."""
+
+    findings = [
+        {
+            "title": "Kinesis stream may be over-sharded",
+            "check_id": "aws.kinesis.stream.provisioned.overprovisioned",
+            "severity": {"level": "medium"},
+            "scope": {
+                "account_id": "123456789012",
+                "region": "eu-west-3",
+                "service": "kinesis",
+                "resource_type": "stream",
+                "resource_id": "orders-stream",
+                "resource_arn": "arn:aws:kinesis:eu-west-3:123456789012:stream/orders-stream",
+            },
+            "payload": {
+                "dimensions": {
+                    "downstream_lambda_names": "orders-consumer",
+                    "downstream_lambda_arns": "arn:aws:lambda:eu-west-3:123456789012:function:orders-consumer",
+                    "event_source_mapping_uuids": "esm-1",
+                }
+            },
+        }
+    ]
+
+    nodes, edges = build_graph_from_findings(
+        findings,
+        tenant_id="acme",
+        workspace="prod",
+        run_id="run-kinesis-2",
+    )
+
+    resource_keys = {item.resource_key for item in nodes}
+    edge_pairs = {
+        (item.edge_type, item.from_resource_key, item.to_resource_key)
+        for item in edges
+    }
+
+    stream_key = "aws:123456789012:eu-west-3:kinesis:stream:arn:aws:kinesis:eu-west-3:123456789012:stream/orders-stream"
+    mapping_key = "aws:123456789012:eu-west-3:lambda:event_source_mapping:esm-1"
+    lambda_key = "aws:123456789012:eu-west-3:lambda:function:arn:aws:lambda:eu-west-3:123456789012:function:orders-consumer"
+
+    assert stream_key in resource_keys
+    assert mapping_key in resource_keys
+    assert lambda_key in resource_keys
+    assert ("feeds_via_mapping", stream_key, mapping_key) in edge_pairs
+    assert ("invokes", mapping_key, lambda_key) in edge_pairs
+
+
+def test_build_graph_from_findings_derives_direct_kinesis_lambda_relationships_without_mapping_uuid() -> None:
+    """Graph builder should still derive direct stream-to-Lambda edges when UUIDs are absent."""
+
+    findings = [
+        {
+            "title": "Kinesis stream retention review",
+            "check_id": "aws.kinesis.stream.retention.extended.review",
+            "severity": {"level": "low"},
+            "scope": {
+                "account_id": "123456789012",
+                "region": "eu-west-3",
+                "service": "kinesis",
+                "resource_type": "stream",
+                "resource_id": "audit-stream",
+                "resource_arn": "arn:aws:kinesis:eu-west-3:123456789012:stream/audit-stream",
+            },
+            "payload": {
+                "dimensions": {
+                    "downstream_lambda_names": "audit-consumer",
+                    "downstream_lambda_arns": "arn:aws:lambda:eu-west-3:123456789012:function:audit-consumer",
+                }
+            },
+        }
+    ]
+
+    nodes, edges = build_graph_from_findings(
+        findings,
+        tenant_id="acme",
+        workspace="prod",
+        run_id="run-kinesis-3",
+    )
+
+    resource_keys = {item.resource_key for item in nodes}
+    edge_pairs = {
+        (item.edge_type, item.from_resource_key, item.to_resource_key)
+        for item in edges
+    }
+
+    stream_key = "aws:123456789012:eu-west-3:kinesis:stream:arn:aws:kinesis:eu-west-3:123456789012:stream/audit-stream"
+    lambda_key = "aws:123456789012:eu-west-3:lambda:function:arn:aws:lambda:eu-west-3:123456789012:function:audit-consumer"
+
+    assert stream_key in resource_keys
+    assert lambda_key in resource_keys
+    assert ("feeds", stream_key, lambda_key) in edge_pairs
+
+
 def test_build_graph_from_runner_records_uses_top_level_dimensions() -> None:
     """Graph builder should derive relationships from runner-style records."""
     findings = [
