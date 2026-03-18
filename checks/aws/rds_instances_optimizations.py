@@ -68,6 +68,7 @@ _NONPROD_VALUES = {
 _ENV_TAG_KEYS = {"env", "environment"}
 
 _OLD_FAMILIES = {"m1", "m2", "m3", "m4", "r3", "r4", "t1", "t2", "x1"}
+_GRAVITON_CANDIDATE_FAMILIES = {"m3", "m4", "r3", "r4", "t2"}
 
 # Suppression tags for replica checks (treat as intent flags; conservative to avoid false positives)
 _REPLICA_PURPOSE_KEYS = {"purpose", "role", "usage", "workload", "service", "component"}
@@ -154,6 +155,28 @@ def _family_from_instance_class(db_instance_class: str) -> str:
         return ""
     parts = txt.split(".")
     return parts[1] if len(parts) >= 3 else ""
+
+
+def _modernization_focus(*, instance_class: str, engine: str) -> tuple[str, str]:
+    """Return modernization focus and recommendation target for old-generation instances."""
+    family = _family_from_instance_class(instance_class)
+    normalized_engine = _norm_engine(engine)
+    if family in _GRAVITON_CANDIDATE_FAMILIES and normalized_engine not in {"sqlserver-ee", "sqlserver-se", "sqlserver-ex", "sqlserver-web"}:
+        return ("graviton_first", "db.m6g/db.r6g or newer Graviton generations")
+    return ("general_newer_generation", "db.m6i/db.m7i, db.r6i/db.r7i, or equivalent newer generations")
+
+
+def _replica_optimization_focus(*, p95_read_iops: float, p95_connections: float | None) -> tuple[str, str]:
+    """Return sharper action guidance for unused read replica findings."""
+    if float(p95_read_iops) <= 0.01 and (p95_connections is None or float(p95_connections) <= 0.1):
+        return (
+            "delete_candidate",
+            "This replica looks strongly deletable if no DR, migration, or reporting dependency remains.",
+        )
+    return (
+        "schedule_or_reporting_review",
+        "This replica is lightly used; confirm whether it exists only for reporting windows, failover drills, or temporary migrations before deleting it.",
+    )
 
 
 def _norm_engine(engine: str) -> str:
@@ -810,6 +833,10 @@ class RDSInstancesOptimizationsChecker:
         # 4) instance_family_old_generation
         fam = _family_from_instance_class(instance_class)
         if fam in _OLD_FAMILIES:
+            modernization_focus, recommendation_target = _modernization_focus(
+                instance_class=instance_class,
+                engine=engine,
+            )
             yield FindingDraft(
                 check_id="aws.rds.instance.family.old.generation",
                 check_name="RDS old-generation instance family",
@@ -821,7 +848,7 @@ class RDSInstancesOptimizationsChecker:
                 scope=scope,
                 message=f"Instance class is '{instance_class}' (family '{fam}'), which is considered old-generation.",
                 recommendation=(
-                    "Evaluate migrating to a newer generation (e.g., m6g/m7g, r6g/r7g, m6i/m7i) "
+                    f"Evaluate migrating to {recommendation_target} "
                     "for better price/perf. Validate compatibility and performance before changing."
                 ),
                 estimated_monthly_savings=0.0,
@@ -829,7 +856,12 @@ class RDSInstancesOptimizationsChecker:
                 estimate_confidence=20,
                 estimate_notes="Modernization opportunity; savings not estimated without pricing enrichment.",
                 tags=tags,
-                dimensions={"instance_class": instance_class, "family": fam},
+                dimensions={
+                    "instance_class": instance_class,
+                    "family": fam,
+                    "modernization_focus": modernization_focus,
+                    "recommended_target": recommendation_target,
+                },
             ).with_issue(check="old_generation_family", account_id=self._account.account_id, region=region, resource_type="db_instance", resource_id=instance_id, db_instance=instance_id, family=fam)
 
         # 5) needs_engine_upgrade (policy)
@@ -863,6 +895,10 @@ class RDSInstancesOptimizationsChecker:
                 )
                 if rr is not None:
                     p95_read_iops, dp_count, p95_conns = rr
+                    optimization_focus, focus_note = _replica_optimization_focus(
+                        p95_read_iops=p95_read_iops,
+                        p95_connections=p95_conns,
+                    )
                     # Cost is meaningful with PricingService; if available we emit a best-effort savings estimate.
                     hrs = _hours_per_month()
                     dep = "Multi-AZ" if multi_az else "Single-AZ"
@@ -901,7 +937,7 @@ class RDSInstancesOptimizationsChecker:
                         ),
                         recommendation=(
                             "Confirm the replica is not required for DR/reporting/migration. "
-                            "If unused, consider deleting it, or keeping it only during reporting windows."
+                            f"{focus_note}"
                         ),
                         estimated_monthly_savings=money(est_savings),
                         estimated_monthly_cost=money(est_cost),
@@ -915,6 +951,7 @@ class RDSInstancesOptimizationsChecker:
                             "p95_read_iops": f"{p95_read_iops:.6f}",
                             "p95_connections": (f"{p95_conns:.3f}" if p95_conns is not None else ""),
                             "replica_source": str(inst.get("ReadReplicaSourceDBInstanceIdentifier") or ""),
+                            "optimization_focus": optimization_focus,
                         },
                     ).with_issue(check="unused_read_replica", account_id=self._account.account_id, region=region, resource_type="db_instance", resource_id=instance_id, db_instance=instance_id)
 

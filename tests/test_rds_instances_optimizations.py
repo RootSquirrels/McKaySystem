@@ -224,6 +224,7 @@ def test_instance_family_old_generation_emits() -> None:
     f = next(x for x in findings if x.check_id == "aws.rds.instance.family.old.generation")
     assert f.status == "fail"
     assert f.dimensions.get("family") == "m3"
+    assert f.dimensions.get("modernization_focus") == "graviton_first"
 
 
 @pytest.mark.parametrize(
@@ -444,7 +445,67 @@ def test_unused_read_replica_emits_when_p95_read_iops_zero() -> None:
     ctx = make_run_ctx(rds=rds, cloudwatch=cw)
 
     findings = list(_mk_checker().run(ctx))
-    assert any(f.check_id == "aws.rds.read.replica.unused" for f in findings)
+    hit = next(f for f in findings if f.check_id == "aws.rds.read.replica.unused")
+    assert hit.dimensions["optimization_focus"] == "delete_candidate"
+
+
+def test_old_generation_sqlserver_prefers_general_newer_generation() -> None:
+    arn = "arn:aws:rds:eu-west-3:111111111111:db:db_sqlserver_old"
+    rds = FakeRdsClient(
+        region="eu-west-3",
+        instances=[
+            {
+                "DBInstanceIdentifier": "db_sqlserver_old",
+                "DBInstanceArn": arn,
+                "DBInstanceStatus": "available",
+                "AllocatedStorage": 20,
+                "MultiAZ": False,
+                "DBInstanceClass": "db.m4.large",
+                "Engine": "sqlserver-se",
+                "EngineVersion": "15.00",
+            }
+        ],
+        tags_by_arn={arn: {"env": "dev"}},
+    )
+    cw = _FakeCloudWatchClient(series_by_metric_and_instance={})
+    ctx = make_run_ctx(rds=rds, cloudwatch=cw)
+
+    findings = list(_mk_checker().run(ctx))
+    hit = next(x for x in findings if x.check_id == "aws.rds.instance.family.old.generation")
+    assert hit.dimensions["modernization_focus"] == "general_newer_generation"
+
+
+def test_unused_read_replica_with_some_connections_prefers_schedule_review() -> None:
+    arn = "arn:aws:rds:eu-west-3:111111111111:db:replica_reporting"
+    cw = _FakeCloudWatchClient(
+        series_by_metric_and_instance={
+            "ReadIOPS": {"replica_reporting": [0.0] * 14},
+            "DatabaseConnections": {"replica_reporting": [0.5] * 14},
+        }
+    )
+    rds = FakeRdsClient(
+        region="eu-west-3",
+        instances=[
+            {
+                "DBInstanceIdentifier": "replica_reporting",
+                "DBInstanceArn": arn,
+                "DBInstanceStatus": "available",
+                "AllocatedStorage": 20,
+                "MultiAZ": False,
+                "DBInstanceClass": "db.t3.medium",
+                "Engine": "postgres",
+                "EngineVersion": "15.4",
+                "ReadReplicaSourceDBInstanceIdentifier": "primary1",
+                "InstanceCreateTime": datetime(2020, 1, 1, 0, 0, 0, tzinfo=UTC),
+            }
+        ],
+        tags_by_arn={arn: {"env": "dev"}},
+    )
+    ctx = make_run_ctx(rds=rds, cloudwatch=cw)
+
+    findings = list(_mk_checker().run(ctx))
+    hit = next(f for f in findings if f.check_id == "aws.rds.read.replica.unused")
+    assert hit.dimensions["optimization_focus"] == "schedule_or_reporting_review"
 
 
 def test_unused_read_replica_suppressed_by_purpose_tag() -> None:

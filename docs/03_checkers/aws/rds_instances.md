@@ -29,8 +29,8 @@ Detect RDS instance optimization and governance opportunities using inventory an
 - Stopped instances still incurring storage cost.
 - Overprovisioned storage via FreeStorageSpace usage patterns.
 - Non-production Multi-AZ posture opportunities.
-- Legacy instance family and engine-version policy drift.
-- Unused read replicas by sustained low read IOPS.
+- Legacy instance family and engine-version policy drift, with clearer modernization focus for Graviton-first vs general newer-generation refresh.
+- Unused read replicas by sustained low read IOPS, with sharper guidance for delete-candidate vs schedule/reporting review.
 
 ## Configuration and defaults
 
@@ -53,6 +53,7 @@ Optional for improved cost-confidence:
 ## Determinism and limitations
 
 - CloudWatch-dependent findings require metric coverage thresholds.
+- Modernization and read-replica guidance are strengthened using existing inventory and CloudWatch data only; no extra metric/API calls are added.
 - Cost estimates are best-effort and should be refined by CUR enrichment.
 - Access gaps surface as informational findings instead of hard failures.
 
