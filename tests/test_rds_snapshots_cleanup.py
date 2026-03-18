@@ -77,6 +77,8 @@ def test_orphaned_db_snapshot_emits_orphan_only():
     assert f.estimated_monthly_cost is not None
     assert f.estimated_monthly_savings == f.estimated_monthly_cost
     assert f.estimate_confidence == 50
+    assert (f.dimensions or {}).get("source_identifier") == "db-missing"
+    assert (f.dimensions or {}).get("source_kind") == "db_instance"
 
 
 def test_old_manual_db_snapshot_emits_manual_old():
@@ -205,6 +207,8 @@ def test_orphaned_cluster_snapshot():
     assert len(findings) == 1
     assert findings[0].check_id == "aws.rds.snapshots.orphaned"
     assert findings[0].scope.resource_id == "csnap-orphan"
+    assert (findings[0].dimensions or {}).get("source_identifier") == "cluster-missing"
+    assert (findings[0].dimensions or {}).get("source_kind") == "db_cluster"
 
 
 def test_old_manual_cluster_snapshot_suppressed():

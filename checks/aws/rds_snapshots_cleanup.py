@@ -213,6 +213,7 @@ class RDSSnapshotsCleanupChecker:
             is_orphan = bool(src_instance and str(src_instance) not in instances)
 
         if is_orphan:
+            src_instance = str(snap.get("DBInstanceIdentifier") or "")
             est = self._estimate_snapshot_cost_usd(
                 snap,
                 kind="db",
@@ -220,7 +221,17 @@ class RDSSnapshotsCleanupChecker:
                 pricing_notes=pricing_notes,
                 pricing_conf=pricing_conf,
             )
-            yield self._orphan_finding(ctx, sid, created, region, "rds_db_snapshot", arn, est, tags)
+            yield self._orphan_finding(
+                ctx,
+                sid,
+                created,
+                region,
+                "rds_db_snapshot",
+                arn,
+                src_instance,
+                est,
+                tags,
+            )
             return
 
         # Old manual applies only to non-orphaned manual-ish snapshots.
@@ -266,6 +277,7 @@ class RDSSnapshotsCleanupChecker:
             is_orphan = bool(src_cluster and str(src_cluster) not in clusters)
 
         if is_orphan:
+            src_cluster = str(snap.get("DBClusterIdentifier") or "")
             est = self._estimate_snapshot_cost_usd(
                 snap,
                 kind="cluster",
@@ -273,7 +285,17 @@ class RDSSnapshotsCleanupChecker:
                 pricing_notes=pricing_notes,
                 pricing_conf=pricing_conf,
             )
-            yield self._orphan_finding(ctx, sid, created, region, "rds_cluster_snapshot", arn, est, tags)
+            yield self._orphan_finding(
+                ctx,
+                sid,
+                created,
+                region,
+                "rds_cluster_snapshot",
+                arn,
+                src_cluster,
+                est,
+                tags,
+            )
             return
 
         # Old manual applies only to non-orphaned manual-ish snapshots.
@@ -357,11 +379,13 @@ class RDSSnapshotsCleanupChecker:
         region: str,
         resource_type: str,
         resource_arn: str,
+        source_identifier: str,
         est: tuple[float | None, float | None, int | None, str],
         tags: dict[str, str],
     ) -> FindingDraft:
         (est_cost, est_save, conf, notes) = est
         created_str = created.date().isoformat() if created else "unknown date"
+        source_kind = "db_cluster" if resource_type == "rds_cluster_snapshot" else "db_instance"
         return FindingDraft(
             check_id="aws.rds.snapshots.orphaned",
             check_name="Orphaned RDS snapshot",
@@ -377,6 +401,13 @@ class RDSSnapshotsCleanupChecker:
             estimated_monthly_savings=est_save,
             estimate_confidence=conf,
             estimate_notes=notes,
+            dimensions={
+                "snapshot_id": snapshot_id,
+                "source_identifier": source_identifier,
+                "source_kind": source_kind,
+                "snapshot_kind": "cluster" if resource_type == "rds_cluster_snapshot" else "instance",
+                "created_date": created.date().isoformat() if created else "",
+            },
             tags=tags,
         )
 
