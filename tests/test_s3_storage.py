@@ -317,10 +317,14 @@ def test_emits_storage_optimization_findings_for_large_standard_bucket() -> None
     check_ids = {f.check_id for f in findings}
 
     assert "aws.s3.cost.bucket.storage.estimate" in check_ids
-    assert "aws.s3.cost.lifecycle.transition.review" in check_ids
     assert "aws.s3.cost.multipart.upload.cleanup" in check_ids
     assert "aws.s3.cost.replication.review" in check_ids
     assert "aws.s3.cost.intelligent_tiering.review" in check_ids
+    assert "aws.s3.cost.lifecycle.transition.review" not in check_ids
+
+    tiering = next(f for f in findings if f.check_id == "aws.s3.cost.intelligent_tiering.review")
+    assert tiering.dimensions["recommended_transition_target"] == "Intelligent-Tiering"
+    assert tiering.dimensions["object_count"] == "125000"
 
     replication = next(f for f in findings if f.check_id == "aws.s3.cost.replication.review")
     assert replication.estimated_monthly_cost == pytest.approx(11.5, abs=0.01)
@@ -328,6 +332,107 @@ def test_emits_storage_optimization_findings_for_large_standard_bucket() -> None
     multipart = next(f for f in findings if f.check_id == "aws.s3.cost.multipart.upload.cleanup")
     assert multipart.dimensions["stale_upload_count"] == "2"
     assert multipart.dimensions["oldest_upload_age_days"] == "17"
+    assert multipart.dimensions["materiality_band"] == "baseline"
+
+    assert replication.dimensions["replication_pattern"] == "general_replication_review"
+    assert replication.dimensions["recommendation_focus"] == "general_review"
+
+
+def test_emits_lifecycle_transition_review_for_large_standard_bucket_with_lower_object_count() -> None:
+    checker = _mk_checker()
+
+    gib = 1024.0 ** 3
+    sizes_bytes = {
+        ("transition-bucket", "StandardStorage"): 300.0 * gib,
+        ("transition-bucket", "AllStorageTypes"): 9000.0,
+    }
+    s3 = _FakeS3(
+        buckets=["transition-bucket"],
+        location_by_bucket={"transition-bucket": "eu-west-3"},
+        lifecycle_present={"transition-bucket": False},
+        encryption_present={"transition-bucket": True},
+        pab_config_by_bucket={
+            "transition-bucket": {
+                "BlockPublicAcls": True,
+                "IgnorePublicAcls": True,
+                "BlockPublicPolicy": True,
+                "RestrictPublicBuckets": True,
+            }
+        },
+    )
+    cw = _FakeCloudWatch(avg_bytes_by_bucket_and_type=sizes_bytes)
+    ctx = _FakeCtx(services=_FakeServices(s3=s3, cloudwatch=cw, pricing=None))
+
+    findings = list(checker.run(ctx))
+    check_ids = {f.check_id for f in findings}
+
+    assert "aws.s3.cost.lifecycle.transition.review" in check_ids
+    assert "aws.s3.cost.intelligent_tiering.review" not in check_ids
+
+    lifecycle = next(f for f in findings if f.check_id == "aws.s3.cost.lifecycle.transition.review")
+    assert lifecycle.dimensions["recommended_transition_target"] == "Standard-IA"
+
+
+def test_emits_elevated_multipart_materiality_and_cold_replication_pattern() -> None:
+    checker = _mk_checker()
+
+    gib = 1024.0 ** 3
+    sizes_bytes = {
+        ("cold-replication-bucket", "StandardIAStorage"): 180.0 * gib,
+        ("cold-replication-bucket", "GlacierStorage"): 220.0 * gib,
+        ("cold-replication-bucket", "AllStorageTypes"): 20000.0,
+    }
+    s3 = _FakeS3(
+        buckets=["cold-replication-bucket"],
+        location_by_bucket={"cold-replication-bucket": "eu-west-3"},
+        lifecycle_present={"cold-replication-bucket": True},
+        encryption_present={"cold-replication-bucket": True},
+        pab_config_by_bucket={
+            "cold-replication-bucket": {
+                "BlockPublicAcls": True,
+                "IgnorePublicAcls": True,
+                "BlockPublicPolicy": True,
+                "RestrictPublicBuckets": True,
+            }
+        },
+        multipart_uploads_by_bucket={
+            "cold-replication-bucket": [
+                {"Initiated": datetime(2026, 2, 1, tzinfo=timezone.utc)},
+                {"Initiated": datetime(2026, 2, 2, tzinfo=timezone.utc)},
+                {"Initiated": datetime(2026, 2, 3, tzinfo=timezone.utc)},
+                {"Initiated": datetime(2026, 2, 4, tzinfo=timezone.utc)},
+                {"Initiated": datetime(2026, 2, 5, tzinfo=timezone.utc)},
+                {"Initiated": datetime(2026, 2, 6, tzinfo=timezone.utc)},
+                {"Initiated": datetime(2026, 2, 7, tzinfo=timezone.utc)},
+                {"Initiated": datetime(2026, 2, 8, tzinfo=timezone.utc)},
+                {"Initiated": datetime(2026, 2, 9, tzinfo=timezone.utc)},
+                {"Initiated": datetime(2026, 2, 10, tzinfo=timezone.utc)},
+            ]
+        },
+        replication_rules_by_bucket={
+            "cold-replication-bucket": [
+                {
+                    "Status": "Enabled",
+                    "Destination": {
+                        "Bucket": "arn:aws:s3:::replica-cold-replication-bucket",
+                        "StorageClass": "STANDARD",
+                    },
+                }
+            ]
+        },
+    )
+    cw = _FakeCloudWatch(avg_bytes_by_bucket_and_type=sizes_bytes)
+    ctx = _FakeCtx(services=_FakeServices(s3=s3, cloudwatch=cw, pricing=None))
+
+    findings = list(checker.run(ctx))
+
+    multipart = next(f for f in findings if f.check_id == "aws.s3.cost.multipart.upload.cleanup")
+    assert multipart.dimensions["materiality_band"] == "elevated"
+    assert multipart.severity.score == 55
+
+    replication = next(f for f in findings if f.check_id == "aws.s3.cost.replication.review")
+    assert replication.dimensions["replication_pattern"] == "cold_data_replication_review"
+    assert replication.dimensions["recommendation_focus"] == "destination_storage_class"
 
 
 def test_skips_cleanup_finding_when_abort_rule_exists() -> None:

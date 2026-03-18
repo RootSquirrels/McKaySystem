@@ -113,6 +113,11 @@ class S3StorageChecker:
     _CID_MULTIPART = "aws.s3.cost.multipart.upload.cleanup"
     _CID_REPLICATION = "aws.s3.cost.replication.review"
     _CID_TIERING = "aws.s3.cost.intelligent_tiering.review"
+    _TIERING_RECOMMENDATION_MIN_OBJECTS = 100_000
+    _LIFECYCLE_REVIEW_MIN_SIZE_GIB = 128.0
+    _TIERING_REVIEW_MIN_SIZE_GIB = 256.0
+    _MULTIPART_HIGH_STALE_UPLOAD_COUNT = 10
+    _MULTIPART_HIGH_OLDEST_AGE_DAYS = 30
 
     _STORAGE_MATRIX: tuple[tuple[str, str, float], ...] = (
         ("StandardStorage", "Standard", S3_DEFAULT_STORAGE_PRICE_GB_MONTH_USD),
@@ -726,6 +731,68 @@ class S3StorageChecker:
         configs = resp.get("IntelligentTieringConfigurationList", []) or []
         return any(isinstance(item, Mapping) for item in configs)
 
+    def _primary_standard_storage_optimization(
+        self,
+        *,
+        total_gib: float,
+        standard_share: float,
+        object_count: float | None,
+        has_transition: bool,
+        has_intelligent_tiering: bool,
+        lifecycle_state: str,
+    ) -> str | None:
+        """Return the primary storage optimization path for a Standard-heavy bucket."""
+        if standard_share < 0.80 or lifecycle_state == "unknown":
+            return None
+        if (
+            total_gib >= self._TIERING_REVIEW_MIN_SIZE_GIB
+            and standard_share >= 0.90
+            and not has_intelligent_tiering
+            and isinstance(object_count, (int, float))
+            and float(object_count) >= self._TIERING_RECOMMENDATION_MIN_OBJECTS
+        ):
+            return "intelligent_tiering"
+        if (
+            total_gib >= self._LIFECYCLE_REVIEW_MIN_SIZE_GIB
+            and not has_transition
+        ):
+            return "lifecycle_transition"
+        return None
+
+    def _multipart_materiality(
+        self,
+        *,
+        stale_upload_count: int,
+        oldest_upload_age_days: int,
+    ) -> tuple[Severity, str]:
+        """Return severity and materiality band for stale multipart uploads."""
+        if (
+            stale_upload_count >= self._MULTIPART_HIGH_STALE_UPLOAD_COUNT
+            or oldest_upload_age_days >= self._MULTIPART_HIGH_OLDEST_AGE_DAYS
+        ):
+            return Severity(level="medium", score=55), "elevated"
+        return Severity(level="medium", score=40), "baseline"
+
+    def _replication_review_pattern(
+        self,
+        *,
+        replication: Mapping[str, Any],
+        colder_share: float,
+    ) -> tuple[str, str]:
+        """Return a sharper replication review pattern and recommendation focus."""
+        destinations = replication.get("destinations", []) or []
+        destination_classes = {
+            str((destination or {}).get("storage_class") or "same_as_source").strip().upper()
+            for destination in destinations
+            if isinstance(destination, Mapping)
+        }
+        standard_like_destinations = {"", "STANDARD", "STANDARD_IA", "ONEZONE_IA", "SAME_AS_SOURCE"}
+        if colder_share >= 0.50 and destination_classes.intersection(standard_like_destinations):
+            return "cold_data_replication_review", "destination_storage_class"
+        if int(replication.get("enabled_rule_count") or 0) >= 2:
+            return "multi_rule_replication_review", "replication_scope"
+        return "general_replication_review", "general_review"
+
     def _emit_storage_optimization_findings(
         self,
         *,
@@ -743,6 +810,7 @@ class S3StorageChecker:
         object_count = storage_metrics.get("object_count") if isinstance(storage_metrics, Mapping) else None
         standard_gib = 0.0
         intelligent_tiering_gib = 0.0
+        colder_gib = 0.0
         for item in breakdown.get("items", []) or []:
             if not isinstance(item, Mapping):
                 continue
@@ -755,14 +823,34 @@ class S3StorageChecker:
                 standard_gib += size_gib
             if storage_type.startswith("IntelligentTiering"):
                 intelligent_tiering_gib += size_gib
+            if storage_type in {
+                "StandardIAStorage",
+                "OneZoneIAStorage",
+                "IntelligentTieringIAStorage",
+                "IntelligentTieringAAStorage",
+                "GlacierStorage",
+                "GlacierIRStorage",
+                "DeepArchiveStorage",
+            }:
+                colder_gib += size_gib
         standard_share = (standard_gib / total_gib) if total_gib > 0 else 0.0
+        colder_share = (colder_gib / total_gib) if total_gib > 0 else 0.0
         has_transition = bool(lifecycle_analysis.get("has_transition"))
         has_abort_rule = bool(lifecycle_analysis.get("has_abort_incomplete"))
         has_intelligent_tiering = intelligent_tiering_gib > 0.0 or self._intelligent_tiering_configured_best_effort(
             s3, bucket=bucket
         )
+        primary_standard_optimization = self._primary_standard_storage_optimization(
+            total_gib=total_gib,
+            standard_share=standard_share,
+            object_count=object_count if isinstance(object_count, (int, float)) else None,
+            has_transition=has_transition,
+            has_intelligent_tiering=has_intelligent_tiering,
+            lifecycle_state=lifecycle_state,
+        )
 
-        if total_gib >= 128.0 and standard_share >= 0.80 and lifecycle_state != "unknown" and not has_transition:
+        if primary_standard_optimization == "lifecycle_transition":
+            recommendation_target = "Intelligent-Tiering" if isinstance(object_count, (int, float)) and float(object_count) >= self._TIERING_RECOMMENDATION_MIN_OBJECTS else "Standard-IA"
             yield FindingDraft(
                 check_id=self._CID_LIFECYCLE_REVIEW,
                 check_name="S3 lifecycle transition review",
@@ -776,8 +864,9 @@ class S3StorageChecker:
                     "and no enabled lifecycle transition rules were detected."
                 ),
                 recommendation=(
-                    "Review prefix-level lifecycle transitions for colder data, including Standard-IA, "
-                    "Intelligent-Tiering, Glacier Instant Retrieval, or archive tiers where retrieval patterns allow it."
+                    "Review prefix-level lifecycle transitions for colder data. "
+                    f"Start with {recommendation_target}, then consider Glacier Instant Retrieval or deeper archive tiers "
+                    "where retrieval patterns allow it."
                 ),
                 scope=scope,
                 issue_key={"check_id": self._CID_LIFECYCLE_REVIEW, "bucket": bucket},
@@ -788,6 +877,7 @@ class S3StorageChecker:
                     "total_size_gib": f"{total_gib:.4f}",
                     "standard_storage_gib": f"{standard_gib:.4f}",
                     "standard_storage_share": _stringify_number(standard_share),
+                    "recommended_transition_target": recommendation_target,
                 },
             )
 
@@ -797,13 +887,17 @@ class S3StorageChecker:
             has_abort_rule=has_abort_rule,
         )
         if multipart is not None:
+            multipart_severity, multipart_materiality = self._multipart_materiality(
+                stale_upload_count=int(multipart["stale_upload_count"]),
+                oldest_upload_age_days=int(multipart["oldest_upload_age_days"]),
+            )
             yield FindingDraft(
                 check_id=self._CID_MULTIPART,
                 check_name="S3 multipart upload cleanup review",
                 category="cost",
                 sub_category="storage",
                 status="info",
-                severity=Severity(level="medium", score=40),
+                severity=multipart_severity,
                 title=f"S3 bucket has stale multipart uploads without cleanup: {bucket}",
                 message=(
                     f"Bucket {bucket} has {multipart['stale_upload_count']} multipart upload(s) at least 7 days old, "
@@ -819,12 +913,17 @@ class S3StorageChecker:
                 dimensions={
                     "stale_upload_count": str(multipart["stale_upload_count"]),
                     "oldest_upload_age_days": str(multipart["oldest_upload_age_days"]),
+                    "materiality_band": multipart_materiality,
                 },
             )
 
         replication = self._replication_review_best_effort(s3, bucket=bucket)
         if replication is not None and total_gib >= 100.0:
             replicated_monthly_cost = total_cost
+            replication_pattern, recommendation_focus = self._replication_review_pattern(
+                replication=replication,
+                colder_share=colder_share,
+            )
             yield FindingDraft(
                 check_id=self._CID_REPLICATION,
                 check_name="S3 replication cost review",
@@ -839,7 +938,7 @@ class S3StorageChecker:
                 ),
                 recommendation=(
                     "Review whether all replicated prefixes still need replication, and whether destination storage "
-                    "classes and replication scope are intentionally optimized."
+                    f"classes and replication scope are intentionally optimized. Focus on {recommendation_focus.replace('_', ' ')} first."
                 ),
                 scope=scope,
                 issue_key={"check_id": self._CID_REPLICATION, "bucket": bucket},
@@ -854,16 +953,20 @@ class S3StorageChecker:
                     "replication_rule_count": str(replication["enabled_rule_count"]),
                     "total_size_gib": f"{total_gib:.4f}",
                     "source_storage_cost_usd": f"{total_cost:.4f}",
+                    "colder_storage_share": _stringify_number(colder_share),
+                    "replication_pattern": replication_pattern,
+                    "recommendation_focus": recommendation_focus,
                     "replication_destinations_json": _stable_json(replication["destinations"]),
                 },
             )
 
-        if total_gib >= 256.0 and standard_share >= 0.90 and not has_intelligent_tiering:
+        if primary_standard_optimization == "intelligent_tiering":
             object_text = ""
             dimensions = {
                 "currency": "USD",
                 "total_size_gib": f"{total_gib:.4f}",
                 "standard_storage_share": _stringify_number(standard_share),
+                "recommended_transition_target": "Intelligent-Tiering",
             }
             if isinstance(object_count, (int, float)):
                 object_text = f" across about {int(object_count)} objects"
