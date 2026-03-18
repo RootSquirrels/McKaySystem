@@ -145,6 +145,18 @@ def test_recommendations_response_is_enriched(monkeypatch) -> None:  # type: ign
     assert (item.get("current") or {}).get("value") == "m5.2xlarge"
     assert item.get("confidence") == 91
     assert item.get("confidence_label") == "high"
+    confidence_model = item.get("confidence_model") or {}
+    assert confidence_model.get("version") == "v1"
+    assert confidence_model.get("overall_score") == 91
+    assert confidence_model.get("overall_label") == "high"
+    assert (confidence_model.get("issue") or {}).get("label") == "high"
+    assert "checker_estimated_confidence_provided" in ((confidence_model.get("issue") or {}).get("factors") or [])
+    assert (confidence_model.get("savings") or {}).get("label") == "high"
+    assert "snapshot_pricing_source" in ((confidence_model.get("savings") or {}).get("factors") or [])
+    assert (confidence_model.get("action_safety") or {}).get("label") == "high"
+    assert "reversible_optimization_action" in (
+        (confidence_model.get("action_safety") or {}).get("factors") or []
+    )
     assert item.get("pricing_source") == "snapshot"
     assert item.get("pricing_version") == "aws_2026_02_01"
     assert item.get("estimated_monthly_savings") == 100.5
@@ -234,6 +246,14 @@ def test_recommendations_response_includes_graph_package_context(monkeypatch) ->
     assert graph_package.get("package_owner_hint") == "team-storage"
     assert graph_package.get("actionability_label") in {"medium", "high"}
     assert graph_package.get("related_services") == ["ec2", "vpc"]
+    confidence_model = item.get("confidence_model") or {}
+    assert (confidence_model.get("action_safety") or {}).get("label") in {"medium", "high"}
+    assert "medium_blast_radius" in (
+        (confidence_model.get("action_safety") or {}).get("factors") or []
+    )
+    assert "owner_hint_present" in (
+        (confidence_model.get("action_safety") or {}).get("factors") or []
+    )
     checklist = graph_package.get("dependency_checklist") or []
     assert "Confirm attached or recently related compute no longer requires this storage asset." in checklist
     assert "Verify instance lineage and mount expectations before cleanup." in checklist
@@ -744,6 +764,9 @@ def test_recommendations_response_uses_run_metadata_fallback(monkeypatch) -> Non
 
     assert resp.status_code == 200
     assert item.get("confidence") == 78
+    confidence_model = item.get("confidence_model") or {}
+    assert confidence_model.get("version") == "v1"
+    assert confidence_model.get("overall_score") == 78
     assert item.get("pricing_source") == "snapshot"
     assert item.get("pricing_version") == "aws_2026_04_01"
 

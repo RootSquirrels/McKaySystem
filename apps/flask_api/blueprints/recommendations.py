@@ -852,6 +852,128 @@ def _build_estimate_risk_warnings(
     return warnings
 
 
+def _confidence_label(score: int) -> str:
+    """Return a stable label for a confidence-like score."""
+
+    if score >= 80:
+        return "high"
+    if score >= 60:
+        return "medium"
+    return "low"
+
+
+def _bounded_confidence(score: int) -> int:
+    """Clamp a confidence-like score to the 0-100 range."""
+
+    return max(0, min(100, int(score)))
+
+
+def _build_confidence_component(score: int, factors: list[str]) -> dict[str, Any]:
+    """Build one normalized confidence component payload."""
+
+    bounded = _bounded_confidence(score)
+    return {
+        "score": bounded,
+        "label": _confidence_label(bounded),
+        "factors": factors,
+    }
+
+
+def _build_confidence_model(
+    *,
+    check_id: str,
+    rule: dict[str, Any],
+    payload: dict[str, Any],
+    graph_package: dict[str, Any] | None,
+    monthly_savings: float,
+    pricing_source: str,
+    pricing_version: str | None,
+    confidence: int,
+) -> dict[str, Any]:
+    """Build confidence model v1 with issue, savings, and action-safety scores."""
+
+    dimensions = payload.get("dimensions")
+    if not isinstance(dimensions, dict):
+        dimensions = {}
+
+    issue_score = confidence
+    issue_factors = ["base_checker_confidence"]
+    optimization_focus = str(dimensions.get("optimization_focus") or "").strip().lower()
+    if optimization_focus:
+        issue_factors.append("optimization_focus_present")
+        if optimization_focus.endswith("_review"):
+            issue_score -= 6
+            issue_factors.append("review_semantics_reduce_issue_certainty")
+        else:
+            issue_score += 4
+            issue_factors.append("explicit_target_state_increases_issue_certainty")
+    if payload.get("estimated") and isinstance(payload.get("estimated"), dict):
+        issue_factors.append("checker_estimated_confidence_provided")
+
+    savings_score = confidence
+    savings_factors = ["base_checker_confidence"]
+    if pricing_source == "snapshot":
+        savings_score += 6
+        savings_factors.append("snapshot_pricing_source")
+    elif pricing_source == "finding_estimate":
+        savings_score -= 8
+        savings_factors.append("directional_finding_estimate")
+    else:
+        savings_factors.append("non_snapshot_pricing_source")
+    if pricing_version:
+        savings_score += 4
+        savings_factors.append("pricing_version_present")
+    else:
+        savings_score -= 4
+        savings_factors.append("pricing_version_missing")
+    if monthly_savings <= 0.0:
+        savings_score -= 15
+        savings_factors.append("no_positive_estimated_savings")
+    elif monthly_savings >= 100.0:
+        savings_score += 2
+        savings_factors.append("material_estimated_savings")
+    recommendation_type = str(rule.get("recommendation_type") or "")
+    if recommendation_type.startswith("storage.lifecycle") or recommendation_type.startswith("commitment."):
+        savings_score -= 5
+        savings_factors.append("directional_optimization_surface")
+
+    action_safety_score = confidence
+    action_safety_factors = ["base_checker_confidence"]
+    if bool(rule.get("requires_approval")):
+        action_safety_score -= 12
+        action_safety_factors.append("manual_approval_required")
+    action_type = str(rule.get("action_type") or "").strip().lower()
+    if action_type == "terminate":
+        action_safety_score -= 10
+        action_safety_factors.append("destructive_action_type")
+    elif action_type in {"rightsize", "tune"}:
+        action_safety_score += 3
+        action_safety_factors.append("reversible_optimization_action")
+    if graph_package:
+        blast_radius = str(graph_package.get("blast_radius") or "").strip().lower()
+        if blast_radius == "high":
+            action_safety_score -= 15
+            action_safety_factors.append("high_blast_radius")
+        elif blast_radius == "medium":
+            action_safety_score -= 8
+            action_safety_factors.append("medium_blast_radius")
+        elif blast_radius == "low":
+            action_safety_score += 4
+            action_safety_factors.append("low_blast_radius")
+        if str(graph_package.get("package_owner_hint") or "").strip():
+            action_safety_score += 4
+            action_safety_factors.append("owner_hint_present")
+
+    return {
+        "version": "v1",
+        "overall_score": confidence,
+        "overall_label": _confidence_label(confidence),
+        "issue": _build_confidence_component(issue_score, issue_factors),
+        "savings": _build_confidence_component(savings_score, savings_factors),
+        "action_safety": _build_confidence_component(action_safety_score, action_safety_factors),
+    }
+
+
 def _build_recommendation_item(
     row: dict[str, Any],
     *,
@@ -989,6 +1111,16 @@ def _build_recommendation_item(
     actionability_score = int((graph_package or {}).get("actionability_score") or 0) if graph_package else 0
     actionability_label = str((graph_package or {}).get("actionability_label") or "low") if graph_package else "low"
     owner_hint = str((graph_package or {}).get("package_owner_hint") or "").strip() or None
+    confidence_model = _build_confidence_model(
+        check_id=check_id,
+        rule=rule,
+        payload=payload,
+        graph_package=graph_package if isinstance(graph_package, dict) else None,
+        monthly_savings=monthly_savings,
+        pricing_source=pricing_source,
+        pricing_version=pricing_version,
+        confidence=confidence,
+    )
 
     return {
         "fingerprint": row.get("fingerprint"),
@@ -1018,7 +1150,8 @@ def _build_recommendation_item(
         "actionability_score": actionability_score,
         "actionability_label": actionability_label,
         "confidence": confidence,
-        "confidence_label": "high" if confidence >= 80 else ("medium" if confidence >= 60 else "low"),
+        "confidence_label": _confidence_label(confidence),
+        "confidence_model": confidence_model,
         "pricing_source": pricing_source,
         "pricing_version": pricing_version,
         "requires_approval": bool(rule.get("requires_approval")),

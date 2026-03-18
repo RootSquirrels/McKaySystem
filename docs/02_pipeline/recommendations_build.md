@@ -72,6 +72,11 @@ Invoke-RestMethod `
    - not workflow-contract
 2. `recommendations API item`:
    - normalized plan (`recommendation_type`, `action_type`, `target`, `priority`, `requires_approval`)
+   - confidence model v1 with:
+     - `confidence` / `confidence_label` for backward compatibility
+     - `confidence_model.issue`
+     - `confidence_model.savings`
+     - `confidence_model.action_safety`
    - optional bounded `graph_package` context for related-resource packaging
      including package semantics such as `package_kind`, `package_title`,
      `package_reason`, `related_services`, and `dependency_checklist`
