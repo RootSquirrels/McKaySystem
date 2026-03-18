@@ -523,6 +523,17 @@ export function FindingsClientPage() {
               type="button"
               className="finops-toolbar-btn rounded-lg px-3 py-2 text-sm font-medium transition"
               onClick={() => {
+                router.push("/dashboard");
+              }}
+            >
+              Dashboard
+            </button>
+          ) : null}
+          {canReadRuns ? (
+            <button
+              type="button"
+              className="finops-toolbar-btn rounded-lg px-3 py-2 text-sm font-medium transition"
+              onClick={() => {
                 router.push("/coverage");
               }}
             >

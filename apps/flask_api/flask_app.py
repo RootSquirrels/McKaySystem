@@ -52,6 +52,7 @@ from apps.flask_api.blueprints import facets as facets_module
 from apps.flask_api.blueprints import findings as findings_module
 from apps.flask_api.blueprints import groups as groups_module
 from apps.flask_api.blueprints import health as health_module
+from apps.flask_api.blueprints import kpis as kpis_module
 from apps.flask_api.blueprints import lifecycle as lifecycle_module
 from apps.flask_api.blueprints import recommendations as recommendations_module
 from apps.flask_api.blueprints import remediations as remediations_module
@@ -876,6 +877,7 @@ def _install_blueprint_backcompat_shims() -> None:
         users_module,
         api_keys_module,
         runs_module,
+        kpis_module,
         findings_module,
         recommendations_module,
         remediations_module,
@@ -941,6 +943,7 @@ app.register_blueprint(auth_module.auth_bp)
 app.register_blueprint(users_module.users_bp)
 app.register_blueprint(api_keys_module.api_keys_bp)
 app.register_blueprint(runs_module.runs_bp)
+app.register_blueprint(kpis_module.kpis_bp)
 app.register_blueprint(findings_module.findings_bp)
 app.register_blueprint(recommendations_module.recommendations_bp)
 app.register_blueprint(remediations_module.remediations_bp)

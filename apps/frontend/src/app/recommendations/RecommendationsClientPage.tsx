@@ -351,12 +351,23 @@ export function RecommendationsClientPage() {
           </p>
         </div>
         <div className="flex items-center gap-2 self-start">
-            {canReadFindings ? (
-              <button
-                type="button"
-                className="finops-toolbar-btn rounded-lg px-3 py-2 text-sm font-medium transition"
-                onClick={() => {
-                  router.push("/findings");
+          {canReadFindings ? (
+            <button
+              type="button"
+              className="finops-toolbar-btn rounded-lg px-3 py-2 text-sm font-medium transition"
+              onClick={() => {
+                router.push("/dashboard");
+              }}
+            >
+              Dashboard
+            </button>
+          ) : null}
+          {canReadFindings ? (
+            <button
+              type="button"
+              className="finops-toolbar-btn rounded-lg px-3 py-2 text-sm font-medium transition"
+              onClick={() => {
+                router.push("/findings");
                 }}
               >
                 Findings

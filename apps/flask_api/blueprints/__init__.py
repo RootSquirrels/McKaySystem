@@ -5,6 +5,7 @@ This package contains Flask Blueprint modules for each API domain:
 - auth: Authentication/session endpoints
 - users: RBAC user management endpoints
 - api_keys: RBAC API key management endpoints
+- kpis: Initial value-reporting KPI endpoints
 - runs: Run management endpoints
 - findings: Finding query and management endpoints
 - recommendations: Recommendation endpoints
@@ -23,6 +24,7 @@ from apps.flask_api.blueprints.facets import facets_bp
 from apps.flask_api.blueprints.findings import findings_bp
 from apps.flask_api.blueprints.groups import groups_bp
 from apps.flask_api.blueprints.health import health_bp
+from apps.flask_api.blueprints.kpis import kpis_bp
 from apps.flask_api.blueprints.lifecycle import lifecycle_bp
 from apps.flask_api.blueprints.recommendations import recommendations_bp
 from apps.flask_api.blueprints.remediations import remediations_bp
@@ -36,6 +38,7 @@ __all__ = [
     "auth_bp",
     "users_bp",
     "api_keys_bp",
+    "kpis_bp",
     "runs_bp",
     "findings_bp",
     "recommendations_bp",
