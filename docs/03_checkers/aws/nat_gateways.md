@@ -28,7 +28,7 @@ Detect NAT Gateway waste, routing hygiene issues, and data-processing cost signa
 
 - Orphaned NAT gateways not referenced by route tables.
 - Idle NAT gateways by p95 daily traffic.
-- High monthly-equivalent data processing (VPC endpoint candidate signal).
+- High monthly-equivalent data processing with sharper focus on whether same-AZ routing or VPC endpoints should be prioritized first.
 - Cross-AZ NAT routing patterns that can increase cost and risk.
 
 ## Configuration and defaults
@@ -55,6 +55,7 @@ Optional for improved cost-confidence:
 ## Determinism and limitations
 
 - Cross-AZ inference is best-effort and intentionally avoids noisy public route-table cases.
+- High-data findings use existing route and metric evidence only; no additional API round-trips are added for recommendation focus.
 - Cost estimates are directional and prioritize optimization discovery.
 - Permission denials are explicitly emitted as informational findings.
 

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 from botocore.exceptions import ClientError
+import pytest
 
 from checks.aws.cloudfront_distributions import (
     CloudFrontDistributionsChecker,
@@ -171,6 +172,45 @@ def test_caching_disabled_policy_emits() -> None:
     ]
     assert len(hits) == 1
     assert hits[0].issue_key.get("reason") == "managed_policy_caching_disabled"
+    assert hits[0].dimensions["optimization_focus"] == "enable_edge_caching"
+
+
+def test_caching_disabled_low_traffic_prefers_delete_or_disable() -> None:
+    import checks.aws.cloudfront_distributions as mod
+
+    now = datetime(2026, 2, 15, 12, 0, tzinfo=UTC)
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(mod.common, "now_utc", lambda: now)
+    try:
+        dist = _distribution(
+            dist_id="D_CACHE_LOW",
+            now=now,
+            cache_policy_id="413f160f-4f18-4c0b-95c7-bf7f44e8f58b",
+        )
+        cloudfront = FakeCloudFront(pages=[{"DistributionList": {"Items": [dist]}}])
+        cloudwatch = FakeCloudWatch(requests_by_distribution={"D_CACHE_LOW": [0.0] * 14})
+        ctx = _mk_ctx(cloudfront=cloudfront, cloudwatch=cloudwatch)
+
+        cfg = CloudFrontDistributionsConfig(
+            lookback_days=14,
+            min_daily_datapoints=7,
+            idle_p95_daily_requests_threshold=1.0,
+            min_age_days=7,
+        )
+        checker = CloudFrontDistributionsChecker(
+            account=SimpleNamespace(account_id="123", billing_account_id="123", partition="aws"),
+            cfg=cfg,
+        )
+        findings = list(checker.run(ctx))
+
+        hits = [
+            finding for finding in findings if finding.check_id == "aws.cloudfront.distributions.caching.disabled"
+        ]
+        assert len(hits) == 1
+        assert hits[0].dimensions["optimization_focus"] == "delete_or_disable_distribution"
+        assert hits[0].dimensions["p95_daily_requests"] == "0.00"
+    finally:
+        monkeypatch.undo()
 
 
 def test_list_distributions_access_denied_emits_info() -> None:

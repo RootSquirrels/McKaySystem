@@ -27,6 +27,7 @@ Detect CloudFront distributions that appear unused and configurations that disab
 - Low request volume by p95 daily `AWS/CloudFront::Requests` over lookback window.
 - Default cache behavior uses managed policy `CachingDisabled`.
 - Legacy default cache behavior has `MinTTL`, `DefaultTTL`, and `MaxTTL` set to zero.
+- Caching-disabled findings now distinguish between active distributions that should enable caching and low-traffic distributions that may be better disabled or deleted.
 
 ## Configuration and defaults
 
@@ -47,6 +48,7 @@ Typical read-only permissions:
 
 - Request-based unused detection is best-effort and requires CloudWatch datapoints.
 - Caching signal evaluates default behavior only (it does not score path-level cache hit ratios).
+- Caching recommendation focus reuses the same request datapoints already fetched for unused detection; it does not add extra CloudWatch calls.
 - Access-denied conditions are emitted as informational findings.
 
 ## Related tests

@@ -99,6 +99,7 @@ _FALLBACK_NAT_HOURLY_USD: float = NAT_FALLBACK_HOURLY_USD
 _FALLBACK_NAT_DATA_USD_PER_GB: float = NAT_FALLBACK_DATA_USD_PER_GB
 # Logger for this module
 _LOGGER = get_logger("nat_gateways")
+_NAT_VERY_HIGH_DATA_GIB_MONTH_THRESHOLD = 1_000.0
 
 
 def _resolve_nat_pricing(ctx: RunContext, *, region: str) -> tuple[float, float, str, int]:
@@ -118,6 +119,29 @@ def _resolve_nat_pricing(ctx: RunContext, *, region: str) -> tuple[float, float,
 def _csv_join(values: Sequence[str]) -> str:
     """Return a deterministic comma-separated list without empty values."""
     return ",".join(sorted({str(value).strip() for value in values if str(value).strip()}))
+
+
+def _nat_data_processing_focus(*, monthly_gib: float, has_cross_az_routes: bool) -> tuple[str, str]:
+    """Return optimization focus and recommendation text for high-data NAT findings."""
+    if has_cross_az_routes and float(monthly_gib) >= _NAT_VERY_HIGH_DATA_GIB_MONTH_THRESHOLD:
+        return (
+            "same_az_nat_and_endpoints",
+            "Prioritize same-AZ NAT routing first, then add VPC endpoints for heavy AWS service traffic.",
+        )
+    if has_cross_az_routes:
+        return (
+            "same_az_nat_routing",
+            "Review same-AZ NAT routing first, then reduce avoidable NAT traffic with VPC endpoints.",
+        )
+    if float(monthly_gib) >= _NAT_VERY_HIGH_DATA_GIB_MONTH_THRESHOLD:
+        return (
+            "vpc_endpoints_first",
+            "Prioritize VPC endpoints for high-volume AWS service traffic before other NAT optimizations.",
+        )
+    return (
+        "general_traffic_review",
+        "Review NAT traffic destinations and add the most relevant VPC endpoints first.",
+    )
 
 
 # -----------------------------
@@ -535,6 +559,10 @@ class NatGatewaysChecker:
                     if emitted["high_data"] < self._cfg.max_findings_per_type:
                         emitted["high_data"] += 1
                         data_cost = money(float(monthly_gib) * float(usd_per_gb))
+                        optimization_focus, focus_recommendation = _nat_data_processing_focus(
+                            monthly_gib=monthly_gib,
+                            has_cross_az_routes=bool(pairs),
+                        )
                         yield self._finding_high_data_processing(
                             ctx,
                             region,
@@ -547,6 +575,9 @@ class NatGatewaysChecker:
                             est_monthly_total_cost=money(monthly_hourly_cost + data_cost),
                             pricing_conf=pricing_conf,
                             pricing_notes=pricing_notes,
+                            optimization_focus=optimization_focus,
+                            focus_recommendation=focus_recommendation,
+                            has_cross_az_routes=bool(pairs),
                         )
 
         return
@@ -853,6 +884,9 @@ class NatGatewaysChecker:
         est_monthly_total_cost: float,
         pricing_conf: int,
         pricing_notes: str,
+        optimization_focus: str,
+        focus_recommendation: str,
+        has_cross_az_routes: bool,
     ) -> FindingDraft:
         return FindingDraft(
             check_id="aws.ec2.nat.gateways.high.data.processing",
@@ -866,7 +900,10 @@ class NatGatewaysChecker:
                 "consider VPC endpoints (S3/DynamoDB gateway endpoints; interface endpoints for ECR, STS, SSM, Logs, etc.) "
                 "to keep traffic private and reduce NAT data processing charges."
             ),
-            recommendation="Review NAT traffic destinations; add relevant VPC endpoints; reduce chatty workloads; consider consolidating NAT usage.",
+            recommendation=(
+                f"{focus_recommendation} Review NAT traffic destinations, add relevant VPC endpoints, "
+                "reduce chatty workloads, and consider consolidating NAT usage where safe."
+            ),
             remediation="Add VPC endpoints for high-volume AWS service traffic and re-route private subnets accordingly.",
             scope=build_scope(
                 ctx,
@@ -883,6 +920,8 @@ class NatGatewaysChecker:
                 "vpc_id": vpc_id,
                 "availability_zone": az,
                 "estimated_monthly_gib": f"{monthly_gib:.2f}",
+                "optimization_focus": optimization_focus,
+                "cross_az_routing_detected": str(bool(has_cross_az_routes)).lower(),
             },
             estimated_monthly_cost=est_monthly_total_cost,
             estimated_monthly_savings=est_monthly_data_cost,

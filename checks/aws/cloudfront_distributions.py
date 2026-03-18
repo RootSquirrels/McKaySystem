@@ -141,6 +141,23 @@ def _p95(values: Sequence[float]) -> float:
     return float(p95_value)
 
 
+def _caching_disabled_focus(
+    *,
+    p95_daily_requests: float | None,
+    idle_threshold: float,
+) -> tuple[str, str]:
+    """Return optimization focus and recommendation text for caching-disabled findings."""
+    if p95_daily_requests is not None and float(p95_daily_requests) <= float(idle_threshold):
+        return (
+            "delete_or_disable_distribution",
+            "Validate whether the distribution is still needed before spending time tuning caching.",
+        )
+    return (
+        "enable_edge_caching",
+        "Improve cache policy and TTL behavior before origin traffic grows further.",
+    )
+
+
 class _CloudFrontCloudWatch:
     """Batch CloudWatch fetcher for CloudFront daily request counts."""
 
@@ -306,10 +323,23 @@ class CloudFrontDistributionsChecker(Checker):
                 resource_arn=_distribution_arn(summary),
             )
             domain_name = _distribution_domain(summary)
+            series = requests_by_distribution.get(dist_id, [])
+            p95_daily_requests = _p95(series) if len(series) >= int(self._cfg.min_daily_datapoints) else None
 
             if emitted_cache_disabled < int(self._cfg.max_findings_per_type):
                 cache_disabled_reason = _default_behavior_cache_disabled_reason(summary)
                 if cache_disabled_reason:
+                    optimization_focus, focus_recommendation = _caching_disabled_focus(
+                        p95_daily_requests=p95_daily_requests,
+                        idle_threshold=float(self._cfg.idle_p95_daily_requests_threshold),
+                    )
+                    dimensions = {
+                        "distribution_domain": domain_name,
+                        "caching_disabled_reason": cache_disabled_reason,
+                        "optimization_focus": optimization_focus,
+                    }
+                    if p95_daily_requests is not None:
+                        dimensions["p95_daily_requests"] = f"{p95_daily_requests:.2f}"
                     findings.append(
                         FindingDraft(
                             check_id="aws.cloudfront.distributions.caching.disabled",
@@ -324,13 +354,10 @@ class CloudFrontDistributionsChecker(Checker):
                                 "which can increase origin load and transfer/request charges."
                             ),
                             recommendation=(
-                                "Enable caching for cacheable paths using an appropriate "
-                                "cache policy and TTL values."
+                                f"{focus_recommendation} Enable caching for cacheable paths "
+                                "using an appropriate cache policy and TTL values."
                             ),
-                            dimensions={
-                                "distribution_domain": domain_name,
-                                "caching_disabled_reason": cache_disabled_reason,
-                            },
+                            dimensions=dimensions,
                         ).with_issue(
                             distribution_id=dist_id,
                             reason=cache_disabled_reason,
@@ -340,10 +367,10 @@ class CloudFrontDistributionsChecker(Checker):
 
             if emitted_unused >= int(self._cfg.max_findings_per_type):
                 continue
-            series = requests_by_distribution.get(dist_id, [])
             if len(series) < int(self._cfg.min_daily_datapoints):
                 continue
-            p95_daily_requests = _p95(series)
+            if p95_daily_requests is None:
+                continue
             if p95_daily_requests > float(self._cfg.idle_p95_daily_requests_threshold):
                 continue
 

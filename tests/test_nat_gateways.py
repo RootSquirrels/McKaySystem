@@ -233,6 +233,54 @@ def test_high_data_processing_emits(monkeypatch: pytest.MonkeyPatch) -> None:
     hits = [f for f in findings if f.check_id == "aws.ec2.nat.gateways.high.data.processing"]
     assert len(hits) == 1
     assert hits[0].scope.resource_id == "nat-1"
+    assert hits[0].dimensions["optimization_focus"] == "general_traffic_review"
+    assert hits[0].dimensions["cross_az_routing_detected"] == "false"
+
+
+def test_high_data_processing_cross_az_focus_emits(monkeypatch: pytest.MonkeyPatch) -> None:
+    import checks.aws.nat_gateways as mod
+
+    now = datetime(2026, 1, 24, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(mod, "now_utc", lambda: now)
+
+    nat = {
+        "NatGatewayId": "nat-1",
+        "State": "available",
+        "VpcId": "vpc-1",
+        "SubnetId": "subnet-nat",
+        "CreateTime": now - timedelta(days=10),
+        "Tags": [],
+    }
+    rt = {
+        "RouteTableId": "rtb-1",
+        "Associations": [{"SubnetId": "subnet-private"}],
+        "Routes": [{"DestinationCidrBlock": "0.0.0.0/0", "NatGatewayId": "nat-1"}],
+    }
+
+    ec2 = FakeEC2(
+        region="eu-west-3",
+        pages_by_op={
+            "describe_nat_gateways": [{"NatGateways": [nat]}],
+            "describe_route_tables": [{"RouteTables": [rt]}],
+        },
+        subnets={
+            "subnet-nat": {"SubnetId": "subnet-nat", "AvailabilityZone": "eu-west-3a"},
+            "subnet-private": {"SubnetId": "subnet-private", "AvailabilityZone": "eu-west-3b"},
+        },
+    )
+
+    day_bytes = 25 * (1024.0**3)
+    cw = FakeCloudWatch(out_by_id={"m0": [day_bytes] * 10}, in_by_id={"m0": [day_bytes] * 10})
+    ctx = _mk_ctx(ec2=ec2, cloudwatch=cw, pricing=FakePricing())
+
+    cfg = NatGatewaysConfig(high_data_processing_gib_month_threshold=100.0)
+    checker = NatGatewaysChecker(account_id="123", billing_account_id="123", cfg=cfg)
+    findings = list(checker.run(ctx))
+
+    hits = [f for f in findings if f.check_id == "aws.ec2.nat.gateways.high.data.processing"]
+    assert len(hits) == 1
+    assert hits[0].dimensions["optimization_focus"] == "same_az_nat_and_endpoints"
+    assert hits[0].dimensions["cross_az_routing_detected"] == "true"
 
 
 def test_cross_az_nat_emits(monkeypatch: pytest.MonkeyPatch) -> None:
