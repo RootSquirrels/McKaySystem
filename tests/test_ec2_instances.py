@@ -148,6 +148,7 @@ def test_underutilized_running_instance_emits(monkeypatch: pytest.MonkeyPatch) -
     assert f.dimensions["vpc_id"] == "vpc-1"
     assert f.dimensions["security_group_ids"] == "sg-1"
     assert f.dimensions["attached_volume_ids"] == "vol-1"
+    assert f.dimensions["optimization_focus"] == "schedule_or_stop_candidate"
 
 
 def test_underutilized_includes_rightsizing_target_and_delta(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -192,6 +193,7 @@ def test_underutilized_includes_rightsizing_target_and_delta(monkeypatch: pytest
     assert float(f.estimated_monthly_savings or 0.0) == pytest.approx(146.0, rel=1e-6)
     assert (f.dimensions or {}).get("recommended_instance_type") == "m5.xlarge"
     assert (f.dimensions or {}).get("rightsizing_monthly_savings_usd") == "146.00"
+    assert (f.dimensions or {}).get("optimization_focus") == "downsize_candidate"
 
 
 def test_stopped_long_emits_with_storage_estimate(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -243,6 +245,7 @@ def test_stopped_long_emits_with_storage_estimate(monkeypatch: pytest.MonkeyPatc
     assert f.dimensions["vpc_id"] == "vpc-stop"
     assert f.dimensions["security_group_ids"] == "sg-stop"
     assert f.dimensions["attached_volume_ids"] == "vol-1"
+    assert f.dimensions["optimization_focus"] == "snapshot_then_terminate_review"
 
 
 def test_old_generation_family_emits_info(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -270,6 +273,7 @@ def test_old_generation_family_emits_info(monkeypatch: pytest.MonkeyPatch) -> No
     hits = [f for f in findings if f.check_id == "aws.ec2.instances.old.generation"]
     assert len(hits) == 1
     assert hits[0].status == "info"
+    assert hits[0].dimensions["optimization_focus"] == "graviton_first"
 
 
 def test_missing_tags_emits(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -334,6 +338,98 @@ def test_t_family_credit_issue_emits(monkeypatch: pytest.MonkeyPatch) -> None:
     hits = [f for f in findings if f.check_id == "aws.ec2.instances.t.credit.issues"]
     assert len(hits) == 1
     assert hits[0].scope.resource_id == "i-t"
+    assert hits[0].dimensions["optimization_focus"] == "burstable_tuning_review"
+
+
+def test_stopped_long_very_old_prefers_terminate_candidate(monkeypatch: pytest.MonkeyPatch) -> None:
+    import checks.aws.ec2_instances as mod
+
+    monkeypatch.setattr(mod, "now_utc", lambda: datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc))
+
+    ec2 = FakeEC2(
+        region="eu-west-3",
+        pages_by_op={
+            "describe_instances": [
+                {
+                    "Reservations": [
+                        {
+                            "Instances": [
+                                {
+                                    "InstanceId": "i-stop-old",
+                                    "InstanceType": "t3.micro",
+                                    "State": {"Name": "stopped"},
+                                    "StateTransitionReason": "User initiated (2025-12-01 00:00:00)",
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ],
+            "describe_security_groups": [{"SecurityGroups": []}],
+            "describe_network_interfaces": [{"NetworkInterfaces": []}],
+        },
+    )
+
+    ctx = _mk_ctx(ec2=ec2, cloudwatch=None, pricing=None)
+    checker = EC2InstancesChecker(
+        account=mod.AwsAccountContext(account_id="123", billing_account_id="123"),
+        cfg=EC2InstancesConfig(stopped_long_age_days=30),
+    )
+    findings = list(checker.run(ctx))
+    hit = next(f for f in findings if f.check_id == "aws.ec2.instances.stopped.long")
+    assert hit.dimensions["optimization_focus"] == "terminate_candidate"
+
+
+def test_old_generation_non_graviton_candidate_prefers_current_generation_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    import checks.aws.ec2_instances as mod
+
+    monkeypatch.setattr(mod, "now_utc", lambda: datetime(2026, 1, 24, 12, 0, 0, tzinfo=timezone.utc))
+
+    ec2 = FakeEC2(
+        region="eu-west-3",
+        pages_by_op={
+            "describe_instances": [
+                {
+                    "Reservations": [
+                        {"Instances": [{"InstanceId": "i-old-x1", "InstanceType": "x1.16xlarge", "State": {"Name": "running"}}]}
+                    ]
+                }
+            ],
+            "describe_security_groups": [{"SecurityGroups": []}],
+            "describe_network_interfaces": [{"NetworkInterfaces": []}],
+        },
+    )
+    ctx = _mk_ctx(ec2=ec2, cloudwatch=None, pricing=None)
+    checker = EC2InstancesChecker(account=mod.AwsAccountContext(account_id="123", billing_account_id="123"))
+    findings = list(checker.run(ctx))
+    hit = next(f for f in findings if f.check_id == "aws.ec2.instances.old.generation")
+    assert hit.dimensions["optimization_focus"] == "current_generation_refresh"
+
+
+def test_t_family_credit_issue_with_surplus_prefers_non_burstable_or_larger_t(monkeypatch: pytest.MonkeyPatch) -> None:
+    import checks.aws.ec2_instances as mod
+
+    monkeypatch.setattr(mod, "now_utc", lambda: datetime(2026, 1, 24, 12, 0, 0, tzinfo=timezone.utc))
+
+    ec2 = FakeEC2(
+        region="eu-west-3",
+        pages_by_op={
+            "describe_instances": [{"Reservations": [{"Instances": [{"InstanceId": "i-t-surplus", "InstanceType": "t3.micro", "State": {"Name": "running"}}]}]}],
+            "describe_security_groups": [{"SecurityGroups": []}],
+            "describe_network_interfaces": [{"NetworkInterfaces": []}],
+        },
+    )
+
+    cw = FakeCloudWatch(results_by_id={"cb0": [0.0], "sc0": [12.0]})
+    ctx = _mk_ctx(ec2=ec2, cloudwatch=cw, pricing=None)
+
+    checker = mod.EC2InstancesChecker(
+        account=mod.AwsAccountContext(account_id="123", billing_account_id="123"),
+        cfg=mod.EC2InstancesConfig(t_credit_balance_min_threshold=20.0, t_credit_lookback_days=7),
+    )
+    findings = list(checker.run(ctx))
+    hit = next(f for f in findings if f.check_id == "aws.ec2.instances.t.credit.issues")
+    assert hit.dimensions["optimization_focus"] == "non_burstable_or_larger_t"
 
 
 def test_imdsv1_allowed_emits(monkeypatch: pytest.MonkeyPatch) -> None:

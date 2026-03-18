@@ -183,6 +183,7 @@ _OLD_FAMILIES: set[str] = {
     "x1",
     "x1e",
 }
+_GRAVITON_CANDIDATE_FAMILIES: set[str] = {"t2", "m3", "c3", "r3"}
 
 
 _INSTANCE_SIZE_ORDER: tuple[str, ...] = (
@@ -215,6 +216,51 @@ def _instance_family(instance_type: str) -> str:
     if not t:
         return ""
     return t.split(".", 1)[0]
+
+
+def _underutilized_optimization_focus(
+    *,
+    instance_type: str,
+    cpu_avg: float,
+    net_kib_per_hour: float,
+    cpu_threshold: float,
+    net_threshold: float,
+    recommended_instance_type: str | None,
+) -> str:
+    """Return the primary optimization focus for an underutilized EC2 instance."""
+    _family, size = _split_instance_type(instance_type)
+    if (
+        cpu_avg <= max(1.0, float(cpu_threshold) * 0.25)
+        and net_kib_per_hour <= max(32.0, float(net_threshold) * 0.25)
+        and size in {"nano", "micro", "small"}
+    ):
+        return "schedule_or_stop_candidate"
+    if recommended_instance_type:
+        return "downsize_candidate"
+    return "rightsizing_review"
+
+
+def _stopped_instance_optimization_focus(*, age_days: int) -> str:
+    """Return the primary optimization focus for a long-stopped instance."""
+    if int(age_days) >= 90:
+        return "terminate_candidate"
+    return "snapshot_then_terminate_review"
+
+
+def _old_generation_optimization_focus(*, family: str) -> tuple[str, str]:
+    """Return modernization focus and recommendation target for old EC2 families."""
+    if family in _GRAVITON_CANDIDATE_FAMILIES:
+        return ("graviton_first", "t4g/m7g/c7g/r7g")
+    return ("current_generation_refresh", "m7i/c7i/r7i or equivalent current generation")
+
+
+def _t_family_credit_optimization_focus(*, surplus_credits: float, credit_balance_min: float) -> str:
+    """Return the primary optimization focus for burstable CPU credit issues."""
+    if float(surplus_credits) > 0.0:
+        return "non_burstable_or_larger_t"
+    if float(credit_balance_min) <= 0.0:
+        return "larger_t_or_unlimited_review"
+    return "burstable_tuning_review"
 
 
 def _split_instance_type(instance_type: str) -> tuple[str, str]:
@@ -590,6 +636,14 @@ class EC2InstancesChecker:
             estimate_notes = "; ".join(estimate_notes_parts)
             estimate_confidence = min(int(conf), int(rec_conf)) if rec_type else int(conf)
             estimated_savings = rightsizing_savings if rightsizing_savings is not None else cost
+            optimization_focus = _underutilized_optimization_focus(
+                instance_type=itype,
+                cpu_avg=cpu,
+                net_kib_per_hour=net_kib_h,
+                cpu_threshold=cfg.underutilized_cpu_avg_threshold,
+                net_threshold=cfg.underutilized_net_avg_kib_per_hour_threshold,
+                recommended_instance_type=rec_type,
+            )
 
             scope = build_scope(
                 ctx,
@@ -630,6 +684,7 @@ class EC2InstancesChecker:
                         "cpu_avg": f"{cpu:.2f}",
                         "net_kib_per_hour": f"{net_kib_h:.2f}",
                         "lookback_days": str(cfg.underutilized_lookback_days),
+                        "optimization_focus": optimization_focus,
                     },
                     issue_key={"instance_id": iid, "signal": "underutilized"},
                 )
@@ -739,6 +794,7 @@ class EC2InstancesChecker:
                         "age_days": str(age_days),
                         "stop_date": stop_ts.date().isoformat(),
                         "attached_storage_gib": f"{size_gib:.0f}",
+                        "optimization_focus": _stopped_instance_optimization_focus(age_days=age_days),
                     },
                     issue_key={"instance_id": iid, "signal": "stopped_long"},
                 )
@@ -767,6 +823,7 @@ class EC2InstancesChecker:
             fam = _instance_family(itype)
             if not iid or not fam or fam not in _OLD_FAMILIES:
                 continue
+            modernization_focus, recommended_target = _old_generation_optimization_focus(family=fam)
 
             scope = build_scope(
                 ctx,
@@ -788,8 +845,14 @@ class EC2InstancesChecker:
                     title=f"EC2 instance {iid} uses an old generation family ({fam})",
                     scope=scope,
                     message=f"Instance type '{itype}' is an older generation family.",
-                    recommendation="Plan a migration to a current generation family (e.g., t3/t4g, m6/m7, c6/c7, r6/r7).",
-                    dimensions={**_instance_relationship_dimensions(ins), "instance_type": itype, "family": fam},
+                    recommendation=f"Plan a migration to {recommended_target} after validating workload compatibility and performance.",
+                    dimensions={
+                        **_instance_relationship_dimensions(ins),
+                        "instance_type": itype,
+                        "family": fam,
+                        "optimization_focus": modernization_focus,
+                        "recommended_target": recommended_target,
+                    },
                     issue_key={"instance_id": iid, "signal": "old_generation"},
                 )
             )
@@ -1037,6 +1100,10 @@ class EC2InstancesChecker:
                         "credit_balance_min": f"{bal_min:.2f}",
                         "surplus_credits_charged_sum": f"{surplus:.2f}",
                         "lookback_days": str(cfg.t_credit_lookback_days),
+                        "optimization_focus": _t_family_credit_optimization_focus(
+                            surplus_credits=surplus,
+                            credit_balance_min=bal_min,
+                        ),
                     },
                     issue_key={"instance_id": iid, "signal": "t_credit_issues"},
                 )

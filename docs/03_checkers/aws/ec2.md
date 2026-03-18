@@ -29,7 +29,7 @@ Detect EC2 utilization, lifecycle, security, and tagging inefficiencies.
 
 - Low-utilization running instances.
 - Long-stopped instances with ongoing storage cost.
-- Legacy instance families and burst-credit pressure.
+- Legacy instance families and burst-credit pressure, with clearer guidance for downsize vs schedule vs modernization actions.
 - IMDSv1 allowed and publicly exposed SSH/RDP.
 - Missing required tags and unused security groups.
 
@@ -57,6 +57,7 @@ Optional for improved cost-confidence:
 ## Determinism and limitations
 
 - Metric-dependent findings require CloudWatch coverage.
+- Optimization focus is strengthened using existing inventory, tag, and CloudWatch data only; no extra API calls are added.
 - Estimates are directional and intended for optimization triage.
 - Empty or malformed inputs are handled without terminating the run.
 
