@@ -10,7 +10,8 @@ from flask import Blueprint
 from apps.backend.db import db_conn, fetch_all_dict_conn, fetch_one_dict_conn
 from apps.flask_api.auth_middleware import require_permission
 from apps.flask_api.utils import (
-    _json,
+    _err,
+    _ok,
     _parse_csv_list,
     _parse_int,
     _q,
@@ -122,10 +123,10 @@ def api_groups() -> Any:
             rank = int(g.get("max_severity_rank") or 0)
             g["max_severity"] = {4: "critical", 3: "high", 2: "medium", 1: "low"}.get(rank, "unknown")
 
-        return _json({"items": groups, "total": total, "limit": limit, "offset": offset})
+        return _ok({"items": groups, "total": total, "limit": limit, "offset": offset})
 
     except ValueError as exc:
-        return _json({"error": "bad_request", "message": str(exc)}, status=400)
+        return _err("bad_request", str(exc), status=400)
 
 
 @groups_bp.route("/api/groups/<group_key>", methods=["GET"])
@@ -184,7 +185,7 @@ def api_group_detail(group_key: str) -> Any:
             )
 
             if not summary:
-                return _json({"error": "not_found", "message": "group not found"}, status=404)
+                return _err("not_found", "group not found", status=404)
 
             members_sql = f"""
                 SELECT
@@ -207,7 +208,7 @@ def api_group_detail(group_key: str) -> Any:
             )
             total = int(count_row["n"] or 0) if count_row else 0
 
-        return _json({"group": summary, "items": members, "total": total, "limit": limit, "offset": offset})
+        return _ok({"group": summary, "items": members, "total": total, "limit": limit, "offset": offset})
 
     except ValueError as exc:
-        return _json({"error": "bad_request", "message": str(exc)}, status=400)
+        return _err("bad_request", str(exc), status=400)

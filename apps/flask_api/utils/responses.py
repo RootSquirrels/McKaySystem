@@ -131,7 +131,12 @@ def _api_internal_error_response(exc: Exception) -> Any:
         "/api/lifecycle/resolve",
         "/api/lifecycle/snooze",
     }:
-        return jsonify({"error": "internal_error", "detail": exc_text}), 500
+        return _err(
+            "internal_error",
+            "internal error",
+            status=500,
+            extra={"detail": exc_text},
+        )
 
     # Groups and runs/diff - message in detail
     if (
@@ -139,7 +144,12 @@ def _api_internal_error_response(exc: Exception) -> Any:
         or path == "/api/groups"
         or (path.startswith("/api/groups/"))
     ):
-        return _json({"error": "internal_error", "message": exc_text}, status=500)
+        return _err(
+            "internal_error",
+            "internal error",
+            status=500,
+            extra={"detail": exc_text},
+        )
 
     # Default - generic internal error
     return _err("internal_error", "internal error", status=500)

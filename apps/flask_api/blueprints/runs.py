@@ -6,7 +6,7 @@ and computing diffs.
 
 from typing import Any
 
-from flask import Blueprint, jsonify
+from flask import Blueprint
 
 from apps.backend.db import db_conn, fetch_all_dict_conn, fetch_one_dict_conn
 from apps.flask_api.auth_middleware import require_permission
@@ -15,7 +15,8 @@ from apps.flask_api.utils import (
     _coerce_non_negative_int,
     _coerce_optional_text,
     _coerce_positive_int,
-    _json,
+    _err,
+    _ok,
     _parse_iso8601_dt,
     _q,
     _require_scope_from_query,
@@ -126,9 +127,9 @@ def api_runs_latest() -> Any:
                 """,
                 (tenant_id, workspace),
             )
-        return jsonify({"tenant_id": tenant_id, "workspace": workspace, "run": row})
+        return _ok({"tenant_id": tenant_id, "workspace": workspace, "run": row})
     except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
+        return _err("bad_request", str(exc), status=400)
 
 
 @runs_bp.route("/api/runs/latest/coverage", methods=["GET"])
@@ -176,9 +177,8 @@ def api_runs_latest_coverage() -> Any:
             )
 
         if not row:
-            return _json(
+            return _ok(
                 {
-                    "ok": True,
                     "tenant_id": tenant_id,
                     "workspace": workspace,
                     "run": None,
@@ -214,9 +214,8 @@ def api_runs_latest_coverage() -> Any:
                 "confidence": row.get("confidence"),
             }
 
-        return _json(
+        return _ok(
             {
-                "ok": True,
                 "tenant_id": tenant_id,
                 "workspace": workspace,
                 "run": run,
@@ -224,7 +223,7 @@ def api_runs_latest_coverage() -> Any:
             }
         )
     except ValueError as exc:
-        return _json({"error": "bad_request", "message": str(exc)}, status=400)
+        return _err("bad_request", str(exc), status=400)
 
 
 @runs_bp.route("/api/runs/latest/graph/context", methods=["GET"])
@@ -236,13 +235,7 @@ def api_runs_latest_graph_context() -> Any:
         filters = _graph_query_filters()
         resource_key = filters["resource_key"]
         if not resource_key:
-            return _json(
-                {
-                    "error": "bad_request",
-                    "message": "resource_key is required",
-                },
-                status=400,
-            )
+            return _err("bad_request", "resource_key is required", status=400)
 
         with db_conn() as conn:
             latest_run = _latest_run_ref(conn, tenant_id, workspace)
@@ -254,9 +247,8 @@ def api_runs_latest_graph_context() -> Any:
                 neighbor_limit=filters["neighbor_limit"],
             )
             if not resource:
-                return _json(
+                return _ok(
                     {
-                        "ok": True,
                         "tenant_id": tenant_id,
                         "workspace": workspace,
                         "run": latest_run,
@@ -267,9 +259,8 @@ def api_runs_latest_graph_context() -> Any:
                     }
                 )
 
-        return _json(
+        return _ok(
             {
-                "ok": True,
                 "tenant_id": tenant_id,
                 "workspace": workspace,
                 "run": latest_run,
@@ -280,7 +271,7 @@ def api_runs_latest_graph_context() -> Any:
             }
         )
     except ValueError as exc:
-        return _json({"error": "bad_request", "message": str(exc)}, status=400)
+        return _err("bad_request", str(exc), status=400)
 
 
 @runs_bp.route("/api/runs/latest/coverage/checkers", methods=["GET"])
@@ -293,9 +284,8 @@ def api_runs_latest_coverage_checkers() -> Any:
         with db_conn() as conn:
             latest_run = _latest_run_ref(conn, tenant_id, workspace)
             if not latest_run:
-                return _json(
+                return _ok(
                     {
-                        "ok": True,
                         "tenant_id": tenant_id,
                         "workspace": workspace,
                         "run": None,
@@ -388,9 +378,8 @@ def api_runs_latest_coverage_checkers() -> Any:
                 }
             )
 
-        return _json(
+        return _ok(
             {
-                "ok": True,
                 "tenant_id": tenant_id,
                 "workspace": workspace,
                 "run": latest_run,
@@ -401,7 +390,7 @@ def api_runs_latest_coverage_checkers() -> Any:
             }
         )
     except ValueError as exc:
-        return _json({"error": "bad_request", "message": str(exc)}, status=400)
+        return _err("bad_request", str(exc), status=400)
 
 
 @runs_bp.route("/api/runs/latest/coverage/issues", methods=["GET"])
@@ -414,9 +403,8 @@ def api_runs_latest_coverage_issues() -> Any:
         with db_conn() as conn:
             latest_run = _latest_run_ref(conn, tenant_id, workspace)
             if not latest_run:
-                return _json(
+                return _ok(
                     {
-                        "ok": True,
                         "tenant_id": tenant_id,
                         "workspace": workspace,
                         "run": None,
@@ -497,9 +485,8 @@ def api_runs_latest_coverage_issues() -> Any:
                 }
             )
 
-        return _json(
+        return _ok(
             {
-                "ok": True,
                 "tenant_id": tenant_id,
                 "workspace": workspace,
                 "run": latest_run,
@@ -510,7 +497,7 @@ def api_runs_latest_coverage_issues() -> Any:
             }
         )
     except ValueError as exc:
-        return _json({"error": "bad_request", "message": str(exc)}, status=400)
+        return _err("bad_request", str(exc), status=400)
 
 
 @runs_bp.route("/api/runs/latest/coverage/services", methods=["GET"])
@@ -523,9 +510,8 @@ def api_runs_latest_coverage_services() -> Any:
         with db_conn() as conn:
             latest_run = _latest_run_ref(conn, tenant_id, workspace)
             if not latest_run:
-                return _json(
+                return _ok(
                     {
-                        "ok": True,
                         "tenant_id": tenant_id,
                         "workspace": workspace,
                         "run": None,
@@ -585,9 +571,8 @@ def api_runs_latest_coverage_services() -> Any:
                 tuple(params),
             )
 
-        return _json(
+        return _ok(
             {
-                "ok": True,
                 "tenant_id": tenant_id,
                 "workspace": workspace,
                 "run": latest_run,
@@ -595,7 +580,7 @@ def api_runs_latest_coverage_services() -> Any:
             }
         )
     except ValueError as exc:
-        return _json({"error": "bad_request", "message": str(exc)}, status=400)
+        return _err("bad_request", str(exc), status=400)
 
 
 @runs_bp.route("/api/runs/latest/coverage/accounts", methods=["GET"])
@@ -608,9 +593,8 @@ def api_runs_latest_coverage_accounts() -> Any:
         with db_conn() as conn:
             latest_run = _latest_run_ref(conn, tenant_id, workspace)
             if not latest_run:
-                return _json(
+                return _ok(
                     {
-                        "ok": True,
                         "tenant_id": tenant_id,
                         "workspace": workspace,
                         "run": None,
@@ -673,9 +657,8 @@ def api_runs_latest_coverage_accounts() -> Any:
                 tuple(params),
             )
 
-        return _json(
+        return _ok(
             {
-                "ok": True,
                 "tenant_id": tenant_id,
                 "workspace": workspace,
                 "run": latest_run,
@@ -683,7 +666,7 @@ def api_runs_latest_coverage_accounts() -> Any:
             }
         )
     except ValueError as exc:
-        return _json({"error": "bad_request", "message": str(exc)}, status=400)
+        return _err("bad_request", str(exc), status=400)
 
 
 @runs_bp.route("/api/runs/coverage/history", methods=["GET"])
@@ -735,9 +718,8 @@ def api_runs_coverage_history() -> Any:
                 tuple([*params, filters["limit"]]),
             )
 
-        return _json(
+        return _ok(
             {
-                "ok": True,
                 "tenant_id": tenant_id,
                 "workspace": workspace,
                 "items": rows,
@@ -745,7 +727,7 @@ def api_runs_coverage_history() -> Any:
             }
         )
     except ValueError as exc:
-        return _json({"error": "bad_request", "message": str(exc)}, status=400)
+        return _err("bad_request", str(exc), status=400)
 
 
 @runs_bp.route("/api/runs/coverage/regressions/latest", methods=["GET"])
@@ -768,9 +750,8 @@ def api_runs_coverage_regressions_latest() -> Any:
             )
 
             if not runs or len(runs) < 2:
-                return _json(
+                return _ok(
                     {
-                        "ok": True,
                         "tenant_id": tenant_id,
                         "workspace": workspace,
                         "runs": runs or [],
@@ -942,9 +923,8 @@ def api_runs_coverage_regressions_latest() -> Any:
                 "severity": severity,
             }
 
-        return _json(
+        return _ok(
             {
-                "ok": True,
                 "tenant_id": tenant_id,
                 "workspace": workspace,
                 "runs": [
@@ -957,7 +937,7 @@ def api_runs_coverage_regressions_latest() -> Any:
             }
         )
     except ValueError as exc:
-        return _json({"error": "bad_request", "message": str(exc)}, status=400)
+        return _err("bad_request", str(exc), status=400)
 
 
 @runs_bp.route("/api/runs/diff/latest", methods=["GET"])
@@ -996,11 +976,10 @@ def api_runs_diff_latest() -> Any:
             )
 
             if not runs or len(runs) < 2:
-                return _json(
+                return _ok(
                     {
                         "tenant_id": tenant_id,
                         "workspace": workspace,
-                        "ok": True,
                         "message": "Need at least 2 ready runs to compute a diff.",
                         "runs": runs or [],
                         "new": {"count": 0, "by_category": {}, "by_check_id": {}, "by_service": {}},
@@ -1083,11 +1062,10 @@ def api_runs_diff_latest() -> Any:
                 "rows": rows,
             }
 
-        return _json(
+        return _ok(
             {
                 "tenant_id": tenant_id,
                 "workspace": workspace,
-                "ok": True,
                 "runs": [
                     {"run_id": run_new, "run_ts": runs[0]["run_ts"]},
                     {"run_id": run_old, "run_ts": runs[1]["run_ts"]},
@@ -1097,4 +1075,4 @@ def api_runs_diff_latest() -> Any:
             }
         )
     except ValueError as exc:
-        return _json({"error": "bad_request", "message": str(exc)}, status=400)
+        return _err("bad_request", str(exc), status=400)

@@ -25,7 +25,7 @@ If a term is not defined here, it should not be relied upon as stable.
 
 For the higher-level relationship between findings, recommendation candidates,
 recommendations, potential savings, realized savings, and coverage, see also:
-- [product_surface_contract.md](/c:/Users/SK6564/OneDrive%20-%20ENGIE/Documents/GitHub/FinOps/McKaySystem/docs/00_overview/product_surface_contract.md)
+- [product_surface_contract.md](/McKaySystem/docs/00_overview/product_surface_contract.md)
 
 ---
 

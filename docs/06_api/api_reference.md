@@ -1,9 +1,18 @@
 # API Reference
 
 Status: Derived  
-Last reviewed: 2026-02-22
+Last reviewed: 2026-03-18
 
 This document describes the HTTP API implemented in the Flask application using a modular Blueprint architecture.
+
+Reference scope:
+
+- Canonical public base: `/api/v1`
+- Compatibility base: `/api`
+- Domain stability and classification matrix:
+  - [api_inventory_matrix.md](/McKaySystem/docs/06_api/api_inventory_matrix.md)
+- Canonical tier-1 domain semantics:
+  - [api_domain_contracts.md](/McKaySystem/docs/06_api/api_domain_contracts.md)
 
 ## Architecture
 
@@ -30,7 +39,7 @@ Source code:
 ## Base and auth
 
 - Base URL: `http(s)://RootSquirrels.pythonanywhere.com`
-- Versioned API base: `/api/v1`
+- Canonical public API base: `/api/v1`
 - Legacy compatibility base (still supported): `/api`
 - OpenAPI 3.0 spec endpoints:
   - `GET /openapi.json` (public)
@@ -59,6 +68,8 @@ Source code:
 - Missing scope returns `400`.
 
 ## Auth endpoints
+
+Stability: `beta`
 
 | Method | Path | Description |
 |---|---|---|
@@ -112,11 +123,34 @@ Scope:
 - Most routes return:
   - Success: `{"ok": true, ...}`
   - Error: `{"ok": false, "error": "<code>", "message": "<text>"}`
-- Legacy lifecycle/group routes return:
-  - Success: `{"ok": true}`
-  - Error: `{"error": "<text>"}` (HTTP 400)
+- Current normalization rule for beta public routes:
+  - Success: `{"ok": true, ...}`
+  - Error: `{"ok": false, "error": "<code>", "message": "<text>"}`
+- Some routes may also include compatibility detail fields such as:
+  - `detail`
+  - route-specific payload metadata
+- Lifecycle routes now follow the standard success/error envelope for normal
+  validation and internal-error flows.
+
+## Pagination conventions
+
+- Canonical pagination parameters:
+  - `limit`
+  - `offset`
+- Canonical paginated response fields:
+  - `items`
+  - `total`
+  - `limit`
+  - `offset`
+- When a route is list-like but intentionally bounded rather than fully
+  count-backed, the docs must say so explicitly.
+- Returning `items=[]` with `ok=true` is the canonical empty-result pattern.
+- Missing required filters or invalid pagination values should return:
+  - `{"ok": false, "error": "bad_request", "message": "<text>"}`
 
 ## Health
+
+Stability: `stable`
 
 | Method | Path | Description |
 |---|---|---|
@@ -124,6 +158,19 @@ Scope:
 | GET | `/api/health/db` | DB connectivity check |
 
 ## Runs
+
+Stability: `beta`
+
+Canonical domain contract:
+- [api_domain_contracts.md](/McKaySystem/docs/06_api/api_domain_contracts.md)
+  - Runs and Coverage Contract
+
+Response normalization note:
+- latest run and latest diff routes now use the standard public success/error
+  envelope
+- insufficient-history diff responses remain `ok=true` with explanatory
+  `message`, because they describe a valid empty-comparison condition, not an
+  API failure
 
 | Method | Path | Description |
 |---|---|---|
@@ -133,6 +180,12 @@ Scope:
 Query for both: `tenant_id`, `workspace` (required).
 
 ## Findings read model
+
+Stability: `beta`
+
+Canonical domain contract:
+- [api_domain_contracts.md](/McKaySystem/docs/06_api/api_domain_contracts.md)
+  - Findings Contract
 
 | Method | Path | Description |
 |---|---|---|
@@ -158,6 +211,12 @@ Common optional filters:
 
 ## Recommendations
 
+Stability: `beta`
+
+Canonical domain contract:
+- [api_domain_contracts.md](/McKaySystem/docs/06_api/api_domain_contracts.md)
+  - Recommendations Contract
+
 | Method | Path | Description |
 |---|---|---|
 | GET | `/api/recommendations` | Actionable recommendations from findings |
@@ -167,8 +226,10 @@ Common optional filters:
 
 Notes:
 - Recommendations are derived from `finding_current` at read time (not a separate worker table yet).
+- Recommendation semantics should be read together with:
+  - [product_surface_contract.md](/McKaySystem/docs/00_overview/product_surface_contract.md)
+  - [recommendations_build.md](/McKaySystem/docs/02_pipeline/recommendations_build.md)
 - Response items include normalized action-plan fields and `checker_advice` (from finding payload `advice`, with legacy fallback to payload `recommendation`).
-- Build flow reference: `docs/02_pipeline/recommendations_build.md`.
 
 Query/Body params for `/api/recommendations`:
 - Scope: `tenant_id`, `workspace` (required)
@@ -190,6 +251,12 @@ Body params for `/api/recommendations/estimate`:
 - Optional: `limit`, `offset`, `order`, `state`, `severity`, `service`, `check_id`, `category`, `region`, `account_id`, `q`, `min_savings`
 
 ## Remediations
+
+Stability: `beta`
+
+Canonical domain contract:
+- [api_domain_contracts.md](/McKaySystem/docs/06_api/api_domain_contracts.md)
+  - Remediations Contract
 
 | Method | Path | Description |
 |---|---|---|
@@ -263,6 +330,8 @@ Errors:
 
 ## Finding governance mutation routes
 
+Stability: `beta`
+
 | Method | Path | Description |
 |---|---|---|
 | PUT | `/api/findings/{fingerprint}/owner` | Assign or clear owner fields |
@@ -304,6 +373,8 @@ Errors:
 - `400` if no SLA policy resolved or invalid payload
 
 ## Users and workspace role assignment
+
+Stability: `beta`
 
 Users:
 - `GET /api/users`
@@ -363,6 +434,8 @@ Bootstrap note:
 
 ## API keys
 
+Stability: `beta`
+
 | Method | Path | Description |
 |---|---|---|
 | GET | `/api/api-keys` | List scoped API keys |
@@ -399,6 +472,13 @@ Errors:
 
 ## Groups
 
+Stability: `beta`
+
+Response normalization note:
+- group list/detail routes now use the standard public success/error envelope
+- not found returns:
+  - `{"ok": false, "error": "not_found", "message": "group not found"}`
+
 | Method | Path | Description |
 |---|---|---|
 | GET | `/api/groups` | Grouped findings (`group_key`) |
@@ -416,6 +496,8 @@ Scope query required: `tenant_id`, `workspace`.
 
 ## Lifecycle mutation routes (legacy payload style)
 
+Stability: `compatibility`
+
 Finding-level:
 - `POST /api/lifecycle/ignore`
 - `POST /api/lifecycle/resolve`
@@ -428,6 +510,14 @@ Group-level:
 
 Scope body required: `tenant_id`, `workspace`.
 
+Response contract:
+
+- Success: `{"ok": true}`
+- Validation / authorization / not found / conflict:
+  - `{"ok": false, "error": "<code>", "message": "<text>"}`
+- Internal errors:
+  - `{"ok": false, "error": "internal_error", "message": "internal error", "detail": "<text>"}`
+
 Required fields:
 - Finding routes: `fingerprint`
 - Group routes: `group_key`
@@ -436,6 +526,8 @@ Required fields:
 Optional: `reason`, `updated_by`
 
 ## Audit log
+
+Stability: `beta`
 
 | Method | Path | Description |
 |---|---|---|
@@ -450,6 +542,8 @@ Optional filters:
 - `limit`, `offset`
 
 ## Teams and team members
+
+Stability: `beta`
 
 Teams:
 - `GET /api/teams`
@@ -521,6 +615,8 @@ Errors:
 
 ## SLA policy management
 
+Stability: `beta`
+
 Category policies:
 - `GET /api/sla/policies`
 - `POST /api/sla/policies`
@@ -571,6 +667,51 @@ Body:
 
 Errors:
 - `409` override exists
+
+## KPIs
+
+Stability: `beta`
+
+Canonical domain contract:
+- [api_domain_contracts.md](/McKaySystem/docs/06_api/api_domain_contracts.md)
+  - KPI Contract
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/kpis/initial-value` | Initial value-reporting KPI families |
+
+Notes:
+
+- KPI semantics should be read together with:
+  - [product_surface_contract.md](/McKaySystem/docs/00_overview/product_surface_contract.md)
+  - [glossary.md](/McKaySystem/docs/00_overview/glossary.md)
+- The current `recommendations` KPI family represents recommendation candidates.
+- `potential_savings` is the customer-facing deduplicated savings KPI and is distinct from raw finding-estimated savings.
+
+## Tenant admin
+
+Stability: `beta`
+
+Canonical domain contract:
+- [api_domain_contracts.md](/McKaySystem/docs/06_api/api_domain_contracts.md)
+  - Tenant Administration Contract
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/tenant-admin/workspaces` | List registered tenant workspaces |
+| POST | `/api/tenant-admin/workspaces` | Register one tenant workspace |
+| PUT | `/api/tenant-admin/workspaces/{target_workspace}` | Update workspace metadata or lifecycle |
+| GET | `/api/tenant-admin/role-bindings` | List inherited tenant access bindings |
+| GET | `/api/tenant-admin/users` | Tenant-wide user directory |
+| GET | `/api/tenant-admin/audit` | Tenant administration audit events |
+| PUT | `/api/tenant-admin/users/{user_id}/role-binding` | Upsert inherited tenant access binding |
+| DELETE | `/api/tenant-admin/users/{user_id}/role-binding` | Delete inherited tenant access binding |
+
+Notes:
+
+- This is a public product-admin surface, but it is still considered `beta`.
+- The canonical product meaning of tenant/workspace and inherited tenant access is documented in:
+  - [glossary.md](/McKaySystem/docs/00_overview/glossary.md)
 
 ## Smoke testing
 
