@@ -97,6 +97,17 @@ function stateBadgeClass(value: string): string {
   return "border-zinc-300 bg-zinc-100 text-zinc-700";
 }
 
+function actionabilityBadgeClass(label: string): string {
+  const key = label.trim().toLowerCase();
+  if (key === "high") {
+    return "border-fuchsia-300 bg-fuchsia-50 text-fuchsia-800";
+  }
+  if (key === "medium") {
+    return "border-sky-300 bg-sky-50 text-sky-800";
+  }
+  return "border-zinc-300 bg-zinc-100 text-zinc-700";
+}
+
 function packageOwnerBadgeClass(isOwner: boolean): string {
   if (isOwner) {
     return "border-emerald-300 bg-emerald-50 text-emerald-800";
@@ -620,6 +631,7 @@ export function RecommendationsClientPage() {
                   <th className="px-3 py-2">Package</th>
                   <th className="px-3 py-2">Action Type</th>
                   <th className="px-3 py-2">Effective Savings / month</th>
+                  <th className="px-3 py-2">Actionability</th>
                   <th className="px-3 py-2">Confidence</th>
                   <th className="px-3 py-2">Approval</th>
                   <th className="px-3 py-2">State</th>
@@ -629,7 +641,7 @@ export function RecommendationsClientPage() {
                 {(groupByPackage ? recommendationGroups : []).map((group) => (
                   <Fragment key={group.key}>
                     <tr key={`${group.key}:header`} className="border-t border-slate-200 bg-slate-100/80">
-                      <td className="px-3 py-2" colSpan={8}>
+                      <td className="px-3 py-2" colSpan={9}>
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <div className="flex items-center gap-3">
                             <button
@@ -651,6 +663,9 @@ export function RecommendationsClientPage() {
                             <span>{group.items.length} item(s)</span>
                             {group.items.length > 1 ? (
                               <span>{collapsedGroups[group.key] ? "Collapsed" : "Expanded"}</span>
+                            ) : null}
+                            {group.items[0]?.graph_package?.owner_hint ? (
+                              <span>Owner {group.items[0].graph_package.owner_hint}</span>
                             ) : null}
                             <span>{formatMoney(group.effectiveMonthlySavings)}</span>
                           </div>
@@ -722,6 +737,20 @@ export function RecommendationsClientPage() {
                               <span className="text-xs text-zinc-500">
                                 Raw {formatMoney(item.estimated_monthly_savings)}
                               </span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-3 py-2">
+                          <div className="flex flex-col gap-0.5">
+                            <span
+                              className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium ${actionabilityBadgeClass(item.actionability_label)}`}
+                            >
+                              {item.actionability_score} ({item.actionability_label})
+                            </span>
+                            {item.owner_hint ? (
+                              <span className="text-xs text-zinc-600">Owner {item.owner_hint}</span>
+                            ) : (
+                              <span className="text-xs text-zinc-500">Owner TBD</span>
                             )}
                           </div>
                         </td>
@@ -807,6 +836,20 @@ export function RecommendationsClientPage() {
                             <span className="text-xs text-zinc-500">
                               Raw {formatMoney(item.estimated_monthly_savings)}
                             </span>
+                          )}
+                        </div>
+                      </td>
+                      <td className="px-3 py-2">
+                        <div className="flex flex-col gap-0.5">
+                          <span
+                            className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium ${actionabilityBadgeClass(item.actionability_label)}`}
+                          >
+                            {item.actionability_score} ({item.actionability_label})
+                          </span>
+                          {item.owner_hint ? (
+                            <span className="text-xs text-zinc-600">Owner {item.owner_hint}</span>
+                          ) : (
+                            <span className="text-xs text-zinc-500">Owner TBD</span>
                           )}
                         </div>
                       </td>
@@ -908,6 +951,8 @@ export function RecommendationsClientPage() {
               <p><span className="font-medium">Account:</span> {selectedRecommendation.account_id ?? "-"}</p>
               <p><span className="font-medium">Monthly Savings:</span> {formatMoney(selectedRecommendation.effective_estimated_monthly_savings)}</p>
               <p><span className="font-medium">Annual Savings:</span> {formatMoney(selectedRecommendation.effective_estimated_annual_savings)}</p>
+              <p><span className="font-medium">Actionability:</span> {selectedRecommendation.actionability_score} ({selectedRecommendation.actionability_label})</p>
+              <p><span className="font-medium">Owner Hint:</span> {selectedRecommendation.owner_hint ?? "-"}</p>
               <p><span className="font-medium">Confidence:</span> {selectedRecommendation.confidence}% ({selectedRecommendation.confidence_label})</p>
               <p><span className="font-medium">Approval:</span> {selectedRecommendation.requires_approval ? "Required" : "Not required"}</p>
             </div>
@@ -933,6 +978,10 @@ export function RecommendationsClientPage() {
                     {selectedRecommendation.graph_package.related_services.length > 0
                       ? selectedRecommendation.graph_package.related_services.join(", ")
                       : "-"}
+                  </p>
+                  <p>
+                    <span className="font-medium">Suggested Owner:</span>{" "}
+                    {selectedRecommendation.graph_package.package_owner_hint ?? selectedRecommendation.owner_hint ?? "-"}
                   </p>
                   <div>
                     <p className="font-medium">Dependency Checklist</p>

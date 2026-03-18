@@ -243,6 +243,18 @@ def _sorted_related_services(sample_neighbors: list[dict[str, Any]]) -> list[str
     )
 
 
+def _owner_hint_candidates(sample_neighbors: list[dict[str, Any]]) -> list[str]:
+    """Return stable owner-hint candidates from sampled graph neighbors."""
+
+    return sorted(
+        {
+            str(neighbor.get("owner_hint") or "").strip()
+            for neighbor in sample_neighbors
+            if str(neighbor.get("owner_hint") or "").strip()
+        }
+    )
+
+
 def _package_reason(package_kind: str, total_neighbors: int) -> str:
     """Return a deterministic explanation for the package."""
 
@@ -343,6 +355,8 @@ def _build_graph_package(
     """Build one graph-aware package summary for a recommendation row."""
 
     package_kind = _package_kind_for_row(row, sample_neighbors)
+    owner_hint_candidates = _owner_hint_candidates(sample_neighbors)
+    package_owner_hint = owner_hint_candidates[0] if owner_hint_candidates else None
     return {
         "package_key": f"pkg:{resource_key}",
         "package_kind": package_kind,
@@ -351,9 +365,53 @@ def _build_graph_package(
         "related_resource_count": total_neighbors,
         "blast_radius": _blast_radius_for_neighbors(total_neighbors),
         "related_services": _sorted_related_services(sample_neighbors),
+        "owner_hint": package_owner_hint,
+        "owner_hint_candidates": owner_hint_candidates,
         "dependency_checklist": _dependency_checklist(package_kind, sample_neighbors),
         "sample_related_resources": sample_neighbors,
     }
+
+
+def _actionability_label(score: int) -> str:
+    """Return a stable actionability label for a numeric score."""
+
+    if score >= 80:
+        return "high"
+    if score >= 60:
+        return "medium"
+    return "low"
+
+
+def _package_actionability_score(
+    *,
+    package_monthly_savings: float,
+    confidence: int,
+    blast_radius: str,
+    requires_approval: bool,
+    has_owner_hint: bool,
+) -> tuple[int, str]:
+    """Compute a deterministic package actionability score."""
+
+    score = 35
+    if package_monthly_savings >= 200.0:
+        score += 20
+    elif package_monthly_savings >= 75.0:
+        score += 14
+    elif package_monthly_savings >= 25.0:
+        score += 8
+
+    score += min(20, max(0, int(round(confidence / 5.0))))
+
+    if has_owner_hint:
+        score += 12
+    if not requires_approval:
+        score += 8
+
+    blast_radius_penalty = {"low": 0, "medium": 8, "high": 16}
+    score -= blast_radius_penalty.get(blast_radius, 10)
+
+    score = max(0, min(100, score))
+    return score, _actionability_label(score)
 
 
 def _cluster_package_rows(
@@ -472,6 +530,21 @@ def _apply_package_savings_ownership(
             package["package_estimated_annual_savings"] = package_annual_savings
             package["savings_owner_fingerprint"] = owner_fingerprint
             package["suppressed_fingerprints"] = suppressed_fingerprints
+            package["package_owner_hint"] = package.get("owner_hint")
+            actionability_score, actionability_label = _package_actionability_score(
+                package_monthly_savings=package_monthly_savings,
+                confidence=_row_confidence_for_sort(owner_row),
+                blast_radius=str(package.get("blast_radius") or "medium"),
+                requires_approval=bool(
+                    _RECOMMENDATION_RULES.get(
+                        str(owner_row.get("check_id") or ""),
+                        _RECOMMENDATION_DEFAULT_RULE,
+                    ).get("requires_approval")
+                ),
+                has_owner_hint=bool(str(package.get("owner_hint") or "").strip()),
+            )
+            package["actionability_score"] = actionability_score
+            package["actionability_label"] = actionability_label
 
     for resource_key, rows in rows_by_resource_key.items():
         package = graph_packages.get(resource_key)
@@ -536,7 +609,8 @@ def _load_graph_packages_for_rows(
             END AS neighbor_resource_key,
             n.service AS neighbor_service,
             n.resource_type AS neighbor_resource_type,
-            n.resource_name AS neighbor_resource_name
+            n.resource_name AS neighbor_resource_name,
+            n.owner_hint AS neighbor_owner_hint
           FROM resource_graph_edges_current e
           JOIN resource_graph_nodes_current n
             ON n.tenant_id = e.tenant_id
@@ -589,6 +663,7 @@ def _load_graph_packages_for_rows(
           neighbor_service,
           neighbor_resource_type,
           neighbor_resource_name,
+          neighbor_owner_hint,
           total_neighbors
         FROM ranked
         WHERE rn <= %s
@@ -624,6 +699,7 @@ def _load_graph_packages_for_rows(
                 "service": graph_row.get("neighbor_service"),
                 "resource_type": graph_row.get("neighbor_resource_type"),
                 "resource_name": graph_row.get("neighbor_resource_name"),
+                "owner_hint": graph_row.get("neighbor_owner_hint"),
                 "edge_type": graph_row.get("edge_type"),
                 "source_kind": graph_row.get("source_kind"),
                 "confidence": graph_row.get("confidence"),
@@ -910,6 +986,9 @@ def _build_recommendation_item(
         row.get("_effective_estimated_annual_savings"),
         default=annual_savings,
     )
+    actionability_score = int((graph_package or {}).get("actionability_score") or 0) if graph_package else 0
+    actionability_label = str((graph_package or {}).get("actionability_label") or "low") if graph_package else "low"
+    owner_hint = str((graph_package or {}).get("package_owner_hint") or "").strip() or None
 
     return {
         "fingerprint": row.get("fingerprint"),
@@ -936,6 +1015,8 @@ def _build_recommendation_item(
         "estimated_annual_savings": annual_savings,
         "effective_estimated_monthly_savings": effective_monthly_savings,
         "effective_estimated_annual_savings": effective_annual_savings,
+        "actionability_score": actionability_score,
+        "actionability_label": actionability_label,
         "confidence": confidence,
         "confidence_label": "high" if confidence >= 80 else ("medium" if confidence >= 60 else "low"),
         "pricing_source": pricing_source,
@@ -947,10 +1028,110 @@ def _build_recommendation_item(
         "effective_state": row.get("effective_state"),
         "is_primary_package_savings_owner": bool(row.get("_graph_package_owner", True)),
         "suppressed_by_fingerprint": row.get("_suppressed_by_fingerprint"),
+        "owner_hint": owner_hint,
         "resource_key": resource_key,
         "graph_package": graph_package,
         "payload": payload,
     }
+
+
+def _recommendation_package_group_key(item: dict[str, Any]) -> str:
+    """Return the stable grouping key for one recommendation item package."""
+
+    graph_package = item.get("graph_package")
+    if isinstance(graph_package, dict):
+        cluster_key = str(graph_package.get("package_cluster_key") or "").strip()
+        if cluster_key:
+            return cluster_key
+        package_key = str(graph_package.get("package_key") or "").strip()
+        if package_key:
+            return package_key
+    return f"single:{str(item.get('fingerprint') or '')}"
+
+
+def _primary_package_item(items: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return the primary recommendation item for one package."""
+
+    for item in items:
+        if bool(item.get("is_primary_package_savings_owner", True)):
+            return item
+    return items[0]
+
+
+def _build_recommendation_package(items: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build one package-native recommendation object from member items."""
+
+    primary_item = _primary_package_item(items)
+    graph_package = primary_item.get("graph_package")
+    package_monthly_savings = round(
+        sum(_as_float(item.get("effective_estimated_monthly_savings"), default=0.0) for item in items),
+        2,
+    )
+    package_annual_savings = round(
+        sum(_as_float(item.get("effective_estimated_annual_savings"), default=0.0) for item in items),
+        2,
+    )
+    services = sorted({str(item.get("service") or "").strip() for item in items if str(item.get("service") or "").strip()})
+    regions = sorted({str(item.get("region") or "").strip() for item in items if str(item.get("region") or "").strip()})
+    check_ids = sorted({str(item.get("check_id") or "").strip() for item in items if str(item.get("check_id") or "").strip()})
+    owner_hint = str(
+        ((graph_package or {}).get("package_owner_hint") if isinstance(graph_package, dict) else "")
+        or primary_item.get("owner_hint")
+        or ""
+    ).strip() or None
+
+    return {
+        "package_key": _recommendation_package_group_key(primary_item),
+        "package_kind": (
+            str((graph_package or {}).get("package_kind") or "").strip()
+            if isinstance(graph_package, dict)
+            else ""
+        )
+        or "single_recommendation_package",
+        "package_title": (
+            str((graph_package or {}).get("package_title") or "").strip()
+            if isinstance(graph_package, dict)
+            else ""
+        )
+        or str(primary_item.get("title") or ""),
+        "package_reason": (
+            str((graph_package or {}).get("package_reason") or "").strip()
+            if isinstance(graph_package, dict)
+            else ""
+        )
+        or "Single recommendation package without related graph context.",
+        "package_estimated_monthly_savings": package_monthly_savings,
+        "package_estimated_annual_savings": package_annual_savings,
+        "actionability_score": int(primary_item.get("actionability_score") or 0),
+        "actionability_label": str(primary_item.get("actionability_label") or "low"),
+        "owner_hint": owner_hint,
+        "member_count": len(items),
+        "suppressed_member_count": sum(
+            1 for item in items if not bool(item.get("is_primary_package_savings_owner", True))
+        ),
+        "primary_fingerprint": primary_item.get("fingerprint"),
+        "fingerprints": [item.get("fingerprint") for item in items if item.get("fingerprint")],
+        "services": services,
+        "regions": regions,
+        "check_ids": check_ids,
+        "requires_approval": any(bool(item.get("requires_approval")) for item in items),
+        "primary_recommendation": primary_item,
+        "member_recommendations": items,
+        "graph_package": graph_package,
+    }
+
+
+def _build_recommendation_packages(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build ordered package-native recommendation objects from leaf items."""
+
+    grouped_items: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    ordered_keys: list[str] = []
+    for item in items:
+        package_key = _recommendation_package_group_key(item)
+        if package_key not in grouped_items:
+            ordered_keys.append(package_key)
+        grouped_items[package_key].append(item)
+    return [_build_recommendation_package(grouped_items[package_key]) for package_key in ordered_keys]
 
 
 @recommendations_bp.route("/api/recommendations", methods=["GET"])
@@ -975,6 +1156,9 @@ def api_recommendations() -> Any:
         tenant_id, workspace = _require_scope_from_query()
         limit = _parse_int(_q("limit"), default=100, min_v=1, max_v=1000)
         offset = _parse_int(_q("offset"), default=0, min_v=0, max_v=5_000_000)
+        view = (_q("view", "items") or "items").strip().lower()
+        if view not in {"items", "packages"}:
+            raise ValueError("view must be 'items' or 'packages'")
 
         order = (_q("order", "savings_desc") or "savings_desc").lower()
         if order not in {"savings_desc", "detected_desc"}:
@@ -987,7 +1171,7 @@ def api_recommendations() -> Any:
             else "detected_at DESC, fingerprint"
         )
 
-        sql = f"""
+        base_sql = f"""
             SELECT
               fc.tenant_id, fc.workspace, fc.fingerprint, fc.check_id, fc.service, fc.severity,
               fc.category, fc.title, fc.estimated_monthly_savings, fc.region, fc.account_id,
@@ -1000,9 +1184,13 @@ def api_recommendations() -> Any:
              AND r.run_id = fc.run_id
             WHERE {' AND '.join(where)}
             ORDER BY {order_sql}
-            LIMIT %s OFFSET %s
         """
-        params2 = params + [limit, offset]
+        sql = (
+            base_sql
+            if view == "packages"
+            else f"{base_sql}\n            LIMIT %s OFFSET %s"
+        )
+        params2 = params if view == "packages" else params + [limit, offset]
 
         with db_conn() as conn:
             rows = fetch_all_dict_conn(conn, sql, params2)
@@ -1019,10 +1207,26 @@ def api_recommendations() -> Any:
             )
 
         items = [_build_recommendation_item(row, graph_packages=graph_packages) for row in rows]
+        if view == "packages":
+            packages = _build_recommendation_packages(items)
+            paged_packages = packages[offset : offset + limit]
+            return _ok(
+                {
+                    "tenant_id": tenant_id,
+                    "workspace": workspace,
+                    "view": view,
+                    "limit": limit,
+                    "offset": offset,
+                    "total": len(packages),
+                    "leaf_total": int((count_row or {}).get("n") or 0),
+                    "items": paged_packages,
+                }
+            )
         return _ok(
             {
                 "tenant_id": tenant_id,
                 "workspace": workspace,
+                "view": view,
                 "limit": limit,
                 "offset": offset,
                 "total": int((count_row or {}).get("n") or 0),

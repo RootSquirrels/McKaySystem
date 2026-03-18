@@ -20,6 +20,8 @@ In this system:
 5. When multiple recommendation items fall into the same graph-backed package
    cluster, the API may assign one primary savings owner and expose suppression
    metadata so clients can avoid double-counting overlapping savings.
+6. `/api/recommendations?view=packages` can return one package-native object per
+   grouped cluster, with one primary recommendation plus member recommendations.
 
 There is currently no separate worker "recommendations build step" table.
 
@@ -50,6 +52,14 @@ Invoke-RestMethod `
   -Method GET
 ```
 
+Package-native view:
+
+```powershell
+Invoke-RestMethod `
+  -Uri "$base/api/recommendations?tenant_id=$tenant&workspace=$workspace&state=open&order=savings_desc&view=packages&limit=20" `
+  -Method GET
+```
+
 ## Contract split (do not mix)
 
 1. `finding.payload.advice`:
@@ -68,6 +78,11 @@ Invoke-RestMethod `
      - `graph_package.package_estimated_monthly_savings`
      - `graph_package.savings_owner_fingerprint`
    - workflow-contract for queueing/approval/remediation
+3. `recommendations API package view item`:
+   - one package-native recommendation object per cluster or standalone leaf
+   - includes `package_estimated_monthly_savings`, `member_count`,
+     `primary_recommendation`, and `member_recommendations`
+   - preserves graph package semantics while giving clients one object to act on
 
 ## Future option (if needed)
 

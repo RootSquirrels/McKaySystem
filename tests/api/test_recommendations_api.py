@@ -167,6 +167,7 @@ def test_recommendations_response_includes_graph_package_context(monkeypatch) ->
                     "neighbor_service": "ec2",
                     "neighbor_resource_type": "volume",
                     "neighbor_resource_name": "data-volume",
+                    "neighbor_owner_hint": "team-storage",
                     "total_neighbors": 4,
                 },
                 {
@@ -178,6 +179,7 @@ def test_recommendations_response_includes_graph_package_context(monkeypatch) ->
                     "neighbor_service": "vpc",
                     "neighbor_resource_type": "subnet",
                     "neighbor_resource_name": "app-subnet-a",
+                    "neighbor_owner_hint": "",
                     "total_neighbors": 4,
                 },
             ]
@@ -228,6 +230,9 @@ def test_recommendations_response_includes_graph_package_context(monkeypatch) ->
     assert graph_package.get("package_title") == "Validate storage lineage before cleanup"
     assert graph_package.get("related_resource_count") == 4
     assert graph_package.get("blast_radius") == "medium"
+    assert graph_package.get("owner_hint") == "team-storage"
+    assert graph_package.get("package_owner_hint") == "team-storage"
+    assert graph_package.get("actionability_label") in {"medium", "high"}
     assert graph_package.get("related_services") == ["ec2", "vpc"]
     checklist = graph_package.get("dependency_checklist") or []
     assert "Confirm attached or recently related compute no longer requires this storage asset." in checklist
@@ -235,6 +240,8 @@ def test_recommendations_response_includes_graph_package_context(monkeypatch) ->
     sample_related = graph_package.get("sample_related_resources") or []
     assert len(sample_related) == 2
     assert sample_related[0].get("resource_type") == "volume"
+    assert item.get("owner_hint") == "team-storage"
+    assert item.get("actionability_label") in {"medium", "high"}
 
 
 def test_recommendations_response_uses_nat_specific_graph_package(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -478,6 +485,132 @@ def test_recommendations_response_assigns_one_package_savings_owner(monkeypatch)
     suppressed_package = suppressed.get("graph_package") or {}
     assert suppressed_package.get("package_cluster_key") == owner_package.get("package_cluster_key")
     assert suppressed_package.get("savings_owner_fingerprint") == "fp-owner"
+
+
+def test_recommendations_packages_view_groups_leaf_items(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """`view=packages` should return one package object per clustered recommendation set."""
+    _disable_runtime_guards(monkeypatch)
+
+    def _fake_fetch_all(_conn: object, sql: str, _params: Sequence[Any] | None = None) -> list[dict[str, Any]]:
+        if "resource_graph_edges_current" in sql:
+            return [
+                {
+                    "root_resource_key": "aws:111111111111:us-east-1:ec2:instance:i-123",
+                    "edge_type": "attached_to",
+                    "source_kind": "api_direct",
+                    "confidence": "high",
+                    "neighbor_resource_key": "aws:111111111111:us-east-1:ec2:volume:vol-123",
+                    "neighbor_service": "ec2",
+                    "neighbor_resource_type": "volume",
+                    "neighbor_resource_name": "data-volume",
+                    "neighbor_owner_hint": "team-storage",
+                    "total_neighbors": 1,
+                },
+                {
+                    "root_resource_key": "aws:111111111111:us-east-1:ec2:volume:vol-123",
+                    "edge_type": "attached_to",
+                    "source_kind": "api_direct",
+                    "confidence": "high",
+                    "neighbor_resource_key": "aws:111111111111:us-east-1:ec2:instance:i-123",
+                    "neighbor_service": "ec2",
+                    "neighbor_resource_type": "instance",
+                    "neighbor_resource_name": "app-1",
+                    "neighbor_owner_hint": "team-storage",
+                    "total_neighbors": 1,
+                },
+            ]
+        return [
+            {
+                "fingerprint": "fp-owner",
+                "check_id": "aws.ec2.instances.underutilized",
+                "service": "ec2",
+                "severity": "medium",
+                "category": "rightsizing",
+                "title": "EC2 instance underutilized",
+                "estimated_monthly_savings": 80.0,
+                "region": "us-east-1",
+                "account_id": "111111111111",
+                "detected_at": "2026-02-14T00:00:00Z",
+                "effective_state": "open",
+                "payload": {
+                    "scope": {
+                        "account_id": "111111111111",
+                        "region": "us-east-1",
+                        "service": "ec2",
+                        "resource_type": "instance",
+                        "resource_id": "i-123",
+                    },
+                    "dimensions": {
+                        "instance_type": "m5.2xlarge",
+                        "recommended_instance_type": "m5.xlarge",
+                    },
+                },
+            },
+            {
+                "fingerprint": "fp-suppressed",
+                "check_id": "aws.ec2.instances.underutilized",
+                "service": "ec2",
+                "severity": "medium",
+                "category": "rightsizing",
+                "title": "Related package member",
+                "estimated_monthly_savings": 30.0,
+                "region": "us-east-1",
+                "account_id": "111111111111",
+                "detected_at": "2026-02-14T00:00:00Z",
+                "effective_state": "open",
+                "payload": {
+                    "scope": {
+                        "account_id": "111111111111",
+                        "region": "us-east-1",
+                        "service": "ec2",
+                        "resource_type": "volume",
+                        "resource_id": "vol-123",
+                    },
+                    "dimensions": {},
+                },
+            },
+        ]
+
+    def _fake_fetch_one(_conn: object, _sql: str, _params: Sequence[Any] | None = None) -> dict[str, Any]:
+        return {"n": 2}
+
+    monkeypatch.setattr(flask_app, "fetch_all_dict_conn", _fake_fetch_all)
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+
+    client = flask_app.app.test_client()
+    resp = client.get("/api/recommendations?tenant_id=acme&workspace=prod&view=packages")
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 200
+    assert payload.get("view") == "packages"
+    assert payload.get("total") == 1
+    assert payload.get("leaf_total") == 2
+    package = (payload.get("items") or [])[0]
+    assert package.get("package_kind") == "storage_lineage_package"
+    assert package.get("package_estimated_monthly_savings") == 110.0
+    assert package.get("package_estimated_annual_savings") == 1320.0
+    assert package.get("owner_hint") == "team-storage"
+    assert package.get("member_count") == 2
+    assert package.get("suppressed_member_count") == 1
+    assert package.get("primary_fingerprint") == "fp-owner"
+    assert package.get("fingerprints") == ["fp-owner", "fp-suppressed"]
+    primary = package.get("primary_recommendation") or {}
+    assert primary.get("fingerprint") == "fp-owner"
+    members = package.get("member_recommendations") or []
+    assert len(members) == 2
+
+
+def test_recommendations_rejects_invalid_view(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """`/api/recommendations` should reject unsupported view values."""
+    _disable_runtime_guards(monkeypatch)
+    client = flask_app.app.test_client()
+
+    resp = client.get("/api/recommendations?tenant_id=acme&workspace=prod&view=invalid")
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 400
+    assert payload.get("ok") is False
+    assert payload.get("error") == "bad_request"
 
 
 def test_recommendations_checker_advice_falls_back_to_legacy_field(monkeypatch) -> None:  # type: ignore[no-untyped-def]

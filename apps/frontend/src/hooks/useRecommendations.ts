@@ -35,6 +35,11 @@ export interface RecommendationGraphPackage {
   package_estimated_annual_savings?: number | null;
   savings_owner_fingerprint?: string | null;
   suppressed_fingerprints?: string[] | null;
+  owner_hint?: string | null;
+  owner_hint_candidates?: string[] | null;
+  package_owner_hint?: string | null;
+  actionability_score?: number | null;
+  actionability_label?: string | null;
 }
 
 export interface RecommendationItem {
@@ -55,6 +60,8 @@ export interface RecommendationItem {
   estimated_annual_savings: number;
   effective_estimated_monthly_savings: number;
   effective_estimated_annual_savings: number;
+  actionability_score: number;
+  actionability_label: string;
   confidence: number;
   confidence_label: string;
   pricing_source: string;
@@ -66,6 +73,7 @@ export interface RecommendationItem {
   effective_state: string;
   is_primary_package_savings_owner: boolean;
   suppressed_by_fingerprint: string | null;
+  owner_hint: string | null;
   resource_key: string | null;
   graph_package: RecommendationGraphPackage | null;
   payload: Record<string, unknown> | null;
