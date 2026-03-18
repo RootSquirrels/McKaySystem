@@ -170,7 +170,7 @@ SELECT
 
   CASE
     WHEN s.s3_buckets_no_lifecycle >= 3 AND s.backup_vaults_no_lifecycle >= 2 THEN 'fail'
-    WHEN s.s3_buckets_no_lifecycle >= 1 OR s.backup_vaults_no_lifecycle >= 1 THEN 'warn'
+    WHEN s.s3_buckets_no_lifecycle >= 1 OR s.backup_vaults_no_lifecycle >= 1 THEN 'fail'
     ELSE 'info'
   END AS status,
 
