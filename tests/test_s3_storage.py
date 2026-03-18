@@ -2,12 +2,6 @@
 """Unit tests for checks.aws.s3_storage.
 
 These tests use minimal fake clients (no boto3).
-
-Coverage:
-- Lifecycle missing (original MVP behavior, now consolidated).
-- Default encryption missing.
-- Public Access Block missing/disabled.
-- Storage cost estimate uses injected PricingService when available.
 """
 
 from __future__ import annotations
@@ -34,14 +28,22 @@ class _FakeS3:
         buckets: List[str],
         location_by_bucket: Optional[Dict[str, Optional[str]]] = None,
         lifecycle_present: Optional[Dict[str, bool]] = None,
+        lifecycle_rules_by_bucket: Optional[Dict[str, List[Dict[str, Any]]]] = None,
         encryption_present: Optional[Dict[str, bool]] = None,
         pab_config_by_bucket: Optional[Dict[str, Optional[Dict[str, Any]]]] = None,
+        multipart_uploads_by_bucket: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+        replication_rules_by_bucket: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+        intelligent_tiering_by_bucket: Optional[Dict[str, List[Dict[str, Any]]]] = None,
     ) -> None:
         self._buckets = buckets
         self._location_by_bucket = location_by_bucket or {}
         self._lifecycle_present = lifecycle_present or {}
+        self._lifecycle_rules_by_bucket = lifecycle_rules_by_bucket or {}
         self._encryption_present = encryption_present or {}
         self._pab_config_by_bucket = pab_config_by_bucket or {}
+        self._multipart_uploads_by_bucket = multipart_uploads_by_bucket or {}
+        self._replication_rules_by_bucket = replication_rules_by_bucket or {}
+        self._intelligent_tiering_by_bucket = intelligent_tiering_by_bucket or {}
 
     def list_buckets(self) -> Dict[str, Any]:
         return {"Buckets": [{"Name": b} for b in self._buckets]}
@@ -51,6 +53,8 @@ class _FakeS3:
         return {"LocationConstraint": self._location_by_bucket.get(Bucket)}
 
     def get_bucket_lifecycle_configuration(self, *, Bucket: str) -> Dict[str, Any]:
+        if Bucket in self._lifecycle_rules_by_bucket:
+            return {"Rules": self._lifecycle_rules_by_bucket[Bucket]}
         if self._lifecycle_present.get(Bucket, False):
             return {"Rules": []}
         raise _ce("NoSuchLifecycleConfiguration", "GetBucketLifecycleConfiguration")
@@ -66,6 +70,20 @@ class _FakeS3:
             raise _ce("NoSuchPublicAccessBlockConfiguration", "GetPublicAccessBlock")
         return {"PublicAccessBlockConfiguration": cfg}
 
+    def list_multipart_uploads(self, *, Bucket: str, MaxUploads: int) -> Dict[str, Any]:
+        uploads = self._multipart_uploads_by_bucket.get(Bucket, [])
+        return {"Uploads": uploads[:MaxUploads]}
+
+    def get_bucket_replication(self, *, Bucket: str) -> Dict[str, Any]:
+        if Bucket not in self._replication_rules_by_bucket:
+            raise _ce("ReplicationConfigurationNotFoundError", "GetBucketReplication")
+        return {"ReplicationConfiguration": {"Rules": self._replication_rules_by_bucket[Bucket]}}
+
+    def list_bucket_intelligent_tiering_configurations(self, *, Bucket: str) -> Dict[str, Any]:
+        return {
+            "IntelligentTieringConfigurationList": self._intelligent_tiering_by_bucket.get(Bucket, [])
+        }
+
 
 
 class _FakeCloudWatch:
@@ -73,25 +91,28 @@ class _FakeCloudWatch:
         # key: (bucket, storage_type)
         self._avg = avg_bytes_by_bucket_and_type
 
-    def get_metric_statistics(self, **kwargs) -> Dict[str, Any]:
-        dims = kwargs.get("Dimensions") or []
-        bucket = ""
-        storage_type = ""
-        for d in dims:
-            if d.get("Name") == "BucketName":
-                bucket = str(d.get("Value") or "")
-            if d.get("Name") == "StorageType":
-                storage_type = str(d.get("Value") or "")
-
-        avg = self._avg.get((bucket, storage_type))
-        if avg is None:
-            return {"Datapoints": []}
-
-        return {
-            "Datapoints": [
-                {"Timestamp": datetime(2026, 1, 1, tzinfo=timezone.utc), "Average": float(avg)}
-            ]
-        }
+    def get_metric_data(self, **kwargs) -> Dict[str, Any]:
+        results = []
+        for query in kwargs.get("MetricDataQueries") or []:
+            metric = ((query.get("MetricStat") or {}).get("Metric") or {})
+            dims = metric.get("Dimensions") or []
+            bucket = ""
+            storage_type = ""
+            for d in dims:
+                if d.get("Name") == "BucketName":
+                    bucket = str(d.get("Value") or "")
+                if d.get("Name") == "StorageType":
+                    storage_type = str(d.get("Value") or "")
+            avg = self._avg.get((bucket, storage_type))
+            values = [] if avg is None else [float(avg)]
+            results.append(
+                {
+                    "Id": str(query.get("Id") or ""),
+                    "Timestamps": [datetime(2026, 1, 1, tzinfo=timezone.utc)] if values else [],
+                    "Values": values,
+                }
+            )
+        return {"MetricDataResults": results}
 
 
 class _FakePriceQuote:
@@ -248,3 +269,104 @@ def test_cost_estimate_uses_pricing_service_when_available() -> None:
     }.issubset(storage_types)
 
     assert pricing.calls, "Expected PricingService to be queried"
+
+
+def test_emits_storage_optimization_findings_for_large_standard_bucket() -> None:
+    checker = _mk_checker()
+
+    gib = 1024.0 ** 3
+    sizes_bytes = {
+        ("archive-bucket", "StandardStorage"): 500.0 * gib,
+        ("archive-bucket", "AllStorageTypes"): 125000.0,
+    }
+    s3 = _FakeS3(
+        buckets=["archive-bucket"],
+        location_by_bucket={"archive-bucket": "eu-west-3"},
+        lifecycle_present={"archive-bucket": False},
+        encryption_present={"archive-bucket": True},
+        pab_config_by_bucket={
+            "archive-bucket": {
+                "BlockPublicAcls": True,
+                "IgnorePublicAcls": True,
+                "BlockPublicPolicy": True,
+                "RestrictPublicBuckets": True,
+            }
+        },
+        multipart_uploads_by_bucket={
+            "archive-bucket": [
+                {"Initiated": datetime(2026, 3, 1, tzinfo=timezone.utc)},
+                {"Initiated": datetime(2026, 3, 5, tzinfo=timezone.utc)},
+            ]
+        },
+        replication_rules_by_bucket={
+            "archive-bucket": [
+                {
+                    "Status": "Enabled",
+                    "Destination": {
+                        "Bucket": "arn:aws:s3:::replica-archive-bucket",
+                        "StorageClass": "STANDARD",
+                    },
+                }
+            ]
+        },
+    )
+    cw = _FakeCloudWatch(avg_bytes_by_bucket_and_type=sizes_bytes)
+    ctx = _FakeCtx(services=_FakeServices(s3=s3, cloudwatch=cw, pricing=None))
+
+    findings = list(checker.run(ctx))
+    check_ids = {f.check_id for f in findings}
+
+    assert "aws.s3.cost.bucket.storage.estimate" in check_ids
+    assert "aws.s3.cost.lifecycle.transition.review" in check_ids
+    assert "aws.s3.cost.multipart.upload.cleanup" in check_ids
+    assert "aws.s3.cost.replication.review" in check_ids
+    assert "aws.s3.cost.intelligent_tiering.review" in check_ids
+
+    replication = next(f for f in findings if f.check_id == "aws.s3.cost.replication.review")
+    assert replication.estimated_monthly_cost == pytest.approx(11.5, abs=0.01)
+
+    multipart = next(f for f in findings if f.check_id == "aws.s3.cost.multipart.upload.cleanup")
+    assert multipart.dimensions["stale_upload_count"] == "2"
+    assert multipart.dimensions["oldest_upload_age_days"] == "17"
+
+
+def test_skips_cleanup_finding_when_abort_rule_exists() -> None:
+    checker = _mk_checker()
+
+    gib = 1024.0 ** 3
+    sizes_bytes = {
+        ("mpu-bucket", "StandardStorage"): 300.0 * gib,
+        ("mpu-bucket", "AllStorageTypes"): 1000.0,
+    }
+    s3 = _FakeS3(
+        buckets=["mpu-bucket"],
+        location_by_bucket={"mpu-bucket": "eu-west-3"},
+        lifecycle_rules_by_bucket={
+            "mpu-bucket": [
+                {
+                    "Status": "Enabled",
+                    "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 3},
+                }
+            ]
+        },
+        encryption_present={"mpu-bucket": True},
+        pab_config_by_bucket={
+            "mpu-bucket": {
+                "BlockPublicAcls": True,
+                "IgnorePublicAcls": True,
+                "BlockPublicPolicy": True,
+                "RestrictPublicBuckets": True,
+            }
+        },
+        multipart_uploads_by_bucket={
+            "mpu-bucket": [
+                {"Initiated": datetime(2026, 3, 1, tzinfo=timezone.utc)},
+            ]
+        },
+    )
+    cw = _FakeCloudWatch(avg_bytes_by_bucket_and_type=sizes_bytes)
+    ctx = _FakeCtx(services=_FakeServices(s3=s3, cloudwatch=cw, pricing=None))
+
+    findings = list(checker.run(ctx))
+
+    assert "aws.s3.cost.multipart.upload.cleanup" not in {f.check_id for f in findings}

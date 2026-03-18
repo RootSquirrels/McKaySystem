@@ -1,22 +1,23 @@
-"""checks/aws/s3_storage.py
+"""S3 storage and governance checker.
 
-S3 storage & governance checker.
-
-This consolidates the original MVP check (missing lifecycle configuration) and
-extends it into a real S3 storage checker with additional governance and cost
-signals.
+This checker emits deterministic bucket-level governance and storage
+optimization findings using best-effort read-only AWS APIs.
 
 Emitted check_ids:
   - aws.s3.governance.lifecycle.missing
   - aws.s3.governance.encryption.missing
   - aws.s3.governance.public.access.block.missing
   - aws.s3.cost.bucket.storage.estimate
+  - aws.s3.cost.lifecycle.transition.review
+  - aws.s3.cost.multipart.upload.cleanup
+  - aws.s3.cost.replication.review
+  - aws.s3.cost.intelligent_tiering.review
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -56,6 +57,28 @@ def _bytes_to_gib(value: float) -> float:
     return float(value) / (1024.0 ** 3)
 
 
+def _days_between(now: datetime, then: datetime) -> int:
+    """Return full-day distance between two timestamps in UTC."""
+    then_utc = then.astimezone(UTC) if then.tzinfo is not None else then.replace(tzinfo=UTC)
+    return max(0, int((now.astimezone(UTC) - then_utc).days))
+
+
+def _stable_json(data: Any) -> str:
+    """Return deterministic JSON suitable for finding dimensions."""
+    return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _rule_is_enabled(rule: Mapping[str, Any]) -> bool:
+    """Return True when an S3 lifecycle or replication rule is enabled."""
+    status = str(rule.get("Status") or "").strip().lower()
+    return status in {"", "enabled"}
+
+
+def _stringify_number(value: float) -> str:
+    """Render a float deterministically for dimensions."""
+    return f"{float(value):.6f}"
+
+
 def _scope(
     ctx: Any,
     *,
@@ -76,7 +99,7 @@ def _scope(
 
 
 class S3StorageChecker:
-    """Consolidated S3 checker (governance + basic storage cost insight)."""
+    """Consolidated S3 checker (governance + storage optimization insight)."""
 
     checker_id = "aws.s3.storage"  # informational; emitted findings use per-signal check_id
     is_regional = False
@@ -86,6 +109,22 @@ class S3StorageChecker:
     _CID_ENCRYPTION = "aws.s3.governance.encryption.missing"
     _CID_PAB = "aws.s3.governance.public.access.block.missing"
     _CID_COST = "aws.s3.cost.bucket.storage.estimate"
+    _CID_LIFECYCLE_REVIEW = "aws.s3.cost.lifecycle.transition.review"
+    _CID_MULTIPART = "aws.s3.cost.multipart.upload.cleanup"
+    _CID_REPLICATION = "aws.s3.cost.replication.review"
+    _CID_TIERING = "aws.s3.cost.intelligent_tiering.review"
+
+    _STORAGE_MATRIX: tuple[tuple[str, str, float], ...] = (
+        ("StandardStorage", "Standard", S3_DEFAULT_STORAGE_PRICE_GB_MONTH_USD),
+        ("StandardIAStorage", "Standard - Infrequent Access", 0.0125),
+        ("OneZoneIAStorage", "One Zone - Infrequent Access", 0.0100),
+        ("IntelligentTieringFAStorage", "Intelligent-Tiering Frequent Access", S3_DEFAULT_STORAGE_PRICE_GB_MONTH_USD),
+        ("IntelligentTieringIAStorage", "Intelligent-Tiering Infrequent Access", 0.0125),
+        ("IntelligentTieringAAStorage", "Intelligent-Tiering Archive Access", 0.0040),
+        ("GlacierStorage", "Glacier Flexible Retrieval", 0.0040),
+        ("GlacierIRStorage", "Glacier Instant Retrieval", 0.0050),
+        ("DeepArchiveStorage", "Glacier Deep Archive", 0.00099),
+    )
 
     def __init__(
         self,
@@ -94,11 +133,14 @@ class S3StorageChecker:
         default_storage_price_gb_month_usd: float = S3_DEFAULT_STORAGE_PRICE_GB_MONTH_USD,
         metric_lookback_days: int = S3_METRIC_LOOKBACK_DAYS,
     ) -> None:
+        """Initialize the checker with account context and pricing defaults."""
         self._account = account
         self._default_price = float(default_storage_price_gb_month_usd)
         self._lookback_days = int(metric_lookback_days)
+        self._storage_price_cache: dict[tuple[str, str], tuple[float, str, int, str]] = {}
 
     def run(self, ctx: RunContext) -> Iterable[FindingDraft]:
+        """Execute the checker and yield bucket-scoped findings."""
         _LOGGER.info("Starting S3 storage check")
         if ctx.services is None:
             raise RuntimeError("S3StorageChecker requires ctx.services (AWS clients)")
@@ -126,11 +168,12 @@ class S3StorageChecker:
                 region=bucket_region,
                 bucket=name,
             )
+            lifecycle_state, lifecycle_note, lifecycle_rules = self._lifecycle_state_best_effort(s3, name)
+            lifecycle_analysis = self._analyze_lifecycle_rules(lifecycle_rules)
 
             # ------------------------------
             # Governance: lifecycle
             # ------------------------------
-            lifecycle_state, lifecycle_note = self._has_lifecycle_best_effort(s3, name)
             if lifecycle_state == "missing":
                 yield FindingDraft(
                     check_id=self._CID_LIFECYCLE,
@@ -244,13 +287,14 @@ class S3StorageChecker:
             # ------------------------------
             # Cost: storage estimate (multi-class, best-effort)
             # ------------------------------
-
+            storage_metrics: dict[str, Any] | None = None
+            breakdown: dict[str, Any] | None = None
             if cloudwatch is not None:
+                storage_metrics = self._bucket_storage_metrics_best_effort(cloudwatch, bucket=name)
                 breakdown = self._bucket_storage_breakdown_best_effort(
-                    cloudwatch,
+                    storage_metrics,
                     pricing=pricing,
                     region=bucket_region,
-                    bucket=name,
                 )
                 if breakdown is not None:
                     total_gib = float(breakdown.get("total_size_gib") or 0.0)
@@ -273,12 +317,7 @@ class S3StorageChecker:
                     class_word = "class" if classes == 1 else "classes"
                     across_phrase = f"across {classes} {class_word}"
 
-                    breakdown_json = json.dumps(
-                        breakdown_items,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                        ensure_ascii=False,
-                    )
+                    breakdown_json = _stable_json(breakdown_items)
 
                     yield FindingDraft(
                         check_id=self._CID_COST,
@@ -292,8 +331,8 @@ class S3StorageChecker:
                             f"(~{total_gib:.1f} GiB {across_phrase})"
                         ),
                         message=(
-                            f"Estimated storage size ≈ {total_gib:.1f} GiB {across_phrase}. "
-                            f"Estimated cost ≈ ${total_cost:.2f}/month (storage-only)."
+                            f"Estimated storage size ~ {total_gib:.1f} GiB {across_phrase}. "
+                            f"Estimated cost ~ ${total_cost:.2f}/month (storage-only)."
                         ),
                         recommendation=(
                             "Use this estimate to prioritize storage optimization (lifecycle, tiering, archival). "
@@ -312,6 +351,15 @@ class S3StorageChecker:
                             "breakdown_json": breakdown_json,
                         },
                     )
+                    yield from self._emit_storage_optimization_findings(
+                        s3=s3,
+                        scope=scope,
+                        bucket=name,
+                        breakdown=breakdown,
+                        storage_metrics=storage_metrics,
+                        lifecycle_state=lifecycle_state,
+                        lifecycle_analysis=lifecycle_analysis,
+                    )
 
 
     # ------------------------------
@@ -328,18 +376,44 @@ class S3StorageChecker:
                 return "unknown"
             raise
 
-    def _has_lifecycle_best_effort(self, s3: BaseClient, bucket: str) -> tuple[str, str]:
-        """Return (state, note) where state is one of: present/missing/unknown."""
+    def _lifecycle_state_best_effort(
+        self,
+        s3: BaseClient,
+        bucket: str,
+    ) -> tuple[str, str, list[dict[str, Any]]]:
+        """Return lifecycle state, note, and lifecycle rules for a bucket."""
         try:
-            s3.get_bucket_lifecycle_configuration(Bucket=bucket)
-            return "present", ""
+            resp = s3.get_bucket_lifecycle_configuration(Bucket=bucket)
+            rules = [rule for rule in (resp.get("Rules", []) or []) if isinstance(rule, dict)]
+            return "present", "", rules
         except ClientError as exc:
             code = _client_error_code(exc)
             if code in ("NoSuchLifecycleConfiguration", "NoSuchLifecycleConfigurationException"):
-                return "missing", "No lifecycle configuration."
+                return "missing", "No lifecycle configuration.", []
             if code in ("AccessDenied", "AllAccessDisabled"):
-                return "unknown", "Access denied while reading lifecycle configuration."
+                return "unknown", "Access denied while reading lifecycle configuration.", []
             raise
+
+    def _analyze_lifecycle_rules(self, rules: list[dict[str, Any]]) -> dict[str, bool]:
+        """Summarize whether lifecycle rules already cover key storage controls."""
+        has_transition = False
+        has_abort_incomplete = False
+        for rule in rules:
+            if not _rule_is_enabled(rule):
+                continue
+            if isinstance(rule.get("Transitions"), list) and rule.get("Transitions"):
+                has_transition = True
+            if isinstance(rule.get("NoncurrentVersionTransitions"), list) and rule.get("NoncurrentVersionTransitions"):
+                has_transition = True
+            abort_cfg = rule.get("AbortIncompleteMultipartUpload")
+            if isinstance(abort_cfg, Mapping):
+                days_after = abort_cfg.get("DaysAfterInitiation")
+                if isinstance(days_after, (int, float)) and float(days_after) > 0:
+                    has_abort_incomplete = True
+        return {
+            "has_transition": has_transition,
+            "has_abort_incomplete": has_abort_incomplete,
+        }
 
     def _has_default_encryption_best_effort(self, s3: BaseClient, bucket: str) -> tuple[str, str]:
         try:
@@ -377,68 +451,92 @@ class S3StorageChecker:
     # ------------------------------
     # CloudWatch sizing helpers
     # ------------------------------
-    def _bucket_size_gib_best_effort(
+    def _bucket_storage_metrics_best_effort(
         self,
         cloudwatch: BaseClient,
         *,
         bucket: str,
-        storage_type: str,
-    ) -> float | None:
-        """Best-effort bucket size in GiB for a given CloudWatch StorageType.
-
-        Uses AWS/S3 BucketSizeBytes (updated daily). We query a small lookback
-        window and pick the latest datapoint by timestamp.
-
-        Returns:
-          - None: cannot query metric (permission or no datapoints)
-          - 0.0: bucket has 0 bytes for this storage type
-          - >0: GiB value
-        """
+    ) -> dict[str, Any] | None:
+        """Return batched CloudWatch S3 storage metrics for a bucket."""
         end = now_utc()
         start = end - timedelta(days=max(1, self._lookback_days))
+        storage_types = [item[0] for item in self._STORAGE_MATRIX]
+        queries: list[dict[str, Any]] = []
+        query_meta: dict[str, tuple[str, str]] = {}
+        for index, storage_type in enumerate(storage_types):
+            query_id = f"q{index}"
+            query_meta[query_id] = ("BucketSizeBytes", storage_type)
+            queries.append(
+                {
+                    "Id": query_id,
+                    "MetricStat": {
+                        "Metric": {
+                            "Namespace": "AWS/S3",
+                            "MetricName": "BucketSizeBytes",
+                            "Dimensions": [
+                                {"Name": "BucketName", "Value": bucket},
+                                {"Name": "StorageType", "Value": storage_type},
+                            ],
+                        },
+                        "Period": 86400,
+                        "Stat": "Average",
+                    },
+                    "ReturnData": True,
+                }
+            )
+        query_meta["objects"] = ("NumberOfObjects", "AllStorageTypes")
+        queries.append(
+            {
+                "Id": "objects",
+                "MetricStat": {
+                    "Metric": {
+                        "Namespace": "AWS/S3",
+                        "MetricName": "NumberOfObjects",
+                        "Dimensions": [
+                            {"Name": "BucketName", "Value": bucket},
+                            {"Name": "StorageType", "Value": "AllStorageTypes"},
+                        ],
+                    },
+                    "Period": 86400,
+                    "Stat": "Average",
+                },
+                "ReturnData": True,
+            }
+        )
         try:
-            resp = cloudwatch.get_metric_statistics(
-                Namespace="AWS/S3",
-                MetricName="BucketSizeBytes",
-                Dimensions=[
-                    {"Name": "BucketName", "Value": bucket},
-                    {"Name": "StorageType", "Value": storage_type},
-                ],
+            resp = cloudwatch.get_metric_data(
+                MetricDataQueries=queries,
                 StartTime=start,
                 EndTime=end,
-                Period=86400,
-                Statistics=["Average"],
+                ScanBy="TimestampDescending",
             )
-        except ClientError:
+        except (AttributeError, ClientError, TypeError, ValueError):
             return None
-
-        datapoints = resp.get("Datapoints", []) or []
-        if not datapoints:
+        results = resp.get("MetricDataResults", []) or []
+        sizes_gib: dict[str, float] = {}
+        object_count: float | None = None
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            result_id = str(result.get("Id") or "")
+            metric_name, storage_type = query_meta.get(result_id, ("", ""))
+            values = result.get("Values", []) or []
+            if not values:
+                continue
+            try:
+                latest_value = float(values[0])
+            except (TypeError, ValueError):
+                continue
+            if metric_name == "BucketSizeBytes":
+                sizes_gib[storage_type] = 0.0 if latest_value <= 0 else _bytes_to_gib(latest_value)
+            elif metric_name == "NumberOfObjects":
+                object_count = max(0.0, latest_value)
+        if not sizes_gib and object_count is None:
             return None
-
-        # Filter out None values and ensure we have valid timestamps
-        valid_datapoints = [
-            d for d in datapoints
-            if isinstance(d, dict) and d.get("Timestamp") is not None
-        ]
-        if not valid_datapoints:
-            return None
-
-        latest = max(
-            valid_datapoints,
-            key=lambda d: d.get("Timestamp") or datetime.min.replace(tzinfo=UTC),
-        )
-        avg = latest.get("Average")
-        if avg is None:
-            return None
-        try:
-            avg_f = float(avg)
-        except (TypeError, ValueError):
-            return None
-
-        if avg_f <= 0:
-            return 0.0
-        return _bytes_to_gib(avg_f)
+        return {
+            "sizes_gib": sizes_gib,
+            "object_count": object_count,
+        }
 
     # ------------------------------
     # Pricing helpers (best-effort)
@@ -452,40 +550,37 @@ class S3StorageChecker:
         fallback_usd_per_gb_month: float,
     ) -> tuple[float, str, int, str]:
         """Return (usd_per_gb_month, notes, confidence, price_source)."""
+        cache_key = (str(region or ""), str(pricing_storage_class or ""))
+        cached = self._storage_price_cache.get(cache_key)
+        if cached is not None:
+            return cached
         pricing_ctx = SimpleNamespace(services=SimpleNamespace(pricing=pricing))
-        return PricingResolver(pricing_ctx).resolve_s3_storage_price(
+        resolved = PricingResolver(pricing_ctx).resolve_s3_storage_price(
             region=region,
             pricing_storage_class=pricing_storage_class,
             fallback_usd_per_gb_month=fallback_usd_per_gb_month,
             call_exceptions=(AttributeError, TypeError, ValueError, ClientError),
         )
+        self._storage_price_cache[cache_key] = resolved
+        return resolved
 
     def _bucket_storage_breakdown_best_effort(
         self,
-        cloudwatch: BaseClient,
+        storage_metrics: dict[str, Any] | None,
         *,
         pricing: Any,
         region: str,
-        bucket: str,
     ) -> dict[str, Any] | None:
         """Compute a deterministic multi-class storage breakdown for a bucket.
 
         Uses CloudWatch storage metrics for multiple storage classes and estimates cost
         using PricingService when possible (fallback otherwise).
         """
-        # Fixed order for determinism.
-        # CloudWatch StorageType -> Pricing storageClass -> fallback $/GB-Mo
-        storage_matrix: list[tuple[str, str, float]] = [
-            ("StandardStorage", "Standard", self._default_price),
-            ("StandardIAStorage", "Standard - Infrequent Access", 0.0125),
-            ("OneZoneIAStorage", "One Zone - Infrequent Access", 0.0100),
-            ("IntelligentTieringFAStorage", "Intelligent-Tiering Frequent Access", self._default_price),
-            ("IntelligentTieringIAStorage", "Intelligent-Tiering Infrequent Access", 0.0125),
-            ("IntelligentTieringAAStorage", "Intelligent-Tiering Archive Access", 0.0040),
-            ("GlacierStorage", "Glacier Flexible Retrieval", 0.0040),
-            ("GlacierIRStorage", "Glacier Instant Retrieval", 0.0050),
-            ("DeepArchiveStorage", "Glacier Deep Archive", 0.00099),
-        ]
+        if storage_metrics is None:
+            return None
+        sizes_gib = storage_metrics.get("sizes_gib")
+        if not isinstance(sizes_gib, Mapping):
+            return None
 
         items: list[dict[str, str]] = []
         total_size = 0.0
@@ -493,12 +588,12 @@ class S3StorageChecker:
         confidences: list[int] = []
         notes_parts: list[str] = []
 
-        for cw_storage_type, pricing_storage_class, fallback_price in storage_matrix:
-            size_gib = self._bucket_size_gib_best_effort(
-                cloudwatch,
-                bucket=bucket,
-                storage_type=cw_storage_type,
-            )
+        for cw_storage_type, pricing_storage_class, fallback_price in self._STORAGE_MATRIX:
+            raw_size = sizes_gib.get(cw_storage_type)
+            try:
+                size_gib = float(raw_size)
+            except (TypeError, ValueError):
+                size_gib = None
             if size_gib is None or size_gib <= 0:
                 continue
 
@@ -541,7 +636,262 @@ class S3StorageChecker:
             "total_monthly_cost_usd": float(total_cost),
             "estimate_confidence": int(est_conf),
             "estimate_notes": summary_notes,
+            "object_count": storage_metrics.get("object_count"),
         }
+
+    def _multipart_upload_cleanup_candidate_best_effort(
+        self,
+        s3: BaseClient,
+        *,
+        bucket: str,
+        has_abort_rule: bool,
+    ) -> dict[str, Any] | None:
+        """Return stale multipart upload summary when cleanup looks missing."""
+        if has_abort_rule:
+            return None
+        try:
+            resp = s3.list_multipart_uploads(Bucket=bucket, MaxUploads=25)
+        except ClientError as exc:
+            code = _client_error_code(exc)
+            if code in ("AccessDenied", "AllAccessDisabled", "NoSuchBucket"):
+                return None
+            raise
+        uploads = resp.get("Uploads", []) or []
+        if not uploads:
+            return None
+        now = now_utc()
+        stale_days: list[int] = []
+        for upload in uploads:
+            if not isinstance(upload, Mapping):
+                continue
+            initiated = upload.get("Initiated")
+            if not isinstance(initiated, datetime):
+                continue
+            age_days = _days_between(now, initiated)
+            if age_days >= 7:
+                stale_days.append(age_days)
+        if not stale_days:
+            return None
+        stale_days.sort(reverse=True)
+        return {
+            "stale_upload_count": len(stale_days),
+            "oldest_upload_age_days": stale_days[0],
+        }
+
+    def _replication_review_best_effort(self, s3: BaseClient, *, bucket: str) -> dict[str, Any] | None:
+        """Return a summary of enabled replication rules for a bucket."""
+        try:
+            resp = s3.get_bucket_replication(Bucket=bucket)
+        except ClientError as exc:
+            code = _client_error_code(exc)
+            if code in (
+                "ReplicationConfigurationNotFoundError",
+                "NoSuchReplicationConfiguration",
+                "AccessDenied",
+                "AllAccessDisabled",
+            ):
+                return None
+            raise
+        rules = [rule for rule in (resp.get("ReplicationConfiguration", {}).get("Rules", []) or []) if isinstance(rule, dict)]
+        enabled_rules = [rule for rule in rules if _rule_is_enabled(rule)]
+        if not enabled_rules:
+            return None
+        destinations: list[dict[str, str]] = []
+        for rule in enabled_rules:
+            dest = rule.get("Destination")
+            if not isinstance(dest, Mapping):
+                continue
+            destinations.append(
+                {
+                    "bucket": str(dest.get("Bucket") or ""),
+                    "storage_class": str(dest.get("StorageClass") or "same_as_source"),
+                }
+            )
+        return {
+            "enabled_rule_count": len(enabled_rules),
+            "destinations": destinations,
+        }
+
+    def _intelligent_tiering_configured_best_effort(self, s3: BaseClient, *, bucket: str) -> bool:
+        """Return True when the bucket has at least one Intelligent-Tiering config."""
+        try:
+            resp = s3.list_bucket_intelligent_tiering_configurations(Bucket=bucket)
+        except (AttributeError, TypeError, ValueError):
+            return False
+        except ClientError as exc:
+            code = _client_error_code(exc)
+            if code in ("AccessDenied", "AllAccessDisabled", "NoSuchConfiguration"):
+                return False
+            raise
+        configs = resp.get("IntelligentTieringConfigurationList", []) or []
+        return any(isinstance(item, Mapping) for item in configs)
+
+    def _emit_storage_optimization_findings(
+        self,
+        *,
+        s3: BaseClient,
+        scope: Scope,
+        bucket: str,
+        breakdown: dict[str, Any],
+        storage_metrics: dict[str, Any] | None,
+        lifecycle_state: str,
+        lifecycle_analysis: dict[str, bool],
+    ) -> Iterable[FindingDraft]:
+        """Yield additional S3 optimization findings derived from storage shape."""
+        total_gib = float(breakdown.get("total_size_gib") or 0.0)
+        total_cost = float(breakdown.get("total_monthly_cost_usd") or 0.0)
+        object_count = storage_metrics.get("object_count") if isinstance(storage_metrics, Mapping) else None
+        standard_gib = 0.0
+        intelligent_tiering_gib = 0.0
+        for item in breakdown.get("items", []) or []:
+            if not isinstance(item, Mapping):
+                continue
+            storage_type = str(item.get("storage_type") or "")
+            try:
+                size_gib = float(item.get("size_gib") or 0.0)
+            except (TypeError, ValueError):
+                size_gib = 0.0
+            if storage_type == "StandardStorage":
+                standard_gib += size_gib
+            if storage_type.startswith("IntelligentTiering"):
+                intelligent_tiering_gib += size_gib
+        standard_share = (standard_gib / total_gib) if total_gib > 0 else 0.0
+        has_transition = bool(lifecycle_analysis.get("has_transition"))
+        has_abort_rule = bool(lifecycle_analysis.get("has_abort_incomplete"))
+        has_intelligent_tiering = intelligent_tiering_gib > 0.0 or self._intelligent_tiering_configured_best_effort(
+            s3, bucket=bucket
+        )
+
+        if total_gib >= 128.0 and standard_share >= 0.80 and lifecycle_state != "unknown" and not has_transition:
+            yield FindingDraft(
+                check_id=self._CID_LIFECYCLE_REVIEW,
+                check_name="S3 lifecycle transition review",
+                category="cost",
+                sub_category="storage",
+                status="info",
+                severity=Severity(level="medium", score=45),
+                title=f"S3 bucket may benefit from storage class transitions: {bucket}",
+                message=(
+                    f"Bucket {bucket} stores about {total_gib:.1f} GiB with {standard_share:.0%} in Standard storage "
+                    "and no enabled lifecycle transition rules were detected."
+                ),
+                recommendation=(
+                    "Review prefix-level lifecycle transitions for colder data, including Standard-IA, "
+                    "Intelligent-Tiering, Glacier Instant Retrieval, or archive tiers where retrieval patterns allow it."
+                ),
+                scope=scope,
+                issue_key={"check_id": self._CID_LIFECYCLE_REVIEW, "bucket": bucket},
+                estimate_confidence=55,
+                estimate_notes="Inference from bucket storage-class mix and lifecycle configuration.",
+                dimensions={
+                    "currency": "USD",
+                    "total_size_gib": f"{total_gib:.4f}",
+                    "standard_storage_gib": f"{standard_gib:.4f}",
+                    "standard_storage_share": _stringify_number(standard_share),
+                },
+            )
+
+        multipart = self._multipart_upload_cleanup_candidate_best_effort(
+            s3,
+            bucket=bucket,
+            has_abort_rule=has_abort_rule,
+        )
+        if multipart is not None:
+            yield FindingDraft(
+                check_id=self._CID_MULTIPART,
+                check_name="S3 multipart upload cleanup review",
+                category="cost",
+                sub_category="storage",
+                status="info",
+                severity=Severity(level="medium", score=40),
+                title=f"S3 bucket has stale multipart uploads without cleanup: {bucket}",
+                message=(
+                    f"Bucket {bucket} has {multipart['stale_upload_count']} multipart upload(s) at least 7 days old, "
+                    "and no lifecycle abort rule was detected."
+                ),
+                recommendation=(
+                    "Add an AbortIncompleteMultipartUpload lifecycle rule and review abandoned upload producers."
+                ),
+                scope=scope,
+                issue_key={"check_id": self._CID_MULTIPART, "bucket": bucket},
+                estimate_confidence=65,
+                estimate_notes="Multipart upload sizes are not exposed here, so savings are unquantified.",
+                dimensions={
+                    "stale_upload_count": str(multipart["stale_upload_count"]),
+                    "oldest_upload_age_days": str(multipart["oldest_upload_age_days"]),
+                },
+            )
+
+        replication = self._replication_review_best_effort(s3, bucket=bucket)
+        if replication is not None and total_gib >= 100.0:
+            replicated_monthly_cost = total_cost
+            yield FindingDraft(
+                check_id=self._CID_REPLICATION,
+                check_name="S3 replication cost review",
+                category="cost",
+                sub_category="storage",
+                status="info",
+                severity=Severity(level="medium", score=50),
+                title=f"S3 replication may materially increase storage spend: {bucket}",
+                message=(
+                    f"Bucket {bucket} has {replication['enabled_rule_count']} enabled replication rule(s) and stores "
+                    f"about {total_gib:.1f} GiB. Replication can duplicate storage charges and may add transfer cost."
+                ),
+                recommendation=(
+                    "Review whether all replicated prefixes still need replication, and whether destination storage "
+                    "classes and replication scope are intentionally optimized."
+                ),
+                scope=scope,
+                issue_key={"check_id": self._CID_REPLICATION, "bucket": bucket},
+                estimated_monthly_cost=round(replicated_monthly_cost, 2),
+                estimate_confidence=40,
+                estimate_notes=(
+                    "Estimated monthly cost reflects source-bucket storage only; replicated cost may be lower or higher "
+                    "depending on rule scope, destination class, and cross-region transfer."
+                ),
+                dimensions={
+                    "currency": "USD",
+                    "replication_rule_count": str(replication["enabled_rule_count"]),
+                    "total_size_gib": f"{total_gib:.4f}",
+                    "source_storage_cost_usd": f"{total_cost:.4f}",
+                    "replication_destinations_json": _stable_json(replication["destinations"]),
+                },
+            )
+
+        if total_gib >= 256.0 and standard_share >= 0.90 and not has_intelligent_tiering:
+            object_text = ""
+            dimensions = {
+                "currency": "USD",
+                "total_size_gib": f"{total_gib:.4f}",
+                "standard_storage_share": _stringify_number(standard_share),
+            }
+            if isinstance(object_count, (int, float)):
+                object_text = f" across about {int(object_count)} objects"
+                dimensions["object_count"] = str(int(object_count))
+            yield FindingDraft(
+                check_id=self._CID_TIERING,
+                check_name="S3 Intelligent-Tiering review",
+                category="cost",
+                sub_category="storage",
+                status="info",
+                severity=Severity(level="medium", score=45),
+                title=f"S3 bucket may benefit from Intelligent-Tiering review: {bucket}",
+                message=(
+                    f"Bucket {bucket} stores about {total_gib:.1f} GiB{object_text} with little or no existing "
+                    "Intelligent-Tiering usage detected."
+                ),
+                recommendation=(
+                    "Review whether low-access prefixes or uncertain access patterns should move to Intelligent-Tiering "
+                    "instead of remaining mostly in Standard storage."
+                ),
+                scope=scope,
+                issue_key={"check_id": self._CID_TIERING, "bucket": bucket},
+                estimate_confidence=50,
+                estimate_notes=(
+                    "This is an inference from storage-class mix, not a direct measurement of per-object access frequency."
+                ),
+                dimensions=dimensions,
+            )
 
 
 @register_checker("checks.aws.s3_storage:S3StorageChecker")
