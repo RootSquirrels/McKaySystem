@@ -18,6 +18,9 @@ from checks.aws.defaults import (
     KINESIS_LOOKBACK_DAYS,
     KINESIS_MAX_FINDINGS_PER_TYPE,
     KINESIS_MIN_DAILY_DATAPOINTS,
+    KINESIS_ORPHANED_MAX_P95_DAILY_GIB,
+    KINESIS_ORPHANED_MAX_P95_INCOMING_RECORDS,
+    KINESIS_ORPHANED_MAX_P95_OUTGOING_RECORDS,
     KINESIS_PROVISIONED_UNDERUTILIZED_UTIL_THRESHOLD_PCT,
     KINESIS_RETENTION_LOW_TRAFFIC_P95_DAILY_GIB_THRESHOLD,
     KINESIS_RETENTION_REVIEW_MIN_HOURS,
@@ -43,6 +46,9 @@ class KinesisStreamsConfig:
     retention_review_min_hours: int = KINESIS_RETENTION_REVIEW_MIN_HOURS
     retention_low_traffic_p95_daily_gib_threshold: float = KINESIS_RETENTION_LOW_TRAFFIC_P95_DAILY_GIB_THRESHOLD
     unused_efo_max_p95_outgoing_records: float = KINESIS_UNUSED_EFO_MAX_P95_OUTGOING_RECORDS
+    orphaned_max_p95_daily_gib: float = KINESIS_ORPHANED_MAX_P95_DAILY_GIB
+    orphaned_max_p95_incoming_records: float = KINESIS_ORPHANED_MAX_P95_INCOMING_RECORDS
+    orphaned_max_p95_outgoing_records: float = KINESIS_ORPHANED_MAX_P95_OUTGOING_RECORDS
     max_findings_per_type: int = KINESIS_MAX_FINDINGS_PER_TYPE
     fallback_shard_hourly_usd: float = KINESIS_FALLBACK_SHARD_HOURLY_USD
     fallback_efo_consumer_shard_hourly_usd: float = KINESIS_FALLBACK_EFO_CONSUMER_SHARD_HOURLY_USD
@@ -390,8 +396,76 @@ class KinesisStreamsChecker(Checker):
         downstream_lambda_names = list(downstream.get("lambda_names") or [])
         downstream_lambda_arns = list(downstream.get("lambda_arns") or [])
         event_source_mapping_uuids = list(downstream.get("event_source_mapping_uuids") or [])
+        downstream_lambda_count = len(downstream_lambda_arns)
 
         combined_daily_gib = _combined_daily_gib(metrics)
+        p95_incoming_records = float(metrics.get("p95_incoming_records") or 0.0)
+        p95_outgoing_records = float(metrics.get("p95_outgoing_records") or 0.0)
+        if (
+            not active_consumers
+            and not downstream_lambda_arns
+            and combined_daily_gib <= float(self._cfg.orphaned_max_p95_daily_gib)
+            and p95_incoming_records <= float(self._cfg.orphaned_max_p95_incoming_records)
+            and p95_outgoing_records <= float(self._cfg.orphaned_max_p95_outgoing_records)
+        ):
+            monthly_stream_cost = (
+                money(max(1, open_shards) * float(self._cfg.fallback_shard_hourly_usd) * 730.0)
+                if mode == "PROVISIONED"
+                else None
+            )
+            yield FindingDraft(
+                check_id="aws.kinesis.stream.possibly.orphaned",
+                check_name="Kinesis stream possibly orphaned",
+                category="cost",
+                status="info",
+                severity=Severity(level="medium", score=540),
+                title=f"Kinesis stream may be orphaned: {stream_name}",
+                scope=build_scope(
+                    ctx,
+                    account=self._account,
+                    region=region,
+                    service="kinesis",
+                    resource_type="stream",
+                    resource_id=stream_name,
+                    resource_arn=stream_arn,
+                ),
+                message=(
+                    "Stream has no active enhanced fan-out consumers and no downstream Lambda event source mappings, "
+                    f"while observed p95 daily traffic is only {combined_daily_gib:.2f} GiB and ingress/egress "
+                    f"records are {p95_incoming_records:.2f}/{p95_outgoing_records:.2f}."
+                ),
+                recommendation=(
+                    "Verify whether this stream still has a live producer and downstream business use. "
+                    "If it no longer backs an active ingestion path, delete it or consolidate the workload into another stream."
+                ),
+                estimated_monthly_cost=monthly_stream_cost,
+                estimated_monthly_savings=monthly_stream_cost,
+                estimate_confidence=35 if monthly_stream_cost is not None else None,
+                estimate_notes=(
+                    "Estimate uses fallback shard-hour pricing for provisioned streams only."
+                    if monthly_stream_cost is not None
+                    else None
+                ),
+                dimensions={
+                    "stream_name": stream_name,
+                    "stream_mode": mode,
+                    "open_shard_count": str(max(1, open_shards)),
+                    "consumer_count": str(len(active_consumers)),
+                    "consumer_names": ",".join(consumer_names),
+                    "consumer_arns": ",".join(consumer_arns),
+                    "downstream_lambda_count": str(downstream_lambda_count),
+                    "downstream_lambda_names": _csv_join(downstream_lambda_names),
+                    "downstream_lambda_arns": _csv_join(downstream_lambda_arns),
+                    "event_source_mapping_uuids": _csv_join(event_source_mapping_uuids),
+                    "p95_combined_daily_gib": f"{combined_daily_gib:.2f}",
+                    "p95_incoming_records": f"{p95_incoming_records:.2f}",
+                    "p95_outgoing_records": f"{p95_outgoing_records:.2f}",
+                    "relationship_state": "no_known_consumers_or_lambda_targets",
+                    "optimization_focus": "delete_or_verify_orphaned_stream",
+                },
+                issue_key={"signal": "possibly_orphaned", "stream_name": stream_name},
+            )
+
         if mode == "PROVISIONED" and open_shards >= 2:
             util_pct = self._provisioned_utilization_pct(metrics=metrics, open_shard_count=open_shards)
             suggested_shards = _suggested_shard_count(metrics, open_shard_count=open_shards)
@@ -439,11 +513,12 @@ class KinesisStreamsChecker(Checker):
                         "consumer_count": str(len(active_consumers)),
                         "consumer_names": ",".join(consumer_names),
                         "consumer_arns": ",".join(consumer_arns),
+                        "downstream_lambda_count": str(downstream_lambda_count),
                         "downstream_lambda_names": _csv_join(downstream_lambda_names),
                         "downstream_lambda_arns": _csv_join(downstream_lambda_arns),
                         "event_source_mapping_uuids": _csv_join(event_source_mapping_uuids),
                         "p95_incoming_bytes": f"{float(metrics.get('p95_incoming_bytes') or 0.0):.2f}",
-                        "p95_incoming_records": f"{float(metrics.get('p95_incoming_records') or 0.0):.2f}",
+                        "p95_incoming_records": f"{p95_incoming_records:.2f}",
                         "p95_ingress_utilization_pct": f"{util_pct:.2f}",
                         "optimization_focus": "shard_count_review",
                     },
@@ -485,6 +560,7 @@ class KinesisStreamsChecker(Checker):
                     "consumer_count": str(len(active_consumers)),
                     "consumer_names": ",".join(consumer_names),
                     "consumer_arns": ",".join(consumer_arns),
+                    "downstream_lambda_count": str(downstream_lambda_count),
                     "downstream_lambda_names": _csv_join(downstream_lambda_names),
                     "downstream_lambda_arns": _csv_join(downstream_lambda_arns),
                     "event_source_mapping_uuids": _csv_join(event_source_mapping_uuids),
@@ -494,7 +570,6 @@ class KinesisStreamsChecker(Checker):
                 issue_key={"signal": "extended_retention_review", "stream_name": stream_name},
             )
 
-        p95_outgoing_records = float(metrics.get("p95_outgoing_records") or 0.0)
         if active_consumers and p95_outgoing_records <= float(self._cfg.unused_efo_max_p95_outgoing_records):
             consumer_monthly_cost = (
                 len(active_consumers) * max(1, open_shards) * float(self._cfg.fallback_efo_consumer_shard_hourly_usd) * 730.0
@@ -532,6 +607,7 @@ class KinesisStreamsChecker(Checker):
                     "consumer_count": str(len(active_consumers)),
                     "consumer_names": ",".join(consumer_names),
                     "consumer_arns": ",".join(consumer_arns),
+                    "downstream_lambda_count": str(downstream_lambda_count),
                     "downstream_lambda_names": _csv_join(downstream_lambda_names),
                     "downstream_lambda_arns": _csv_join(downstream_lambda_arns),
                     "event_source_mapping_uuids": _csv_join(event_source_mapping_uuids),

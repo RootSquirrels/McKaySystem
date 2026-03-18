@@ -269,3 +269,81 @@ def test_access_denied_emits_info_finding() -> None:
     assert len(findings) == 1
     assert findings[0].check_id == "aws.kinesis.access.error"
     assert findings[0].status == "info"
+
+
+def test_possibly_orphaned_stream_emits_for_low_traffic_unconnected_stream() -> None:
+    """Low-traffic streams with no consumers or Lambda targets should emit an orphaned review."""
+
+    stream_arn = "arn:aws:kinesis:eu-west-1:111111111111:stream/legacy"
+    kinesis = FakeKinesis(
+        region="eu-west-1",
+        stream_names=["legacy"],
+        summaries_by_name={
+            "legacy": {
+                "StreamName": "legacy",
+                "StreamARN": stream_arn,
+                "StreamStatus": "ACTIVE",
+                "OpenShardCount": 2,
+                "RetentionPeriodHours": 24,
+                "StreamModeDetails": {"StreamMode": "PROVISIONED"},
+            }
+        },
+    )
+    cloudwatch = FakeCloudWatch(
+        metrics_by_key={
+            ("legacy", "IncomingBytes"): [25_000_000.0] * 7,
+            ("legacy", "OutgoingBytes"): [10_000_000.0] * 7,
+            ("legacy", "IncomingRecords"): [20.0] * 7,
+            ("legacy", "OutgoingRecords"): [10.0] * 7,
+        }
+    )
+
+    findings = list(_checker().run(_mk_ctx(kinesis=kinesis, cloudwatch=cloudwatch)))
+    hit = next(finding for finding in findings if finding.check_id == "aws.kinesis.stream.possibly.orphaned")
+    assert hit.scope.resource_id == "legacy"
+    assert hit.dimensions["consumer_count"] == "0"
+    assert hit.dimensions["downstream_lambda_count"] == "0"
+    assert hit.dimensions["relationship_state"] == "no_known_consumers_or_lambda_targets"
+    assert hit.dimensions["optimization_focus"] == "delete_or_verify_orphaned_stream"
+    assert hit.estimated_monthly_savings is not None
+
+
+def test_possibly_orphaned_stream_skips_when_lambda_target_exists() -> None:
+    """Streams with downstream Lambda targets should not be treated as orphaned."""
+
+    stream_arn = "arn:aws:kinesis:eu-west-1:111111111111:stream/orders"
+    kinesis = FakeKinesis(
+        region="eu-west-1",
+        stream_names=["orders"],
+        summaries_by_name={
+            "orders": {
+                "StreamName": "orders",
+                "StreamARN": stream_arn,
+                "StreamStatus": "ACTIVE",
+                "OpenShardCount": 1,
+                "RetentionPeriodHours": 24,
+                "StreamModeDetails": {"StreamMode": "PROVISIONED"},
+            }
+        },
+    )
+    cloudwatch = FakeCloudWatch(
+        metrics_by_key={
+            ("orders", "IncomingBytes"): [20_000_000.0] * 7,
+            ("orders", "OutgoingBytes"): [10_000_000.0] * 7,
+            ("orders", "IncomingRecords"): [20.0] * 7,
+            ("orders", "OutgoingRecords"): [10.0] * 7,
+        }
+    )
+    lambda_client = FakeLambdaMappings(
+        mappings_by_event_source_arn={
+            stream_arn: [
+                {
+                    "UUID": "esm-2",
+                    "FunctionArn": "arn:aws:lambda:eu-west-1:111111111111:function:orders-consumer",
+                }
+            ]
+        }
+    )
+
+    findings = list(_checker().run(_mk_ctx(kinesis=kinesis, cloudwatch=cloudwatch, lambda_client=lambda_client)))
+    assert all(finding.check_id != "aws.kinesis.stream.possibly.orphaned" for finding in findings)

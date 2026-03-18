@@ -12,6 +12,7 @@ This checker focuses on:
 - clearly overprovisioned provisioned shard count
 - low-value extended retention
 - potentially unused enhanced fan-out consumers
+- low-traffic streams with no known consumer or Lambda downstream chain
 
 It only evaluates `Kinesis Data Streams`, not Firehose.
 
@@ -25,6 +26,7 @@ It only evaluates `Kinesis Data Streams`, not Firehose.
 - `aws.kinesis.stream.provisioned.overprovisioned`
 - `aws.kinesis.stream.retention.extended.review`
 - `aws.kinesis.stream.enhanced_fanout.unused.review`
+- `aws.kinesis.stream.possibly.orphaned`
 - `aws.kinesis.access.error`
 
 ## Evidence model
@@ -36,6 +38,12 @@ lookback window and derives:
 - `p95_outgoing_bytes`
 - `p95_incoming_records`
 - `p95_outgoing_records`
+
+It also carries relationship-aware evidence when available:
+
+- active enhanced fan-out consumer identity
+- downstream Lambda event source mapping UUIDs
+- downstream Lambda function identity
 
 For provisioned streams, shard-fit is conservative and based on ingest-side
 capacity only:
@@ -60,6 +68,13 @@ Retention and enhanced fan-out findings are review signals:
 
 - they improve actionability
 - they should not be treated as exact savings claims
+
+`aws.kinesis.stream.possibly.orphaned` is also a conservative review signal:
+
+- it only fires when traffic is very low
+- no active enhanced fan-out consumers are present
+- no downstream Lambda event source mappings are known
+- provisioned streams may carry a directional fallback savings estimate
 
 ## IAM permissions
 
