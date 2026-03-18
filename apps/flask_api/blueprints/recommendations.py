@@ -633,6 +633,7 @@ def _load_graph_packages_for_rows(
             neighbor_service,
             neighbor_resource_type,
             neighbor_resource_name,
+            neighbor_owner_hint,
             ROW_NUMBER() OVER (
               PARTITION BY root_resource_key
               ORDER BY

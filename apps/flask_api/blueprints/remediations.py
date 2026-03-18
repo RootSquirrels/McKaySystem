@@ -685,6 +685,7 @@ def _query_impact_rows(
 ) -> tuple[list[dict[str, Any]], dict[str, Any], int, dict[str, list[dict[str, Any]]]]:
     """Query remediation impact list, summary and total count."""
     where, params = _impact_where_clause(tenant_id, workspace, filters)
+    where_sql = " AND ".join(where)
     list_sql = f"""
         SELECT
           ri.tenant_id, ri.workspace, ri.action_id, ri.fingerprint, ri.check_id, ri.action_type,
@@ -694,14 +695,14 @@ def _query_impact_rows(
           ri.latest_run_id, ri.latest_run_ts, ri.present_in_latest,
           ri.finalized_at, ri.computed_at, ri.version
         FROM remediation_impact ri
-        WHERE {' AND '.join(where)}
+        WHERE {where_sql}
         ORDER BY ri.computed_at DESC, ri.action_id
         LIMIT %s OFFSET %s
     """
     count_sql = f"""
         SELECT COUNT(*) AS n
         FROM remediation_impact ri
-        WHERE {' AND '.join(where)}
+        WHERE {where_sql}
     """
     summary_sql = f"""
         SELECT
@@ -717,7 +718,7 @@ def _query_impact_rows(
           COALESCE(SUM(ri.realized_monthly_savings), 0)::double precision AS realized_total_monthly_savings,
           COALESCE(SUM(GREATEST(ri.baseline_estimated_monthly_savings - COALESCE(ri.realized_monthly_savings, 0), 0)), 0)::double precision AS estimated_not_realized_monthly_savings
         FROM remediation_impact ri
-        WHERE {' AND '.join(where)}
+        WHERE {where_sql}
     """
     quality_sql_template = """
         SELECT
@@ -736,16 +737,17 @@ def _query_impact_rows(
           ON ra.tenant_id = ri.tenant_id
          AND ra.workspace = ri.workspace
          AND ra.action_id = ri.action_id
-        WHERE {' AND '.join(where)}
+        WHERE {where_sql}
         GROUP BY group_key
         ORDER BY realized_total_monthly_savings DESC, actions_count DESC, group_key
         LIMIT 10
     """
     quality_queries = {
         "by_recommendation_type": quality_sql_template.format(
-            group_expr="COALESCE(NULLIF(ra.action_payload->>'recommendation_type', ''), 'other')"
+            group_expr="COALESCE(NULLIF(ra.action_payload->>'recommendation_type', ''), 'other')",
+            where_sql=where_sql,
         ),
-        "by_check_id": quality_sql_template.format(group_expr="ri.check_id"),
+        "by_check_id": quality_sql_template.format(group_expr="ri.check_id", where_sql=where_sql),
     }
     with db_conn() as conn:
         rows = fetch_all_dict_conn(conn, list_sql, params + [limit, offset])
