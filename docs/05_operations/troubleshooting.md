@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Status: Derived  
+Status: Reference  
 Last reviewed: 2026-02-01
 
 This document lists **common operational issues**, how to diagnose them, and how to fix them.

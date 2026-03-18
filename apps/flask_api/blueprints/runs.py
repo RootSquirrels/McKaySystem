@@ -22,7 +22,6 @@ from apps.flask_api.utils import (
     _require_scope_from_query,
 )
 
-# Create the blueprint
 runs_bp = Blueprint("runs", __name__)
 
 

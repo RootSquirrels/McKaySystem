@@ -1,11 +1,4 @@
-"""Remediations Blueprint.
-
-Provides remediation action endpoints:
-- request action
-- list actions
-- approve action
-- reject action
-"""
+"""Remediation action and outcome endpoints."""
 
 from __future__ import annotations
 
@@ -116,7 +109,7 @@ def _audit_log_event(
     event: dict[str, Any],
     actor_id: str | None,
 ) -> None:
-    """Best-effort write to audit_log for remediation lifecycle events."""
+    """Write remediation audit data without interrupting the main action flow."""
     tenant_id = str(event.get("tenant_id") or "")
     workspace = str(event.get("workspace") or "")
     action_id = str(event.get("action_id") or "")
@@ -228,7 +221,7 @@ def _stable_action_id(
 
 
 def _recommendation_rule_for_check_id(check_id: str) -> dict[str, Any]:
-    """Best-effort load recommendation rule metadata by check_id."""
+    """Load recommendation rule metadata for one check when it exists."""
     if not check_id:
         return {}
 

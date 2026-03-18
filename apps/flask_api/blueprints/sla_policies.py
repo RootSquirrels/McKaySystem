@@ -1,14 +1,11 @@
-"""SLA Policies Blueprint.
+"""SLA policy and override endpoints."""
 
-Provides endpoints for managing SLA policies and overrides.
-"""
-
-import json
 from typing import Any
 
 from flask import Blueprint, request
 
 from apps.backend.db import db_conn, execute_conn, fetch_all_dict_conn, fetch_one_dict_conn
+from apps.flask_api.audit import AuditEvent, append_audit_event
 from apps.flask_api.auth_middleware import require_permission
 from apps.flask_api.utils import (
     _MISSING,
@@ -24,13 +21,7 @@ from apps.flask_api.utils import (
     _require_scope_from_query,
 )
 
-# Create the blueprint
 sla_policies_bp = Blueprint("sla_policies", __name__)
-
-
-# --------------------
-# Helper functions
-# --------------------
 
 
 def _fetch_sla_policy_category(
@@ -104,56 +95,27 @@ def _audit_log_event(
     run_id: str | None = None,
     correlation_id: str | None = None,
 ) -> None:
-    """Best-effort append-only write to audit_log, isolated by savepoint."""
-    try:
-        ip_address = request.headers.get("X-Forwarded-For", request.remote_addr)
-        user_agent = request.headers.get("User-Agent", "")
-    except RuntimeError:
-        ip_address = None
-        user_agent = ""
-
-    params = (
-        tenant_id,
-        workspace,
-        entity_type,
-        entity_id,
-        fingerprint,
-        event_type,
-        event_category,
-        (json.dumps(previous_value, separators=(",", ":")) if previous_value is not None else None),
-        (json.dumps(new_value, separators=(",", ":")) if new_value is not None else None),
-        actor_id,
-        actor_email,
-        actor_name,
-        source,
-        ip_address,
-        user_agent,
-        run_id,
-        correlation_id,
+    """Write SLA policy audit data through the shared audit helper."""
+    append_audit_event(
+        conn,
+        event=AuditEvent(
+            tenant_id=tenant_id,
+            workspace=workspace,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            fingerprint=fingerprint,
+            event_type=event_type,
+            event_category=event_category,
+            previous_value=previous_value,
+            new_value=new_value,
+            actor_id=actor_id,
+            actor_email=actor_email,
+            actor_name=actor_name,
+            source=source,
+            run_id=run_id,
+            correlation_id=correlation_id,
+        ),
     )
-
-    with conn.cursor() as cur:
-        try:
-            cur.execute("SAVEPOINT mckay_audit_log_1")
-            cur.execute(
-                """
-                INSERT INTO audit_log
-                  (tenant_id, workspace, entity_type, entity_id, fingerprint,
-                   event_type, event_category, previous_value, new_value,
-                   actor_id, actor_email, actor_name, source,
-                   ip_address, user_agent, run_id, correlation_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                params,
-            )
-            cur.execute("RELEASE SAVEPOINT mckay_audit_log_1")
-        except Exception:
-            cur.execute("ROLLBACK TO SAVEPOINT mckay_audit_log_1")
-
-
-# --------------------
-# SLA Policy Category endpoints
-# --------------------
 
 
 @sla_policies_bp.route("/api/sla/policies", methods=["GET"])

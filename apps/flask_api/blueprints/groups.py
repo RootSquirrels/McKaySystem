@@ -18,7 +18,6 @@ from apps.flask_api.utils import (
     _require_scope_from_query,
 )
 
-# Create the blueprint
 groups_bp = Blueprint("groups", __name__)
 
 

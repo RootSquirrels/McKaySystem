@@ -1,32 +1,20 @@
-"""Facets Blueprint.
-
-Provides facet/distinct values endpoints for filter suggestions.
-"""
+"""Facet endpoints for finding filters."""
 
 from typing import Any
 
-from flask import Blueprint, jsonify
+from flask import Blueprint
 
 from apps.backend.db import db_conn, fetch_all_dict_conn
 from apps.flask_api.auth_middleware import require_permission
-from apps.flask_api.utils import _require_scope_from_query
+from apps.flask_api.utils import _err, _ok, _require_scope_from_query
 
-# Create the blueprint
 facets_bp = Blueprint("facets", __name__)
 
 
 @facets_bp.route("/api/facets", methods=["GET"])
 @require_permission("findings:read")
 def api_facets() -> Any:
-    """Return distinct values (with counts) for common filters.
-
-    Query params:
-        tenant_id (required): Tenant identifier
-        workspace (required): Workspace identifier
-
-    Returns:
-        JSON with distinct values and counts for services, regions, severities, states
-    """
+    """Return distinct values and counts for common finding filters."""
     try:
         tenant_id, workspace = _require_scope_from_query()
         with db_conn() as conn:
@@ -75,7 +63,7 @@ def api_facets() -> Any:
                 (tenant_id, workspace),
             )
 
-        return jsonify(
+        return _ok(
             {
                 "tenant_id": tenant_id,
                 "workspace": workspace,
@@ -86,4 +74,4 @@ def api_facets() -> Any:
             }
         )
     except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
+        return _err("bad_request", str(exc), status=400)

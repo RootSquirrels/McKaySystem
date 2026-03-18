@@ -8,7 +8,7 @@ Last reviewed: 2026-03-18
 This document defines the canonical domain contracts for the tier-1 public API
 surfaces.
 
-The goal is to stabilize:
+It stabilizes:
 
 - object meaning
 - field meaning
@@ -110,7 +110,7 @@ Field meaning constraints:
 
 Compatibility notes:
 
-- findings may expose legacy governance or lifecycle fields as long as their
+- findings may expose older governance or lifecycle fields as long as their
   meaning stays in the detection/governance layer
 - the contract does not require every finding to map to a recommendation
 
@@ -427,4 +427,4 @@ It should stay focused on:
 - stable field meaning
 - compatibility notes that still matter to clients
 
-It should not become an implementation diary.
+It should stay focused on the contract.

@@ -1,15 +1,12 @@
-"""Findings Blueprint.
+"""Finding query and governance endpoints."""
 
-Provides finding query and management endpoints.
-"""
-
-import json
 from datetime import UTC, datetime
 from typing import Any
 
 from flask import Blueprint, request
 
 from apps.backend.db import db_conn, execute_conn, fetch_all_dict_conn, fetch_one_dict_conn
+from apps.flask_api.audit import AuditEvent, append_audit_event
 from apps.flask_api.auth_middleware import require_permission
 from apps.flask_api.graph_context import graph_resource_key_from_payload, load_graph_context
 from apps.flask_api.utils import (
@@ -26,7 +23,6 @@ from apps.flask_api.utils import (
     _require_scope_from_query,
 )
 
-# Create the blueprint
 findings_bp = Blueprint("findings", __name__)
 
 
@@ -65,51 +61,27 @@ def _audit_log_event(
     run_id: str | None = None,
     correlation_id: str | None = None,
 ) -> None:
-    """Best-effort append-only write to audit_log, isolated by savepoint."""
-    try:
-        ip_address = request.headers.get("X-Forwarded-For", request.remote_addr)
-        user_agent = request.headers.get("User-Agent", "")
-    except RuntimeError:
-        ip_address = None
-        user_agent = ""
-
-    params = (
-        tenant_id,
-        workspace,
-        entity_type,
-        entity_id,
-        fingerprint,
-        event_type,
-        event_category,
-        (json.dumps(previous_value, separators=(",", ":")) if previous_value is not None else None),
-        (json.dumps(new_value, separators=(",", ":")) if new_value is not None else None),
-        actor_id,
-        actor_email,
-        actor_name,
-        source,
-        ip_address,
-        user_agent,
-        run_id,
-        correlation_id,
+    """Write finding audit data through the shared audit helper."""
+    append_audit_event(
+        conn,
+        event=AuditEvent(
+            tenant_id=tenant_id,
+            workspace=workspace,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            fingerprint=fingerprint,
+            event_type=event_type,
+            event_category=event_category,
+            previous_value=previous_value,
+            new_value=new_value,
+            actor_id=actor_id,
+            actor_email=actor_email,
+            actor_name=actor_name,
+            source=source,
+            run_id=run_id,
+            correlation_id=correlation_id,
+        ),
     )
-
-    with conn.cursor() as cur:
-        try:
-            cur.execute("SAVEPOINT mckay_audit_log_1")
-            cur.execute(
-                """
-                INSERT INTO audit_log
-                  (tenant_id, workspace, entity_type, entity_id, fingerprint,
-                   event_type, event_category, previous_value, new_value,
-                   actor_id, actor_email, actor_name, source,
-                   ip_address, user_agent, run_id, correlation_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                params,
-            )
-            cur.execute("RELEASE SAVEPOINT mckay_audit_log_1")
-        except Exception:
-            cur.execute("ROLLBACK TO SAVEPOINT mckay_audit_log_1")
 
 
 def _finding_exists(conn: Any, *, tenant_id: str, workspace: str, fingerprint: str) -> bool:

@@ -1,6 +1,6 @@
 # API Inventory Matrix
 
-Status: Derived  
+Status: Reference  
 Last reviewed: 2026-03-18
 
 ## Purpose
@@ -19,9 +19,8 @@ Contract rule:
 - `/api/v1/*` is the canonical public base
 - `/api/*` is the compatibility base that resolves to the same handlers today
 
-This matrix is intentionally conservative. A domain should only be marked
-`stable` when both route shape and field semantics are trusted enough for
-external clients to depend on them.
+A domain should only be marked `stable` when both route shape and field
+semantics are solid enough for external clients to depend on them.
 
 Related:
 
@@ -208,4 +207,4 @@ Current posture:
 - lifecycle is `compatibility`
 - none of the major business domains should yet be labeled `stable` until domain contracts and contract tests are completed
 
-This is intentionally conservative.
+This remains intentionally conservative.

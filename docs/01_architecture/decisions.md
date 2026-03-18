@@ -1,6 +1,6 @@
 # Architecture decisions
 
-Status: Derived  
+Status: Reference  
 Last reviewed: 2026-02-01
 
 # Architecture Decisions

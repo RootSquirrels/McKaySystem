@@ -1,26 +1,9 @@
-"""flask_app.py
+"""Flask API entrypoint for McKaySystem.
 
-DB-backed API for McKaySystem (FinOpsAnalyzer).
-
-MIGRATION NOTICE (2026-02-15):
-This file has been refactored to use Flask Blueprints for modular organization.
-Endpoint implementations have been moved to apps/flask_api/blueprints/.
-The original endpoint definitions below are kept for backwards compatibility but
-are now duplicates - the Blueprint routes take precedence.
-
-Core concepts
--------------
-- tenant_id + workspace scope every query.
-- Read model is the Postgres view: finding_current.
-- Lifecycle actions upsert into finding_state_current (workspace-scoped).
-
-Env
----
-- DB_URL (required) used by apps.backend.db
-
-Run
----
-FLASK_APP=flask_app.py flask run --host=0.0.0.0 --port=5000
+Core concepts:
+- tenant_id + workspace scope every query
+- finding_current is the findings read model
+- lifecycle actions upsert into finding_state_current
 """
 
 from __future__ import annotations
@@ -107,11 +90,9 @@ def _rule_to_openapi_path(path: str) -> str:
     return re.sub(r"<(?:[^:>]+:)?([^>]+)>", r"{\1}", str(path or ""))
 
 
-# --------------------
-# Operational hardening
-# --------------------
-# Logging and rate limiting are intentionally lightweight (no extra deps).
-# In hosted environments, prefer adding proper reverse-proxy/WAF rate limiting.
+# Operational hardening.
+# Logging and rate limiting stay lightweight here. Prefer reverse-proxy or WAF
+# controls in hosted environments.
 
 _API_DEBUG_ERRORS = bool(_SETTINGS.api.debug_errors)
 _API_LOG_LEVEL = str(_SETTINGS.api.log_level or "INFO").strip().upper()
@@ -849,7 +830,7 @@ def _register_versioned_api_aliases() -> None:
     _versioned_aliases_registered = True
 
 
-# Back-compat symbols expected by legacy unit tests that monkeypatch flask_app.
+# Compatibility symbols expected by older tests that monkeypatch flask_app.
 _team_exists = teams_module._team_exists
 _fetch_team_member = teams_module._fetch_team_member
 _fetch_sla_policy_category = sla_policies_module._fetch_sla_policy_category

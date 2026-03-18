@@ -1,13 +1,13 @@
 # API Reference
 
-Status: Derived  
+Status: Reference  
 Last reviewed: 2026-03-18
 
-This document describes the HTTP API implemented in the Flask application using a modular Blueprint architecture.
+This document describes the HTTP API exposed by the Flask application.
 
 Reference scope:
 
-- Canonical public base: `/api/v1`
+- Public base: `/api/v1`
 - Compatibility base: `/api`
 - Domain stability and classification matrix:
   - [api_inventory_matrix.md](/McKaySystem/docs/06_api/api_inventory_matrix.md)
@@ -40,7 +40,7 @@ Source code:
 
 - Base URL: `http(s)://RootSquirrels.pythonanywhere.com`
 - Canonical public API base: `/api/v1`
-- Legacy compatibility base (still supported): `/api`
+- Compatibility base (still supported): `/api`
 - OpenAPI 3.0 spec endpoints:
   - `GET /openapi.json` (public)
   - `GET /api/openapi.json`
@@ -229,7 +229,7 @@ Notes:
 - Recommendation semantics should be read together with:
   - [product_surface_contract.md](/McKaySystem/docs/00_overview/product_surface_contract.md)
   - [recommendations_build.md](/McKaySystem/docs/02_pipeline/recommendations_build.md)
-- Response items include normalized action-plan fields and `checker_advice` (from finding payload `advice`, with legacy fallback to payload `recommendation`).
+- Response items include normalized action-plan fields and `checker_advice` (from finding payload `advice`, with a compatibility fallback to payload `recommendation`).
 
 Query/Body params for `/api/recommendations`:
 - Scope: `tenant_id`, `workspace` (required)

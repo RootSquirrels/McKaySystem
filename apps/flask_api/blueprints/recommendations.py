@@ -35,11 +35,10 @@ from apps.flask_api.utils.payload import (
     _run_meta_pricing_version,
 )
 
-# Create the blueprint
 recommendations_bp = Blueprint("recommendations", __name__)
 
 
-# Recommendation rules - mapping check_ids to recommendation metadata
+# Recommendation rules keyed by check_id.
 _RECOMMENDATION_RULES: dict[str, dict[str, Any]] = {
     "aws.ec2.instances.underutilized": {
         "recommendation_type": "rightsizing.ec2.instance",

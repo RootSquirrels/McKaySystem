@@ -1,6 +1,6 @@
 # Repository Cleanup Implementation Plan
 
-Status: Proposed  
+Status: Active  
 Last reviewed: 2026-03-18
 
 ## Purpose
@@ -8,8 +8,8 @@ Last reviewed: 2026-03-18
 This plan defines a cleanup track to make the repository easier to read,
 cleaner to maintain, and more human in tone.
 
-The goal is not cosmetic churn. The goal is to remove residue that makes the
-repo feel provisional, overly generated, or harder to trust than it should be.
+This cleanup should remove residue that makes the repo feel provisional,
+overly generated, or harder to trust than it should be.
 
 ---
 
@@ -38,7 +38,7 @@ Examples of what should usually be removed or rewritten:
 
 - phase-tracking language inside public reference docs
 - "this was added in phase X" wording outside implementation plans
-- meta language like "the goal is not only..."
+- unnecessary meta language
 - over-explained obvious comments
 - duplicated compatibility helpers that are no longer needed
 
@@ -154,7 +154,8 @@ Success criteria:
 
 ---
 
-## Recommended next step
+## Current focus
 
-Start with a repo-wide public-doc cleanup pass, then move to compatibility and
-comment cleanup in the API/backend layer.
+- public-doc cleanup
+- compatibility cleanup in the API/backend layer
+- comment cleanup in touched modules

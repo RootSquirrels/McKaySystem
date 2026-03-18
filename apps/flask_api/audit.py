@@ -1,4 +1,4 @@
-"""Shared audit-log append helpers for Flask API handlers."""
+"""Shared audit log helpers for Flask API handlers."""
 
 from __future__ import annotations
 
@@ -116,7 +116,7 @@ def _audit_insert_params(event: AuditEvent) -> tuple[Any, ...]:
 
 
 def append_audit_event(conn: Any, *, event: AuditEvent) -> None:
-    """Best-effort append-only write to `audit_log`, isolated by savepoint."""
+    """Append an audit event without breaking the caller on audit failure."""
     cursor_factory = getattr(conn, "cursor", None)
     if not callable(cursor_factory):
         return

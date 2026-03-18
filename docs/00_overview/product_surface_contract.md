@@ -20,7 +20,7 @@ multiple incompatible concepts.
 
 ---
 
-## Core rule
+## Core Model
 
 The platform has two distinct layers:
 
@@ -47,7 +47,7 @@ second product object.
 
 ### Findings
 
-Findings answer:
+Findings describe:
 
 - what was detected
 - what evidence supports it
@@ -68,7 +68,7 @@ Findings are the authoritative detection record.
 
 ### Recommendation candidates
 
-Recommendation candidates answer:
+Recommendation candidates describe:
 
 - which open findings currently match recommendation eligibility rules
 
@@ -82,7 +82,7 @@ They may still overlap, because they are often one-per-finding.
 
 ### Recommendations
 
-Recommendations answer:
+Recommendations describe:
 
 - what should be done next
 - how to act safely
@@ -102,7 +102,7 @@ Recommendations are the authoritative action layer.
 
 ### Potential savings
 
-Potential savings answers:
+Potential savings describes:
 
 - what could likely be saved if the primary actionable opportunities were
   implemented
@@ -118,7 +118,7 @@ It should be:
 
 ### Realized savings
 
-Realized savings answers:
+Realized savings describes:
 
 - what savings have actually been verified after remediation activity
 
@@ -127,7 +127,7 @@ potential savings.
 
 ### Coverage
 
-Coverage answers:
+Coverage describes:
 
 - what was assessed
 - what was not assessed
@@ -137,11 +137,11 @@ Coverage is not a savings layer and must not be mixed into savings KPIs.
 
 ---
 
-## What each page should mean
+## Page Roles
 
 ### Findings page
 
-Primary role:
+Role:
 
 - browse and investigate detected issues
 
@@ -158,7 +158,7 @@ Should not imply:
 
 ### Recommendations page
 
-Primary role:
+Role:
 
 - browse curated action objects
 
@@ -177,7 +177,7 @@ Should not behave as:
 
 ### KPI dashboard
 
-Primary role:
+Role:
 
 - explain value and trust through separate KPI families
 
@@ -193,7 +193,7 @@ It must not collapse these into one misleading total.
 
 ### Coverage page
 
-Primary role:
+Role:
 
 - explain assessment completeness and permission gaps
 
@@ -201,7 +201,7 @@ Permission-gap and access-denied signals belong here, not in recommendations.
 
 ---
 
-## Canonical savings semantics
+## Savings Layers
 
 ### Detected savings
 
@@ -254,7 +254,7 @@ Use:
 
 ---
 
-## Current compatibility note
+## Compatibility Note
 
 Some current APIs and internal names still use `recommendations` for what is
 more precisely `recommendation candidates`.

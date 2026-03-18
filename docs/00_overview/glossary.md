@@ -1,9 +1,11 @@
 # Glossary
 
 Status: Canonical  
-Last reviewed: 2026-02-22
+Last reviewed: 2026-03-19
 
-This document provides the **shared vocabulary and conceptual model** for the FinOps SaaS engine.
+This document provides the shared vocabulary and conceptual model for the
+FinOps SaaS platform.
+
 It is intended for:
 - developers
 - FinOps engineers
@@ -14,12 +16,13 @@ It is intended for:
 
 ## Purpose of this document
 
-FinOps systems fail more often due to **conceptual ambiguity** than technical issues.
+FinOps systems fail more often from conceptual ambiguity than from technical
+issues.
 
 This glossary:
-- defines **precise meanings**
+- defines precise meanings
 - removes ambiguity between similar terms
-- acts as a **contract** between engine, data, and UI layers
+- acts as a contract between engine, data, and UI layers
 
 If a term is not defined here, it should not be relied upon as stable.
 

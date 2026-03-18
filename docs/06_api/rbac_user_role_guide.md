@@ -27,8 +27,8 @@ System roles seeded from templates:
 ## Prerequisites
 
 - Base URL:
-  - legacy: `/api`
-  - versioned: `/api/v1` (compat for the same handlers)
+  - compatibility: `/api`
+  - canonical: `/api/v1`
 - For RBAC-protected endpoints, provide:
   - scope (`tenant_id`, `workspace`)
   - authentication (session token cookie or API key bearer)

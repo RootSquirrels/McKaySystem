@@ -1,15 +1,12 @@
-"""Lifecycle Blueprint.
+"""Finding lifecycle endpoints."""
 
-Provides finding lifecycle action endpoints (ignore, resolve, snooze).
-"""
-
-import json
 from datetime import UTC, datetime
 from typing import Any
 
 from flask import Blueprint, request
 
 from apps.backend.db import db_conn, execute_conn, fetch_one_dict_conn
+from apps.flask_api.audit import AuditEvent, append_audit_event
 from apps.flask_api.auth_middleware import require_permission
 from apps.flask_api.utils import (
     _err,
@@ -18,7 +15,6 @@ from apps.flask_api.utils import (
     _require_scope_from_json,
 )
 
-# Create the blueprint
 lifecycle_bp = Blueprint("lifecycle", __name__)
 
 
@@ -55,58 +51,27 @@ def _audit_log_event(
     run_id: str | None = None,
     correlation_id: str | None = None,
 ) -> None:
-    """Best-effort append-only write to audit_log."""
-    try:
-        ip_address = request.headers.get("X-Forwarded-For", request.remote_addr)
-        user_agent = request.headers.get("User-Agent", "")
-    except RuntimeError:
-        ip_address = None
-        user_agent = ""
-
-    params = (
-        tenant_id,
-        workspace,
-        entity_type,
-        entity_id,
-        fingerprint,
-        event_type,
-        event_category,
-        (json.dumps(previous_value, separators=(",", ":")) if previous_value is not None else None),
-        (json.dumps(new_value, separators=(",", ":")) if new_value is not None else None),
-        actor_id,
-        actor_email,
-        actor_name,
-        source,
-        ip_address,
-        user_agent,
-        run_id,
-        correlation_id,
+    """Write lifecycle audit data through the shared audit helper."""
+    append_audit_event(
+        conn,
+        event=AuditEvent(
+            tenant_id=tenant_id,
+            workspace=workspace,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            fingerprint=fingerprint,
+            event_type=event_type,
+            event_category=event_category,
+            previous_value=previous_value,
+            new_value=new_value,
+            actor_id=actor_id,
+            actor_email=actor_email,
+            actor_name=actor_name,
+            source=source,
+            run_id=run_id,
+            correlation_id=correlation_id,
+        ),
     )
-
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SAVEPOINT mckay_audit_log_1")
-            cur.execute(
-                """
-                INSERT INTO audit_log
-                  (tenant_id, workspace, entity_type, entity_id, fingerprint,
-                   event_type, event_category, previous_value, new_value,
-                   actor_id, actor_email, actor_name, source, ip_address, user_agent,
-                   run_id, correlation_id, created_at)
-                VALUES
-                  (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s,%s,%s,%s,%s,%s, now())
-                """,
-                params,
-            )
-            cur.execute("RELEASE SAVEPOINT mckay_audit_log_1")
-            return
-    except Exception:
-        try:
-            with conn.cursor() as cur:
-                cur.execute("ROLLBACK TO SAVEPOINT mckay_audit_log_1")
-        except Exception:
-            pass
-        _log("WARN", "audit_log_db_write_failed", {"tenant_id": tenant_id, "workspace": workspace})
 
 
 def _audit_lifecycle(
@@ -122,7 +87,7 @@ def _audit_lifecycle(
     reason: str | None,
     updated_by: str | None,
 ) -> None:
-    """Best-effort lifecycle audit logging."""
+    """Write lifecycle events to the audit trails used by the platform."""
     evt = {
         "tenant_id": tenant_id,
         "workspace": workspace,
@@ -136,7 +101,7 @@ def _audit_lifecycle(
     }
     _log("INFO", "lifecycle_audit", evt)
 
-    # Keep legacy finding_state_audit writes for compatibility while audit_log is primary.
+    # Keep finding_state_audit writes while audit_log remains the primary trail.
     try:
         with conn.cursor() as cur:
             cur.execute("SAVEPOINT mckay_finding_state_audit_1")

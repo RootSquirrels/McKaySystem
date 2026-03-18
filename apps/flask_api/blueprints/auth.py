@@ -1,10 +1,4 @@
-"""Auth Blueprint.
-
-Provides RBAC auth endpoints:
-- login
-- logout
-- me
-"""
+"""Authentication endpoints for login, logout, and session context."""
 
 from __future__ import annotations
 
@@ -136,7 +130,7 @@ def _rate_limited_response(*, retry_after: int) -> Response:
 
 
 def _audit_auth_event(*, event: AuditEvent) -> None:
-    """Best-effort write of auth-related audit events."""
+    """Write auth audit events without interrupting the main request flow."""
     with db_conn() as conn:
         append_audit_event(
             conn,
