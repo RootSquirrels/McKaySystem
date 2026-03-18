@@ -50,6 +50,10 @@ _PENDING_APPROVAL = "pending_approval"
 _APPROVED = "approved"
 _REJECTED = "rejected"
 _TERMINAL_FINDING_STATES = {"resolved", "ignored"}
+_VERIFY_PENDING = "pending_post_run"
+_VERIFY_RESOLVED = "verified_resolved"
+_VERIFY_PERSISTENT = "verified_persistent"
+_VERIFY_FAILED = "execution_failed"
 
 
 @dataclass(frozen=True)
@@ -678,7 +682,7 @@ def _query_impact_rows(
     filters: dict[str, list[str] | None],
     limit: int,
     offset: int,
-) -> tuple[list[dict[str, Any]], dict[str, Any], int]:
+) -> tuple[list[dict[str, Any]], dict[str, Any], int, dict[str, list[dict[str, Any]]]]:
     """Query remediation impact list, summary and total count."""
     where, params = _impact_where_clause(tenant_id, workspace, filters)
     list_sql = f"""
@@ -706,22 +710,59 @@ def _query_impact_rows(
           SUM(CASE WHEN ri.verification_status = 'verified_persistent' THEN 1 ELSE 0 END)::bigint AS persistent_count,
           SUM(CASE WHEN ri.verification_status = 'pending_post_run' THEN 1 ELSE 0 END)::bigint AS pending_count,
           SUM(CASE WHEN ri.verification_status = 'execution_failed' THEN 1 ELSE 0 END)::bigint AS failed_count,
+          SUM(CASE WHEN ri.verification_status = 'verified_resolved' THEN 1 ELSE 0 END)::bigint AS fully_realized_count,
+          SUM(CASE WHEN ri.verification_status = 'verified_persistent' AND COALESCE(ri.realized_monthly_savings, 0) > 0 THEN 1 ELSE 0 END)::bigint AS partial_realization_count,
+          SUM(CASE WHEN ri.verification_status = 'verified_persistent' AND COALESCE(ri.realized_monthly_savings, 0) <= 0 THEN 1 ELSE 0 END)::bigint AS no_realization_count,
           COALESCE(SUM(ri.baseline_estimated_monthly_savings), 0)::double precision AS baseline_total_monthly_savings,
-          COALESCE(SUM(ri.realized_monthly_savings), 0)::double precision AS realized_total_monthly_savings
+          COALESCE(SUM(ri.realized_monthly_savings), 0)::double precision AS realized_total_monthly_savings,
+          COALESCE(SUM(GREATEST(ri.baseline_estimated_monthly_savings - COALESCE(ri.realized_monthly_savings, 0), 0)), 0)::double precision AS estimated_not_realized_monthly_savings
         FROM remediation_impact ri
         WHERE {' AND '.join(where)}
     """
+    quality_sql_template = """
+        SELECT
+          {group_expr} AS group_key,
+          COUNT(*)::bigint AS actions_count,
+          SUM(CASE WHEN ri.verification_status = 'verified_resolved' THEN 1 ELSE 0 END)::bigint AS fully_realized_count,
+          SUM(CASE WHEN ri.verification_status = 'verified_persistent' AND COALESCE(ri.realized_monthly_savings, 0) > 0 THEN 1 ELSE 0 END)::bigint AS partial_realization_count,
+          SUM(CASE WHEN ri.verification_status = 'verified_persistent' AND COALESCE(ri.realized_monthly_savings, 0) <= 0 THEN 1 ELSE 0 END)::bigint AS no_realization_count,
+          SUM(CASE WHEN ri.verification_status = 'pending_post_run' THEN 1 ELSE 0 END)::bigint AS pending_count,
+          SUM(CASE WHEN ri.verification_status = 'execution_failed' THEN 1 ELSE 0 END)::bigint AS failed_count,
+          COALESCE(SUM(ri.baseline_estimated_monthly_savings), 0)::double precision AS baseline_total_monthly_savings,
+          COALESCE(SUM(ri.realized_monthly_savings), 0)::double precision AS realized_total_monthly_savings,
+          COALESCE(SUM(GREATEST(ri.baseline_estimated_monthly_savings - COALESCE(ri.realized_monthly_savings, 0), 0)), 0)::double precision AS estimated_not_realized_monthly_savings
+        FROM remediation_impact ri
+        LEFT JOIN remediation_actions ra
+          ON ra.tenant_id = ri.tenant_id
+         AND ra.workspace = ri.workspace
+         AND ra.action_id = ri.action_id
+        WHERE {' AND '.join(where)}
+        GROUP BY group_key
+        ORDER BY realized_total_monthly_savings DESC, actions_count DESC, group_key
+        LIMIT 10
+    """
+    quality_queries = {
+        "by_recommendation_type": quality_sql_template.format(
+            group_expr="COALESCE(NULLIF(ra.action_payload->>'recommendation_type', ''), 'other')"
+        ),
+        "by_check_id": quality_sql_template.format(group_expr="ri.check_id"),
+    }
     with db_conn() as conn:
         rows = fetch_all_dict_conn(conn, list_sql, params + [limit, offset])
         count_row = fetch_one_dict_conn(conn, count_sql, params)
         summary = fetch_one_dict_conn(conn, summary_sql, params) or {}
-    return rows, summary, int((count_row or {}).get("n") or 0)
+        quality = {
+            quality_key: fetch_all_dict_conn(conn, quality_sql, params)
+            for quality_key, quality_sql in quality_queries.items()
+        }
+    return rows, summary, int((count_row or {}).get("n") or 0), quality
 
 
 def _impact_summary_payload(summary: dict[str, Any]) -> dict[str, Any]:
     """Normalize remediation impact summary counters and ROI percentages."""
     baseline_total = float(summary.get("baseline_total_monthly_savings") or 0.0)
     realized_total = float(summary.get("realized_total_monthly_savings") or 0.0)
+    not_realized_total = float(summary.get("estimated_not_realized_monthly_savings") or 0.0)
     realization_rate_pct = None
     if baseline_total > 0:
         realization_rate_pct = (realized_total / baseline_total) * 100.0
@@ -731,9 +772,97 @@ def _impact_summary_payload(summary: dict[str, Any]) -> dict[str, Any]:
         "persistent_count": int(summary.get("persistent_count") or 0),
         "pending_count": int(summary.get("pending_count") or 0),
         "failed_count": int(summary.get("failed_count") or 0),
+        "fully_realized_count": int(summary.get("fully_realized_count") or 0),
+        "partial_realization_count": int(summary.get("partial_realization_count") or 0),
+        "no_realization_count": int(summary.get("no_realization_count") or 0),
         "baseline_total_monthly_savings": baseline_total,
         "realized_total_monthly_savings": realized_total,
+        "estimated_not_realized_monthly_savings": not_realized_total,
         "realization_rate_pct": realization_rate_pct,
+    }
+
+
+def _impact_outcome_fields(row: dict[str, Any]) -> dict[str, Any]:
+    """Derive stable realized-savings outcome fields from one impact row."""
+
+    verification_status = str(row.get("verification_status") or "").strip().lower()
+    baseline = float(row.get("baseline_estimated_monthly_savings") or 0.0)
+    realized = float(row.get("realized_monthly_savings") or 0.0)
+    current = row.get("current_estimated_monthly_savings")
+    current_estimated = float(current) if current is not None else None
+    estimated_not_realized = max(0.0, baseline - realized)
+    savings_delta = round(realized - baseline, 2)
+    realization_rate = row.get("realization_rate_pct")
+    realization_rate_pct = float(realization_rate) if realization_rate is not None else None
+
+    if verification_status == _VERIFY_RESOLVED:
+        outcome_status = "realized_full"
+        outcome_label = "Fully realized"
+        realization_band = "high"
+    elif verification_status == _VERIFY_PERSISTENT and realized > 0.0:
+        outcome_status = "realized_partial"
+        outcome_label = "Partially realized"
+        realization_band = "medium"
+    elif verification_status == _VERIFY_PERSISTENT:
+        outcome_status = "not_realized"
+        outcome_label = "Not realized"
+        realization_band = "low"
+    elif verification_status == _VERIFY_FAILED:
+        outcome_status = "execution_failed"
+        outcome_label = "Execution failed"
+        realization_band = "low"
+    else:
+        outcome_status = "pending_verification"
+        outcome_label = "Pending verification"
+        realization_band = "pending"
+
+    return {
+        "outcome_status": outcome_status,
+        "outcome_label": outcome_label,
+        "realization_band": realization_band,
+        "estimated_not_realized_monthly_savings": round(estimated_not_realized, 2),
+        "savings_delta_monthly": savings_delta,
+        "current_estimated_monthly_savings": current_estimated,
+        "realization_rate_pct": realization_rate_pct,
+    }
+
+
+def _serialize_impact_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Serialize one remediation impact row with derived realized-savings semantics."""
+
+    payload = dict(row)
+    payload.update(_impact_outcome_fields(row))
+    return payload
+
+
+def _serialize_impact_quality_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Serialize one impact quality rollup row with deterministic rate fields."""
+
+    baseline_total = float(row.get("baseline_total_monthly_savings") or 0.0)
+    realized_total = float(row.get("realized_total_monthly_savings") or 0.0)
+    actions_count = int(row.get("actions_count") or 0)
+    fully_realized_count = int(row.get("fully_realized_count") or 0)
+    partial_realization_count = int(row.get("partial_realization_count") or 0)
+    no_realization_count = int(row.get("no_realization_count") or 0)
+    pending_count = int(row.get("pending_count") or 0)
+    failed_count = int(row.get("failed_count") or 0)
+    realization_rate_pct = (realized_total / baseline_total) * 100.0 if baseline_total > 0 else None
+    effective_success_rate_pct = (
+        ((fully_realized_count + partial_realization_count) / actions_count) * 100.0 if actions_count > 0 else None
+    )
+    return {
+        "group_key": str(row.get("group_key") or ""),
+        "actions_count": actions_count,
+        "fully_realized_count": fully_realized_count,
+        "partial_realization_count": partial_realization_count,
+        "no_realization_count": no_realization_count,
+        "pending_count": pending_count,
+        "failed_count": failed_count,
+        "baseline_total_monthly_savings": baseline_total,
+        "realized_total_monthly_savings": realized_total,
+        "estimated_not_realized_monthly_savings": float(row.get("estimated_not_realized_monthly_savings") or 0.0),
+        "realization_rate_pct": realization_rate_pct,
+        "effective_success_rate_pct": effective_success_rate_pct,
     }
 
 
@@ -795,7 +924,7 @@ def api_remediations_impact() -> Any:
                 )
                 conn.commit()
 
-        rows, summary, total = _query_impact_rows(
+        rows, summary, total, quality = _query_impact_rows(
             tenant_id=tenant_id,
             workspace=workspace,
             filters=filters,
@@ -812,7 +941,11 @@ def api_remediations_impact() -> Any:
                 "total": total,
                 "refreshed": refreshed,
                 "summary": _impact_summary_payload(summary),
-                "items": rows,
+                "quality": {
+                    quality_key: [_serialize_impact_quality_row(row) for row in quality_rows]
+                    for quality_key, quality_rows in quality.items()
+                },
+                "items": [_serialize_impact_row(row) for row in rows],
             }
         )
     except ValueError as exc:

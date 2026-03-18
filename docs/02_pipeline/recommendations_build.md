@@ -22,6 +22,10 @@ In this system:
    metadata so clients can avoid double-counting overlapping savings.
 6. `/api/recommendations?view=packages` can return one package-native object per
    grouped cluster, with one primary recommendation plus member recommendations.
+7. Realized savings are tracked separately through remediation execution and
+   verification in `/api/remediations/impact`, which now exposes normalized
+   outcome semantics such as fully realized, partially realized, not realized,
+   and pending verification.
 
 There is currently no separate worker "recommendations build step" table.
 

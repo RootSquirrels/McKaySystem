@@ -139,16 +139,45 @@ def test_remediations_impact_query_is_scoped(monkeypatch) -> None:  # type: igno
     assert "ri.verification_status = any(%s)" in sql_blob
     assert "ri.action_status = any(%s)" in sql_blob
     assert "ri.action_type = any(%s)" in sql_blob
+    assert "left join remediation_actions ra" in sql_blob
 
 
 def test_remediations_impact_summary_returns_realization_rate(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     """Impact endpoint should return deterministic summary totals and realization rate."""
     _disable_runtime_guards(monkeypatch)
 
-    monkeypatch.setattr(
-        flask_app,
-        "fetch_all_dict_conn",
-        lambda *_args, **_kwargs: [
+    def _fake_fetch_all(_conn: object, sql: str, _params: Sequence[Any] | None = None) -> list[dict[str, Any]]:
+        if "group by group_key" in sql.lower():
+            if "recommendation_type" in sql:
+                return [
+                    {
+                        "group_key": "rightsizing.ec2.instance",
+                        "actions_count": 1,
+                        "fully_realized_count": 1,
+                        "partial_realization_count": 0,
+                        "no_realization_count": 0,
+                        "pending_count": 0,
+                        "failed_count": 0,
+                        "baseline_total_monthly_savings": 100.0,
+                        "realized_total_monthly_savings": 80.0,
+                        "estimated_not_realized_monthly_savings": 20.0,
+                    }
+                ]
+            return [
+                {
+                    "group_key": "aws.ec2.instances.underutilized",
+                    "actions_count": 1,
+                    "fully_realized_count": 1,
+                    "partial_realization_count": 0,
+                    "no_realization_count": 0,
+                    "pending_count": 0,
+                    "failed_count": 0,
+                    "baseline_total_monthly_savings": 100.0,
+                    "realized_total_monthly_savings": 80.0,
+                    "estimated_not_realized_monthly_savings": 20.0,
+                }
+            ]
+        return [
             {
                 "tenant_id": "acme",
                 "workspace": "prod",
@@ -169,8 +198,9 @@ def test_remediations_impact_summary_returns_realization_rate(monkeypatch) -> No
                 "computed_at": "2026-02-15T10:00:00Z",
                 "version": 1,
             }
-        ],
-    )
+        ]
+
+    monkeypatch.setattr(flask_app, "fetch_all_dict_conn", _fake_fetch_all)
 
     call_no = {"n": 0}
 
@@ -184,8 +214,12 @@ def test_remediations_impact_summary_returns_realization_rate(monkeypatch) -> No
             "persistent_count": 0,
             "pending_count": 0,
             "failed_count": 0,
+            "fully_realized_count": 1,
+            "partial_realization_count": 0,
+            "no_realization_count": 0,
             "baseline_total_monthly_savings": 100.0,
             "realized_total_monthly_savings": 80.0,
+            "estimated_not_realized_monthly_savings": 20.0,
         }
 
     monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
@@ -198,9 +232,164 @@ def test_remediations_impact_summary_returns_realization_rate(monkeypatch) -> No
     assert payload.get("ok") is True
     summary = payload.get("summary") or {}
     assert summary.get("actions_count") == 1
+    assert summary.get("fully_realized_count") == 1
+    assert summary.get("partial_realization_count") == 0
+    assert summary.get("no_realization_count") == 0
     assert summary.get("baseline_total_monthly_savings") == 100.0
     assert summary.get("realized_total_monthly_savings") == 80.0
+    assert summary.get("estimated_not_realized_monthly_savings") == 20.0
     assert summary.get("realization_rate_pct") == 80.0
+    quality = payload.get("quality") or {}
+    by_type = quality.get("by_recommendation_type") or []
+    assert by_type[0].get("group_key") == "rightsizing.ec2.instance"
+    assert by_type[0].get("effective_success_rate_pct") == 100.0
+    by_check = quality.get("by_check_id") or []
+    assert by_check[0].get("group_key") == "aws.ec2.instances.underutilized"
+    item = (payload.get("items") or [])[0]
+    assert item.get("outcome_status") == "realized_full"
+    assert item.get("outcome_label") == "Fully realized"
+    assert item.get("realization_band") == "high"
+    assert item.get("estimated_not_realized_monthly_savings") == 20.0
+    assert item.get("savings_delta_monthly") == -20.0
+
+
+def test_remediations_impact_marks_persistent_zero_realization(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Persistent findings with zero realized savings should expose a not-realized outcome."""
+    _disable_runtime_guards(monkeypatch)
+
+    monkeypatch.setattr(
+        flask_app,
+        "fetch_all_dict_conn",
+        lambda *_args, **_kwargs: [
+            {
+                "tenant_id": "acme",
+                "workspace": "prod",
+                "action_id": "act-2",
+                "fingerprint": "fp-2",
+                "check_id": "aws.ec2.instances.underutilized",
+                "action_type": "rightsize",
+                "action_status": "completed",
+                "verification_status": "verified_persistent",
+                "baseline_estimated_monthly_savings": 70.0,
+                "current_estimated_monthly_savings": 70.0,
+                "realized_monthly_savings": 0.0,
+                "realization_rate_pct": 0.0,
+                "latest_run_id": "run-2",
+                "latest_run_ts": "2026-02-15T10:00:00Z",
+                "present_in_latest": True,
+                "finalized_at": "2026-02-15T09:00:00Z",
+                "computed_at": "2026-02-15T10:00:00Z",
+                "version": 1,
+            }
+        ],
+    )
+
+    call_no = {"n": 0}
+
+    def _fake_fetch_one(*_args, **_kwargs) -> dict[str, Any]:
+        call_no["n"] += 1
+        if call_no["n"] == 1:
+            return {"n": 1}
+        return {
+            "actions_count": 1,
+            "resolved_count": 0,
+            "persistent_count": 1,
+            "pending_count": 0,
+            "failed_count": 0,
+            "fully_realized_count": 0,
+            "partial_realization_count": 0,
+            "no_realization_count": 1,
+            "baseline_total_monthly_savings": 70.0,
+            "realized_total_monthly_savings": 0.0,
+            "estimated_not_realized_monthly_savings": 70.0,
+        }
+
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+
+    client = flask_app.app.test_client()
+    resp = client.get("/api/remediations/impact?tenant_id=acme&workspace=prod")
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 200
+    item = (payload.get("items") or [])[0]
+    assert item.get("outcome_status") == "not_realized"
+    assert item.get("outcome_label") == "Not realized"
+    assert item.get("realization_band") == "low"
+    assert item.get("estimated_not_realized_monthly_savings") == 70.0
+
+
+def test_remediations_impact_quality_rollups_include_recommendation_type(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Impact endpoint should expose grouped quality rollups by recommendation type and check id."""
+    _disable_runtime_guards(monkeypatch)
+
+    def _fake_fetch_all(_conn: object, sql: str, _params: Sequence[Any] | None = None) -> list[dict[str, Any]]:
+        if "group by group_key" in sql.lower():
+            if "recommendation_type" in sql:
+                return [
+                    {
+                        "group_key": "cleanup.nat.gateway",
+                        "actions_count": 2,
+                        "fully_realized_count": 1,
+                        "partial_realization_count": 1,
+                        "no_realization_count": 0,
+                        "pending_count": 0,
+                        "failed_count": 0,
+                        "baseline_total_monthly_savings": 250.0,
+                        "realized_total_monthly_savings": 200.0,
+                        "estimated_not_realized_monthly_savings": 50.0,
+                    }
+                ]
+            return [
+                {
+                    "group_key": "aws.ec2.nat.gateways.idle",
+                    "actions_count": 2,
+                    "fully_realized_count": 1,
+                    "partial_realization_count": 1,
+                    "no_realization_count": 0,
+                    "pending_count": 0,
+                    "failed_count": 0,
+                    "baseline_total_monthly_savings": 250.0,
+                    "realized_total_monthly_savings": 200.0,
+                    "estimated_not_realized_monthly_savings": 50.0,
+                }
+            ]
+        return []
+
+    call_no = {"n": 0}
+
+    def _fake_fetch_one(*_args, **_kwargs) -> dict[str, Any]:
+        call_no["n"] += 1
+        if call_no["n"] == 1:
+            return {"n": 0}
+        return {
+            "actions_count": 0,
+            "resolved_count": 0,
+            "persistent_count": 0,
+            "pending_count": 0,
+            "failed_count": 0,
+            "fully_realized_count": 0,
+            "partial_realization_count": 0,
+            "no_realization_count": 0,
+            "baseline_total_monthly_savings": 0.0,
+            "realized_total_monthly_savings": 0.0,
+            "estimated_not_realized_monthly_savings": 0.0,
+        }
+
+    monkeypatch.setattr(flask_app, "fetch_all_dict_conn", _fake_fetch_all)
+    monkeypatch.setattr(flask_app, "fetch_one_dict_conn", _fake_fetch_one)
+
+    client = flask_app.app.test_client()
+    resp = client.get("/api/remediations/impact?tenant_id=acme&workspace=prod")
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 200
+    quality = payload.get("quality") or {}
+    by_type = quality.get("by_recommendation_type") or []
+    assert by_type[0].get("group_key") == "cleanup.nat.gateway"
+    assert by_type[0].get("realization_rate_pct") == 80.0
+    assert by_type[0].get("effective_success_rate_pct") == 100.0
+    by_check = quality.get("by_check_id") or []
+    assert by_check[0].get("group_key") == "aws.ec2.nat.gateways.idle"
 
 
 def test_remediation_approve_transitions_pending_to_approved(monkeypatch) -> None:  # type: ignore[no-untyped-def]

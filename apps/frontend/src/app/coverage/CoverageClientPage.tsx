@@ -297,6 +297,17 @@ export function CoverageClientPage() {
                 Recommendations
               </button>
             ) : null}
+            {canReadRecommendations ? (
+              <button
+                type="button"
+                className="finops-toolbar-btn rounded-lg px-3 py-2 text-sm font-medium transition"
+                onClick={() => {
+                  router.push("/remediations");
+                }}
+              >
+                Realized Savings
+              </button>
+            ) : null}
             {canReadUsers ? (
               <button
                 type="button"
