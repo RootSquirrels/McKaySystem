@@ -186,6 +186,47 @@ def test_gp2_to_gp3_emits_savings(monkeypatch: pytest.MonkeyPatch) -> None:
     assert f.dimensions["instance_id"] == "i-1"
     assert f.dimensions["attachment_state"] == "attached"
     assert f.dimensions["availability_zone"] == "eu-west-3a"
+    assert f.dimensions["gp2_baseline_iops"] == "600"
+    assert f.dimensions["gp3_included_iops"] == "3000"
+
+
+def test_large_gp2_volume_emits_review_not_direct_savings(monkeypatch: pytest.MonkeyPatch) -> None:
+    ec2 = FakeEC2(
+        region="eu-west-3",
+        pages_by_op={
+            "describe_volumes": [
+                {
+                    "Volumes": [
+                        {
+                            "VolumeId": "vol-gp2-large",
+                            "State": "in-use",
+                            "Attachments": [{"InstanceId": "i-2", "State": "attached"}],
+                            "AvailabilityZone": "eu-west-3b",
+                            "CreateTime": _dt(2),
+                            "VolumeType": "gp2",
+                            "Size": 2000,
+                            "Encrypted": True,
+                            "Tags": [],
+                        }
+                    ]
+                }
+            ],
+            "describe_images": [{"Images": []}],
+            "describe_snapshots": [{"Snapshots": []}],
+        },
+    )
+
+    findings = _run(monkeypatch=monkeypatch, ec2=ec2)
+    assert _find(findings, "aws.ec2.ebs.gp2.to.gp3") == []
+
+    hits = _find(findings, "aws.ec2.ebs.gp2.to.gp3.review")
+    assert len(hits) == 1
+    f = hits[0]
+    assert f.scope.resource_id == "vol-gp2-large"
+    assert getattr(f, "estimated_monthly_savings", None) in (None, 0, 0.0)
+    assert f.dimensions["gp2_baseline_iops"] == "6000"
+    assert f.dimensions["gp3_included_iops"] == "3000"
+    assert "no savings estimate" in (f.estimate_notes or "").lower()
 
 
 def test_old_snapshot_emits_when_not_referenced_by_ami(monkeypatch: pytest.MonkeyPatch) -> None:

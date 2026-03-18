@@ -5,13 +5,14 @@ EBS storage optimization checker (DI-friendly, FindingDraft-based).
 
 Signals (cost):
 1) Unattached EBS volumes older than N days
-2) gp2 -> gp3 migration candidates (storage-only savings estimate; fallback pricing)
-3) Old EBS snapshots older than N days NOT referenced by any AMI (tag suppress supported)
+2) gp2 -> gp3 migration candidates with safe storage-only savings claims
+3) Large gp2 volumes that need gp3 performance review before claiming savings
+4) Old EBS snapshots older than N days NOT referenced by any AMI (tag suppress supported)
     + guardrails to skip AWS Backup-managed snapshots (tag/description patterns)
 
 Signals (governance):
-4) Unencrypted EBS volumes
-5) Unencrypted EBS snapshots
+5) Unencrypted EBS volumes
+6) Unencrypted EBS snapshots
     + guardrails to skip AWS Backup-managed snapshots
 
 Caveat:
@@ -84,9 +85,17 @@ _FALLBACK_USD_PER_GB_MONTH: dict[str, float] = {
     "standard": 0.05,
 }
 
+_GP3_INCLUDED_BASELINE_IOPS = 3000
+
 
 def _usd_per_gb_month(volume_type: str) -> float:
     return float(_FALLBACK_USD_PER_GB_MONTH.get(str(volume_type or "gp2"), 0.10))
+
+
+def _gp2_baseline_iops(size_gb: int) -> int:
+    """Return the baseline gp2 IOPS implied by volume size."""
+    bounded_size_gb = max(0, int(size_gb))
+    return max(100, min(16000, bounded_size_gb * 3))
 
 
 def _resolve_ebs_volume_storage_price_usd_per_gb_month(
@@ -352,6 +361,7 @@ class EBSStorageChecker(Checker):
 
         emitted_unattached = 0
         emitted_gp2_to_gp3 = 0
+        emitted_gp2_to_gp3_review = 0
         emitted_vol_unencrypted = 0
 
         if vol_paginator is not None:
@@ -447,10 +457,15 @@ class EBSStorageChecker(Checker):
                                         emitted_unattached += 1
 
                     # -------------------------
-                    # COST: 2) gp2 -> gp3 migration candidates (storage-only)
+                    # COST: 2) gp2 -> gp3 migration candidates (safe storage-only)
                     # -------------------------
                     if emitted_gp2_to_gp3 < cfg.max_findings_per_type:
-                        if vol_type == "gp2" and float(gp2_price) > float(gp3_price):
+                        gp2_baseline_iops = _gp2_baseline_iops(size_gb)
+                        if (
+                            vol_type == "gp2"
+                            and gp2_baseline_iops <= _GP3_INCLUDED_BASELINE_IOPS
+                            and float(gp2_price) > float(gp3_price)
+                        ):
                             monthly_savings = float(size_gb) * (float(gp2_price) - float(gp3_price))
                             if monthly_savings > 0:
                                 if min(gp2_conf, gp3_conf) <= 30:
@@ -477,7 +492,11 @@ class EBSStorageChecker(Checker):
                                         f"Volume {vol_id} is gp2. Migrating to gp3 can reduce storage $/GB-month. "
                                         f"Estimated savings ≈ ${monthly_savings:.2f}/month (storage-only) {pricing_hint}."
                                     ),
-                                    recommendation="Modify the EBS volume to gp3 and validate required IOPS/throughput settings.",
+                                    recommendation=(
+                                        "Modify the EBS volume to gp3 and validate required IOPS/throughput settings. "
+                                        "This savings estimate is only emitted when the current gp2 baseline fits within "
+                                        "gp3 included baseline performance."
+                                    ),
                                     scope=_scope(
                                         ctx,
                                         account_id=self._account_id,
@@ -493,6 +512,8 @@ class EBSStorageChecker(Checker):
                                     dimensions={
                                         **_volume_relationship_dimensions(vol),
                                         "size_gb": str(size_gb),
+                                        "gp2_baseline_iops": str(gp2_baseline_iops),
+                                        "gp3_included_iops": str(_GP3_INCLUDED_BASELINE_IOPS),
                                         "source_volume_type": "gp2",
                                         "target_volume_type": "gp3",
                                     },
@@ -509,7 +530,65 @@ class EBSStorageChecker(Checker):
                                 emitted_gp2_to_gp3 += 1
 
                     # -------------------------
-                    # GOVERNANCE: 4) Unencrypted volumes
+                    # COST: 3) Large gp2 volumes need review before claiming gp3 savings
+                    # -------------------------
+                    if emitted_gp2_to_gp3_review < cfg.max_findings_per_type:
+                        gp2_baseline_iops = _gp2_baseline_iops(size_gb)
+                        if vol_type == "gp2" and gp2_baseline_iops > _GP3_INCLUDED_BASELINE_IOPS:
+                            check_id = "aws.ec2.ebs.gp2.to.gp3.review"
+                            yield FindingDraft(
+                                check_id=check_id,
+                                check_name="gp2 to gp3 migration requires performance review",
+                                category="cost",
+                                sub_category="storage",
+                                status="open",
+                                severity=Severity(level="low", score=480),
+                                title=f"gp2 -> gp3 review needed: {vol_id} ({size_gb} GB)",
+                                message=(
+                                    f"Volume {vol_id} is gp2 with an estimated baseline of {gp2_baseline_iops} IOPS. "
+                                    "gp3 includes 3000 IOPS by default, so migration may still save money but requires "
+                                    "review of paid gp3 IOPS/throughput before claiming deterministic savings."
+                                ),
+                                recommendation=(
+                                    "Review observed IOPS and throughput requirements. Migrate to gp3 only after validating "
+                                    "whether paid gp3 performance add-ons would be needed."
+                                ),
+                                scope=_scope(
+                                    ctx,
+                                    account_id=self._account_id,
+                                    region=region,
+                                    service="AmazonEC2",
+                                    resource_type="ebs_volume",
+                                    resource_id=vol_id,
+                                ),
+                                estimate_confidence=70,
+                                estimate_notes=(
+                                    "No savings estimate emitted because large gp2 volumes can require paid gp3 IOPS "
+                                    "or throughput add-ons to preserve baseline performance."
+                                ),
+                                tags=tags,
+                                dimensions={
+                                    **_volume_relationship_dimensions(vol),
+                                    "size_gb": str(size_gb),
+                                    "gp2_baseline_iops": str(gp2_baseline_iops),
+                                    "gp3_included_iops": str(_GP3_INCLUDED_BASELINE_IOPS),
+                                    "source_volume_type": "gp2",
+                                    "target_volume_type": "gp3",
+                                },
+                                issue_key={
+                                    "check_id": check_id,
+                                    "account_id": self._account_id,
+                                    "region": region,
+                                    "resource_type": "ebs_volume",
+                                    "resource_id": vol_id,
+                                    "source": "gp2",
+                                    "target": "gp3",
+                                },
+                            )
+                            emitted_gp2_to_gp3_review += 1
+
+                    # -------------------------
+                    # GOVERNANCE: 5) Unencrypted volumes
                     # -------------------------
                     if emitted_vol_unencrypted < cfg.max_findings_per_type:
                         if vol.get("Encrypted") is not True:
@@ -554,10 +633,11 @@ class EBSStorageChecker(Checker):
                             )
                             emitted_vol_unencrypted += 1
 
-                # If all three volume-related rule counters hit their cap, stop paging volumes.
+                # If all volume-related rule counters hit their cap, stop paging volumes.
                 if (
                     emitted_unattached >= cfg.max_findings_per_type
                     and emitted_gp2_to_gp3 >= cfg.max_findings_per_type
+                    and emitted_gp2_to_gp3_review >= cfg.max_findings_per_type
                     and emitted_vol_unencrypted >= cfg.max_findings_per_type
                 ):
                     break
