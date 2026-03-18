@@ -46,8 +46,18 @@ def test_bootstrap_scope_admin_assigns_user_role(monkeypatch: Any) -> None:
     monkeypatch.setattr(scope_bootstrap, "hash_password", lambda raw: f"hash:{raw}")
     monkeypatch.setattr(
         scope_bootstrap.db_rbac,
+        "upsert_tenant_workspace",
+        lambda *_args, **kwargs: calls.__setitem__("workspace_entry", kwargs["workspace_entry"]),
+    )
+    monkeypatch.setattr(
+        scope_bootstrap.db_rbac,
         "bootstrap_rbac_scope",
         lambda _conn, **kwargs: calls.__setitem__("boot", kwargs),
+    )
+    monkeypatch.setattr(
+        scope_bootstrap.db_rbac,
+        "apply_tenant_role_bindings_to_workspace",
+        lambda *_args, **kwargs: calls.__setitem__("applied_bindings", kwargs),
     )
     monkeypatch.setattr(
         scope_bootstrap.db_rbac,
@@ -92,7 +102,10 @@ def test_bootstrap_scope_admin_assigns_user_role(monkeypatch: Any) -> None:
     assert result["email"] == "admin@acme.io"
     assert result["api_key"] is None
     assert result["key_id"] is None
+    assert calls["workspace_entry"].tenant_id == "acme"
+    assert calls["workspace_entry"].workspace == "prod"
     assert calls["boot"] == {"tenant_id": "acme", "workspace": "prod"}
+    assert calls["applied_bindings"] == {"tenant_id": "acme", "workspace": "prod"}
     assert calls["user"].password_hash == "hash:secret-123"
     assert calls["assignment"].granted_by == "bootstrap-test"
     assert conn.commit_count == 1
@@ -114,8 +127,18 @@ def test_bootstrap_scope_admin_can_issue_api_key(monkeypatch: Any) -> None:
     monkeypatch.setattr(scope_bootstrap, "derive_key_id", lambda _hash: "key_abc")
     monkeypatch.setattr(
         scope_bootstrap.db_rbac,
+        "upsert_tenant_workspace",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        scope_bootstrap.db_rbac,
         "bootstrap_rbac_scope",
         lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        scope_bootstrap.db_rbac,
+        "apply_tenant_role_bindings_to_workspace",
+        lambda *_args, **_kwargs: [],
     )
     monkeypatch.setattr(
         scope_bootstrap.db_rbac,
@@ -167,8 +190,18 @@ def test_bootstrap_scope_admin_fails_when_role_missing(monkeypatch: Any) -> None
     monkeypatch.setattr(scope_bootstrap, "db_conn", lambda: _DummyCtx(conn))
     monkeypatch.setattr(
         scope_bootstrap.db_rbac,
+        "upsert_tenant_workspace",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        scope_bootstrap.db_rbac,
         "bootstrap_rbac_scope",
         lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        scope_bootstrap.db_rbac,
+        "apply_tenant_role_bindings_to_workspace",
+        lambda *_args, **_kwargs: [],
     )
     monkeypatch.setattr(scope_bootstrap.db_rbac, "get_role_by_id", lambda *_args, **_kwargs: None)
 

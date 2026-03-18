@@ -141,7 +141,23 @@ def _apply_bootstrap(
     Raises:
         ValueError: Role is unavailable in target scope.
     """
+    db_rbac.upsert_tenant_workspace(
+        conn,
+        workspace_entry=db_rbac.TenantWorkspaceUpsert(
+            tenant_id=core.tenant_id,
+            workspace=core.workspace,
+            display_name=core.workspace,
+            status="active",
+            created_by=options.granted_by,
+            updated_by=options.granted_by,
+        ),
+    )
     db_rbac.bootstrap_rbac_scope(
+        conn,
+        tenant_id=core.tenant_id,
+        workspace=core.workspace,
+    )
+    db_rbac.apply_tenant_role_bindings_to_workspace(
         conn,
         tenant_id=core.tenant_id,
         workspace=core.workspace,

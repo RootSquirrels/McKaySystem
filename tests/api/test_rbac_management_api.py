@@ -11,6 +11,7 @@ from apps.flask_api.blueprints import api_keys as api_keys_blueprint
 from apps.flask_api.blueprints import findings as findings_blueprint
 from apps.flask_api.blueprints import lifecycle as lifecycle_blueprint
 from apps.flask_api.blueprints import sla_policies as sla_policies_blueprint
+from apps.flask_api.blueprints import tenant_admin as tenant_admin_blueprint
 from apps.flask_api.blueprints import teams as teams_blueprint
 from apps.flask_api.blueprints import users as users_blueprint
 from services.rbac_service import AuthContext
@@ -46,6 +47,7 @@ def _disable_runtime_guards(monkeypatch: Any) -> None:
     monkeypatch.setattr(users_blueprint, "db_conn", _dummy_db_conn)
     monkeypatch.setattr(api_keys_blueprint, "db_conn", _dummy_db_conn)
     monkeypatch.setattr(findings_blueprint, "db_conn", _dummy_db_conn)
+    monkeypatch.setattr(tenant_admin_blueprint, "db_conn", _dummy_db_conn)
     monkeypatch.setattr(teams_blueprint, "db_conn", _dummy_db_conn)
     monkeypatch.setattr(sla_policies_blueprint, "db_conn", _dummy_db_conn)
     monkeypatch.setattr(lifecycle_blueprint, "db_conn", _dummy_db_conn)
@@ -574,6 +576,185 @@ def test_users_tenant_role_set_respects_explicit_workspaces(monkeypatch: Any) ->
     assert summary.get("targeted") == 2
     assert summary.get("assigned") == 2
     assert summary.get("skipped") == 0
+
+
+def test_users_tenant_role_set_can_persist_future_workspace_binding(monkeypatch: Any) -> None:
+    """Tenant-wide role assignment can also persist a future-workspace policy."""
+    _disable_runtime_guards(monkeypatch)
+    monkeypatch.setattr(
+        auth_middleware,
+        "authenticate_request",
+        lambda: _context_with_permissions("users:manage_roles", "admin:full"),
+    )
+    monkeypatch.setattr(
+        users_blueprint.db_rbac,
+        "list_tenant_workspaces",
+        lambda *_args, **_kwargs: ["prod"],
+    )
+    monkeypatch.setattr(
+        users_blueprint.db_rbac,
+        "get_user_by_id",
+        lambda *_args, **kwargs: {
+            "user_id": "u-1",
+            "tenant_id": "acme",
+            "workspace": kwargs.get("workspace"),
+        },
+    )
+    monkeypatch.setattr(
+        users_blueprint.db_rbac,
+        "get_role_by_id",
+        lambda *_args, **kwargs: {
+            "tenant_id": "acme",
+            "workspace": kwargs.get("workspace"),
+            "role_id": "editor",
+            "name": "Editor",
+            "description": "Edit findings",
+            "is_system": True,
+        },
+    )
+    monkeypatch.setattr(
+        users_blueprint.db_rbac,
+        "upsert_user_workspace_role",
+        lambda *_args, **kwargs: {
+            "tenant_id": "acme",
+            "workspace": getattr(kwargs.get("assignment"), "workspace", None),
+            "user_id": "u-1",
+            "role_id": "editor",
+            "granted_by": "admin@acme.io",
+            "granted_at": "2026-02-22T00:00:00Z",
+        },
+    )
+    monkeypatch.setattr(
+        users_blueprint.db_rbac,
+        "get_role_permissions",
+        lambda *_args, **_kwargs: ["findings:read", "findings:update"],
+    )
+    monkeypatch.setattr(
+        users_blueprint.db_rbac,
+        "upsert_tenant_role_binding",
+        lambda *_args, **kwargs: {
+            "tenant_id": "acme",
+            "workspace": "__tenant__",
+            "user_id": getattr(kwargs.get("binding"), "user_id", None),
+            "role_id": getattr(kwargs.get("binding"), "role_id", None),
+            "source_workspace": getattr(kwargs.get("binding"), "source_workspace", None),
+            "applies_to_future_workspaces": True,
+            "granted_by": "admin@acme.io",
+            "granted_at": "2026-02-22T00:00:00Z",
+        },
+    )
+    monkeypatch.setattr(users_blueprint, "append_audit_event", lambda *_args, **_kwargs: None)
+
+    client = flask_app.app.test_client()
+    resp = client.put(
+        "/api/users/u-1/role/tenant",
+        json={
+            "tenant_id": "acme",
+            "workspace": "prod",
+            "role_id": "editor",
+            "granted_by": "admin@acme.io",
+            "apply_to_future_workspaces": True,
+            "source_workspace": "prod",
+        },
+    )
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 200
+    assert payload.get("ok") is True
+    binding = payload.get("future_workspace_binding") or {}
+    assert binding.get("role_id") == "editor"
+    assert binding.get("source_workspace") == "prod"
+    assert binding.get("applies_to_future_workspaces") is True
+
+
+def test_tenant_admin_workspaces_list_success(monkeypatch: Any) -> None:
+    """Tenant admin workspace listing should return registered workspaces."""
+    _disable_runtime_guards(monkeypatch)
+    monkeypatch.setattr(
+        auth_middleware,
+        "authenticate_request",
+        lambda: _context_with_permissions("admin:full"),
+    )
+    monkeypatch.setattr(
+        tenant_admin_blueprint.db_rbac,
+        "list_registered_tenant_workspaces",
+        lambda *_args, **_kwargs: [
+            {
+                "tenant_id": "acme",
+                "workspace": "prod",
+                "display_name": "Production",
+                "provider": "aws",
+                "scope_kind": "account",
+                "scope_native_id": "123456789012",
+                "environment": "prod",
+                "status": "active",
+                "created_by": "bootstrap-cli",
+                "updated_by": "bootstrap-cli",
+                "registered_at": None,
+                "activated_at": None,
+                "archived_at": None,
+                "updated_at": None,
+            }
+        ],
+    )
+
+    client = flask_app.app.test_client()
+    resp = client.get("/api/tenant-admin/workspaces?tenant_id=acme&workspace=prod")
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 200
+    assert payload.get("ok") is True
+    assert payload.get("total") == 1
+    items = payload.get("items") or []
+    assert items[0].get("workspace") == "prod"
+    assert items[0].get("provider") == "aws"
+
+
+def test_tenant_admin_role_binding_delete_success(monkeypatch: Any) -> None:
+    """Tenant admin can delete a future-workspace role binding."""
+    _disable_runtime_guards(monkeypatch)
+    monkeypatch.setattr(
+        auth_middleware,
+        "authenticate_request",
+        lambda: _context_with_permissions("admin:full"),
+    )
+    monkeypatch.setattr(
+        tenant_admin_blueprint.db_rbac,
+        "get_tenant_role_binding",
+        lambda *_args, **_kwargs: {
+            "tenant_id": "acme",
+            "workspace": "__tenant__",
+            "user_id": "u-1",
+            "role_id": "editor",
+            "source_workspace": "prod",
+            "applies_to_future_workspaces": True,
+            "granted_by": "admin@acme.io",
+            "granted_at": "2026-02-22T00:00:00Z",
+            "updated_at": "2026-02-22T00:00:00Z",
+        },
+    )
+    monkeypatch.setattr(
+        tenant_admin_blueprint.db_rbac,
+        "delete_tenant_role_binding",
+        lambda *_args, **_kwargs: True,
+    )
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(
+        tenant_admin_blueprint,
+        "append_audit_event",
+        lambda *_args, **kwargs: captured.update({"event_type": kwargs["event"].event_type}),
+    )
+
+    client = flask_app.app.test_client()
+    resp = client.delete(
+        "/api/tenant-admin/users/u-1/role-binding?tenant_id=acme&workspace=prod"
+    )
+    payload = resp.get_json() or {}
+
+    assert resp.status_code == 200
+    assert payload.get("ok") is True
+    assert payload.get("deleted") is True
+    assert captured.get("event_type") == "tenant_admin.role_binding.deleted"
 
 
 def test_api_keys_create_returns_raw_key(monkeypatch: Any) -> None:

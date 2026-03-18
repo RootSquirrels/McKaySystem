@@ -239,3 +239,144 @@ def test_authenticate_api_key_returns_context(monkeypatch: Any) -> None:
     assert touched["key_id"] == "key_123"
     assert bootstrap == {"tenant_id": "acme", "workspace": "prod"}
     assert conn.commit_count == 1
+
+
+def test_authenticate_user_can_fallback_to_inherited_binding(monkeypatch: Any) -> None:
+    """Inherited tenant binding should allow login in a target workspace."""
+    conn = _DummyConn()
+    calls: dict[str, Any] = {}
+    stored_hash = hash_password("hunter2")
+
+    monkeypatch.setattr(rbac_service, "db_conn", lambda: _DummyCtx(conn))
+    monkeypatch.setattr(rbac_service.db_rbac, "get_user_by_email", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        rbac_service.db_rbac,
+        "get_inherited_user_by_email",
+        lambda *_args, **_kwargs: {
+            "tenant_id": "acme",
+            "workspace": "sandbox",
+            "user_id": "u-1",
+            "email": "user@acme.io",
+            "full_name": "Alice",
+            "is_active": True,
+            "is_superadmin": False,
+            "password_hash": stored_hash,
+            "source_workspace": "prod",
+            "assignment_source": "inherited",
+        },
+    )
+    monkeypatch.setattr(
+        rbac_service.db_rbac,
+        "bootstrap_rbac_scope",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def _capture_upsert(*_args, **kwargs):  # type: ignore[no-untyped-def]
+        session = kwargs.get("session")
+        calls["session_workspace"] = getattr(session, "workspace", None)
+        return {"session_id": getattr(session, "session_id", None)}
+
+    def _capture_touch(*_args, **kwargs):  # type: ignore[no-untyped-def]
+        calls["touch_workspace"] = kwargs.get("workspace")
+
+    monkeypatch.setattr(rbac_service.db_rbac, "upsert_user_session", _capture_upsert)
+    monkeypatch.setattr(rbac_service.db_rbac, "touch_user_last_login", _capture_touch)
+    monkeypatch.setattr(
+        rbac_service.db_rbac,
+        "get_user_permissions",
+        lambda *_args, **_kwargs: ["findings:read"],
+    )
+    monkeypatch.setattr(rbac_service, "generate_session_token", lambda: "sess-raw-token")
+
+    result = rbac_service.authenticate_user(
+        tenant_id="acme",
+        workspace="sandbox",
+        email="user@acme.io",
+        password="hunter2",
+    )
+
+    assert result is not None
+    context, _, _ = result
+    assert context.workspace == "sandbox"
+    assert context.assignment_source == "inherited"
+    assert context.source_workspace == "prod"
+    assert calls["session_workspace"] == "prod"
+    assert calls["touch_workspace"] == "prod"
+    assert conn.commit_count == 1
+
+
+def test_authenticate_session_token_can_fallback_to_inherited_binding(monkeypatch: Any) -> None:
+    """Inherited tenant binding should allow scoped session auth in target workspace."""
+    conn = _DummyConn()
+
+    monkeypatch.setattr(rbac_service, "db_conn", lambda: _DummyCtx(conn))
+    monkeypatch.setattr(rbac_service.db_rbac, "get_user_by_session_hash", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        rbac_service.db_rbac,
+        "get_inherited_user_by_session_hash",
+        lambda *_args, **_kwargs: {
+            "tenant_id": "acme",
+            "workspace": "sandbox",
+            "user_id": "u-1",
+            "email": "user@acme.io",
+            "full_name": "Alice",
+            "is_active": True,
+            "is_superadmin": False,
+            "session_id": "ses_123",
+            "expires_at": None,
+            "source_workspace": "prod",
+            "assignment_source": "inherited",
+        },
+    )
+    monkeypatch.setattr(
+        rbac_service.db_rbac,
+        "get_user_permissions",
+        lambda *_args, **_kwargs: ["findings:read", "runs:read"],
+    )
+
+    context = rbac_service.authenticate_session_token(
+        tenant_id="acme",
+        workspace="sandbox",
+        session_token="token-xyz",
+    )
+
+    assert context is not None
+    assert context.workspace == "sandbox"
+    assert context.assignment_source == "inherited"
+    assert context.source_workspace == "prod"
+    assert "runs:read" in context.permissions
+
+
+def test_logout_session_can_remove_inherited_source_session(monkeypatch: Any) -> None:
+    """Logout should delete inherited sessions from the source workspace."""
+    conn = _DummyConn()
+    calls: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(rbac_service, "db_conn", lambda: _DummyCtx(conn))
+
+    def _delete(*_args, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append((str(kwargs.get("workspace")), str(kwargs.get("session_token_hash"))))
+        return kwargs.get("workspace") == "prod"
+
+    monkeypatch.setattr(rbac_service.db_rbac, "delete_session_by_hash", _delete)
+    monkeypatch.setattr(
+        rbac_service.db_rbac,
+        "get_inherited_user_by_session_hash",
+        lambda *_args, **_kwargs: {
+            "tenant_id": "acme",
+            "workspace": "sandbox",
+            "user_id": "u-1",
+            "source_workspace": "prod",
+            "assignment_source": "inherited",
+        },
+    )
+
+    removed = rbac_service.logout_session(
+        tenant_id="acme",
+        workspace="sandbox",
+        session_token="token-xyz",
+    )
+
+    assert removed is True
+    assert calls[0][0] == "sandbox"
+    assert calls[1][0] == "prod"

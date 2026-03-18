@@ -12,6 +12,8 @@ from typing import Any
 
 from apps.backend.db import fetch_all_dict_conn, fetch_one_dict_conn
 
+TENANT_POLICY_WORKSPACE = "__tenant__"
+
 
 def _dict_from_cursor_row(cursor: Any, row: Sequence[Any] | None) -> dict[str, Any] | None:
     """Build a dict from a cursor row using cursor.description metadata."""
@@ -91,6 +93,34 @@ class UserListQuery:
     include_inactive: bool = False
 
 
+@dataclass(frozen=True)
+class TenantWorkspaceUpsert:
+    """Input payload for idempotent tenant workspace registry operations."""
+
+    tenant_id: str
+    workspace: str
+    display_name: str | None = None
+    provider: str = "unknown"
+    scope_kind: str = "unknown"
+    scope_native_id: str | None = None
+    environment: str | None = None
+    status: str = "active"
+    updated_by: str | None = None
+    created_by: str | None = None
+
+
+@dataclass(frozen=True)
+class TenantRoleBindingUpsert:
+    """Input payload for tenant-level inherited role policy operations."""
+
+    tenant_id: str
+    user_id: str
+    role_id: str
+    source_workspace: str
+    granted_by: str | None = None
+    applies_to_future_workspaces: bool = True
+
+
 # pylint: enable=too-many-instance-attributes
 
 
@@ -128,6 +158,75 @@ def get_user_by_email(
     )
 
 
+def get_inherited_user_by_email(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    email: str,
+) -> dict[str, Any] | None:
+    """Return an inherited user row for a target workspace by email."""
+    return fetch_one_dict_conn(
+        conn,
+        """
+        SELECT
+          trb.tenant_id,
+          %s AS workspace,
+          u.user_id,
+          u.email,
+          u.password_hash,
+          u.full_name,
+          u.external_id,
+          u.auth_provider,
+          u.is_active,
+          u.is_superadmin,
+          u.last_login_at,
+          u.created_at,
+          u.updated_at,
+          trb.role_id,
+          trb.source_workspace,
+          'inherited' AS assignment_source
+        FROM tenant_role_bindings trb
+        JOIN users u
+          ON u.tenant_id = trb.tenant_id
+         AND u.workspace = trb.source_workspace
+         AND u.user_id = trb.user_id
+        WHERE trb.tenant_id = %s
+          AND trb.workspace = %s
+          AND trb.applies_to_future_workspaces = TRUE
+          AND u.email = %s
+          AND u.is_active = TRUE
+          AND (
+            EXISTS (
+              SELECT 1
+              FROM tenant_workspaces tw
+              WHERE tw.tenant_id = %s
+                AND tw.workspace = %s
+                AND tw.status <> 'archived'
+            )
+            OR EXISTS (
+              SELECT 1
+              FROM roles r
+              WHERE r.tenant_id = %s
+                AND r.workspace = %s
+            )
+          )
+        ORDER BY trb.user_id ASC
+        LIMIT 1
+        """,
+        (
+            workspace,
+            tenant_id,
+            TENANT_POLICY_WORKSPACE,
+            email,
+            tenant_id,
+            workspace,
+            tenant_id,
+            workspace,
+        ),
+    )
+
+
 def get_user_by_id(
     conn: Any,
     *,
@@ -159,6 +258,93 @@ def get_user_by_id(
           AND user_id = %s
         """,
         (tenant_id, workspace, user_id),
+    )
+
+
+def get_effective_workspace_role(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    user_id: str,
+) -> dict[str, Any] | None:
+    """Return the effective role mapping for a user in one workspace."""
+    direct = fetch_one_dict_conn(
+        conn,
+        """
+        SELECT
+          uwr.tenant_id,
+          uwr.workspace,
+          uwr.user_id,
+          uwr.role_id,
+          uwr.granted_by,
+          uwr.granted_at,
+          uwr.workspace AS source_workspace,
+          'direct' AS assignment_source
+        FROM user_workspace_roles uwr
+        JOIN users u
+          ON u.tenant_id = uwr.tenant_id
+         AND u.workspace = uwr.workspace
+         AND u.user_id = uwr.user_id
+        WHERE uwr.tenant_id = %s
+          AND uwr.workspace = %s
+          AND uwr.user_id = %s
+          AND u.is_active = TRUE
+        """,
+        (tenant_id, workspace, user_id),
+    )
+    if direct is not None:
+        return direct
+
+    return fetch_one_dict_conn(
+        conn,
+        """
+        SELECT
+          trb.tenant_id,
+          %s AS workspace,
+          trb.user_id,
+          trb.role_id,
+          trb.granted_by,
+          trb.granted_at,
+          trb.source_workspace,
+          'inherited' AS assignment_source
+        FROM tenant_role_bindings trb
+        JOIN users u
+          ON u.tenant_id = trb.tenant_id
+         AND u.workspace = trb.source_workspace
+         AND u.user_id = trb.user_id
+        WHERE trb.tenant_id = %s
+          AND trb.workspace = %s
+          AND trb.user_id = %s
+          AND trb.applies_to_future_workspaces = TRUE
+          AND u.is_active = TRUE
+          AND (
+            EXISTS (
+              SELECT 1
+              FROM tenant_workspaces tw
+              WHERE tw.tenant_id = %s
+                AND tw.workspace = %s
+                AND tw.status <> 'archived'
+            )
+            OR EXISTS (
+              SELECT 1
+              FROM roles r
+              WHERE r.tenant_id = %s
+                AND r.workspace = %s
+            )
+          )
+        LIMIT 1
+        """,
+        (
+            workspace,
+            tenant_id,
+            TENANT_POLICY_WORKSPACE,
+            user_id,
+            tenant_id,
+            workspace,
+            tenant_id,
+            workspace,
+        ),
     )
 
 
@@ -508,6 +694,14 @@ def list_tenant_workspaces(
     Returns:
         Sorted list of workspace identifiers for the tenant.
     """
+    registered = list_registered_tenant_workspaces(
+        conn,
+        tenant_id=tenant_id,
+        anchor_workspace=anchor_workspace,
+    )
+    if registered:
+        return [str(row["workspace"]) for row in registered if row.get("workspace")]
+
     rows = fetch_all_dict_conn(
         conn,
         """
@@ -522,6 +716,431 @@ def list_tenant_workspaces(
         (tenant_id, anchor_workspace),
     )
     return [str(row["workspace"]) for row in rows if row.get("workspace")]
+
+
+def list_registered_tenant_workspaces(
+    conn: Any,
+    *,
+    tenant_id: str,
+    anchor_workspace: str,
+) -> list[dict[str, Any]]:
+    """Return registered tenant workspaces anchored to one known workspace."""
+    return fetch_all_dict_conn(
+        conn,
+        """
+        SELECT
+          tw.tenant_id,
+          tw.workspace,
+          tw.display_name,
+          tw.provider,
+          tw.scope_kind,
+          tw.scope_native_id,
+          tw.environment,
+          tw.status,
+          tw.created_by,
+          tw.updated_by,
+          tw.registered_at,
+          tw.activated_at,
+          tw.archived_at,
+          tw.updated_at
+        FROM tenant_workspaces tw
+        WHERE tw.tenant_id = %s
+          AND EXISTS (
+            SELECT 1
+            FROM tenant_workspaces anchor
+            WHERE anchor.tenant_id = %s
+              AND anchor.workspace = %s
+          )
+        ORDER BY tw.workspace ASC
+        """,
+        (tenant_id, tenant_id, anchor_workspace),
+    )
+
+
+def get_tenant_workspace(
+    conn: Any,
+    *,
+    tenant_id: str,
+    anchor_workspace: str,
+    target_workspace: str,
+) -> dict[str, Any] | None:
+    """Return one registered tenant workspace when the anchor scope exists."""
+    return fetch_one_dict_conn(
+        conn,
+        """
+        SELECT
+          tw.tenant_id,
+          tw.workspace,
+          tw.display_name,
+          tw.provider,
+          tw.scope_kind,
+          tw.scope_native_id,
+          tw.environment,
+          tw.status,
+          tw.created_by,
+          tw.updated_by,
+          tw.registered_at,
+          tw.activated_at,
+          tw.archived_at,
+          tw.updated_at
+        FROM tenant_workspaces tw
+        WHERE tw.tenant_id = %s
+          AND tw.workspace = %s
+          AND EXISTS (
+            SELECT 1
+            FROM tenant_workspaces anchor
+            WHERE anchor.tenant_id = %s
+              AND anchor.workspace = %s
+          )
+        """,
+        (tenant_id, target_workspace, tenant_id, anchor_workspace),
+    )
+
+
+def upsert_tenant_workspace(
+    conn: Any,
+    *,
+    workspace_entry: TenantWorkspaceUpsert,
+) -> dict[str, Any] | None:
+    """Create or update one tenant workspace registry entry idempotently."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO tenant_workspaces (
+              tenant_id,
+              workspace,
+              display_name,
+              provider,
+              scope_kind,
+              scope_native_id,
+              environment,
+              status,
+              created_by,
+              updated_by,
+              registered_at,
+              activated_at,
+              archived_at,
+              updated_at
+            )
+            VALUES (
+              %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now(),
+              CASE WHEN %s = 'active' THEN now() ELSE NULL END,
+              CASE WHEN %s = 'archived' THEN now() ELSE NULL END,
+              now()
+            )
+            ON CONFLICT (tenant_id, workspace)
+            DO UPDATE SET
+              display_name = EXCLUDED.display_name,
+              provider = EXCLUDED.provider,
+              scope_kind = EXCLUDED.scope_kind,
+              scope_native_id = EXCLUDED.scope_native_id,
+              environment = EXCLUDED.environment,
+              status = EXCLUDED.status,
+              updated_by = EXCLUDED.updated_by,
+              activated_at = CASE
+                WHEN EXCLUDED.status = 'active'
+                  THEN COALESCE(tenant_workspaces.activated_at, now())
+                ELSE tenant_workspaces.activated_at
+              END,
+              archived_at = CASE
+                WHEN EXCLUDED.status = 'archived'
+                  THEN COALESCE(tenant_workspaces.archived_at, now())
+                WHEN EXCLUDED.status = 'active'
+                  THEN NULL
+                ELSE tenant_workspaces.archived_at
+              END,
+              updated_at = now()
+            RETURNING
+              tenant_id,
+              workspace,
+              display_name,
+              provider,
+              scope_kind,
+              scope_native_id,
+              environment,
+              status,
+              created_by,
+              updated_by,
+              registered_at,
+              activated_at,
+              archived_at,
+              updated_at
+            """,
+            (
+                workspace_entry.tenant_id,
+                workspace_entry.workspace,
+                workspace_entry.display_name,
+                workspace_entry.provider,
+                workspace_entry.scope_kind,
+                workspace_entry.scope_native_id,
+                workspace_entry.environment,
+                workspace_entry.status,
+                workspace_entry.created_by,
+                workspace_entry.updated_by,
+                workspace_entry.status,
+                workspace_entry.status,
+            ),
+        )
+        return _dict_from_cursor_row(cur, cur.fetchone())
+
+
+def list_tenant_role_bindings(
+    conn: Any,
+    *,
+    tenant_id: str,
+    anchor_workspace: str,
+) -> list[dict[str, Any]]:
+    """Return tenant-level inherited role bindings anchored to one workspace."""
+    return fetch_all_dict_conn(
+        conn,
+        """
+        SELECT
+          trb.tenant_id,
+          trb.workspace,
+          trb.user_id,
+          trb.role_id,
+          trb.source_workspace,
+          trb.applies_to_future_workspaces,
+          trb.granted_by,
+          trb.granted_at,
+          trb.updated_at
+        FROM tenant_role_bindings trb
+        WHERE trb.tenant_id = %s
+          AND trb.workspace = %s
+          AND (
+            EXISTS (
+              SELECT 1
+              FROM tenant_workspaces anchor
+              WHERE anchor.tenant_id = %s
+                AND anchor.workspace = %s
+            )
+            OR EXISTS (
+              SELECT 1
+              FROM roles anchor_role
+              WHERE anchor_role.tenant_id = %s
+                AND anchor_role.workspace = %s
+            )
+          )
+        ORDER BY trb.user_id ASC
+        """,
+        (
+            tenant_id,
+            TENANT_POLICY_WORKSPACE,
+            tenant_id,
+            anchor_workspace,
+            tenant_id,
+            anchor_workspace,
+        ),
+    )
+
+
+def get_tenant_role_binding(
+    conn: Any,
+    *,
+    tenant_id: str,
+    anchor_workspace: str,
+    user_id: str,
+) -> dict[str, Any] | None:
+    """Return one tenant-level inherited role binding."""
+    return fetch_one_dict_conn(
+        conn,
+        """
+        SELECT
+          trb.tenant_id,
+          trb.workspace,
+          trb.user_id,
+          trb.role_id,
+          trb.source_workspace,
+          trb.applies_to_future_workspaces,
+          trb.granted_by,
+          trb.granted_at,
+          trb.updated_at
+        FROM tenant_role_bindings trb
+        WHERE trb.tenant_id = %s
+          AND trb.workspace = %s
+          AND trb.user_id = %s
+          AND (
+            EXISTS (
+              SELECT 1
+              FROM tenant_workspaces anchor
+              WHERE anchor.tenant_id = %s
+                AND anchor.workspace = %s
+            )
+            OR EXISTS (
+              SELECT 1
+              FROM roles anchor_role
+              WHERE anchor_role.tenant_id = %s
+                AND anchor_role.workspace = %s
+            )
+          )
+        """,
+        (
+            tenant_id,
+            TENANT_POLICY_WORKSPACE,
+            user_id,
+            tenant_id,
+            anchor_workspace,
+            tenant_id,
+            anchor_workspace,
+        ),
+    )
+
+
+def upsert_tenant_role_binding(
+    conn: Any,
+    *,
+    binding: TenantRoleBindingUpsert,
+) -> dict[str, Any] | None:
+    """Create or update one tenant-level inherited role binding idempotently."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO tenant_role_bindings (
+              tenant_id,
+              workspace,
+              user_id,
+              role_id,
+              source_workspace,
+              applies_to_future_workspaces,
+              granted_by,
+              granted_at,
+              updated_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, now(), now())
+            ON CONFLICT (tenant_id, workspace, user_id)
+            DO UPDATE SET
+              role_id = EXCLUDED.role_id,
+              source_workspace = EXCLUDED.source_workspace,
+              applies_to_future_workspaces = EXCLUDED.applies_to_future_workspaces,
+              granted_by = EXCLUDED.granted_by,
+              granted_at = now(),
+              updated_at = now()
+            RETURNING
+              tenant_id,
+              workspace,
+              user_id,
+              role_id,
+              source_workspace,
+              applies_to_future_workspaces,
+              granted_by,
+              granted_at,
+              updated_at
+            """,
+            (
+                binding.tenant_id,
+                TENANT_POLICY_WORKSPACE,
+                binding.user_id,
+                binding.role_id,
+                binding.source_workspace,
+                binding.applies_to_future_workspaces,
+                binding.granted_by,
+            ),
+        )
+        return _dict_from_cursor_row(cur, cur.fetchone())
+
+
+def delete_tenant_role_binding(
+    conn: Any,
+    *,
+    tenant_id: str,
+    user_id: str,
+) -> bool:
+    """Delete one tenant-level inherited role binding."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM tenant_role_bindings
+            WHERE tenant_id = %s
+              AND workspace = %s
+              AND user_id = %s
+            """,
+            (tenant_id, TENANT_POLICY_WORKSPACE, user_id),
+        )
+        return bool(cur.rowcount)
+
+
+def apply_tenant_role_bindings_to_workspace(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+) -> list[dict[str, Any]]:
+    """Apply active future-workspace role bindings to one workspace idempotently."""
+    applied: list[dict[str, Any]] = []
+    bindings = list_tenant_role_bindings(
+        conn,
+        tenant_id=tenant_id,
+        anchor_workspace=workspace,
+    )
+    for binding in bindings:
+        if not bool(binding.get("applies_to_future_workspaces")):
+            continue
+        user_id = str(binding.get("user_id") or "")
+        source_workspace = str(binding.get("source_workspace") or "")
+        role_id = str(binding.get("role_id") or "")
+        if not user_id or not source_workspace or not role_id:
+            continue
+
+        source_user = get_user_by_id(
+            conn,
+            tenant_id=tenant_id,
+            workspace=source_workspace,
+            user_id=user_id,
+        )
+        if source_user is None:
+            continue
+
+        create_user(
+            conn,
+            user=UserUpsert(
+                tenant_id=tenant_id,
+                workspace=workspace,
+                user_id=user_id,
+                email=str(source_user.get("email") or ""),
+                password_hash=(
+                    str(source_user.get("password_hash"))
+                    if source_user.get("password_hash") is not None
+                    else None
+                ),
+                full_name=(
+                    str(source_user.get("full_name"))
+                    if source_user.get("full_name") is not None
+                    else None
+                ),
+                external_id=(
+                    str(source_user.get("external_id"))
+                    if source_user.get("external_id") is not None
+                    else None
+                ),
+                auth_provider=str(source_user.get("auth_provider") or "local"),
+                is_active=bool(source_user.get("is_active")),
+                is_superadmin=bool(source_user.get("is_superadmin")),
+            ),
+        )
+        assignment = upsert_user_workspace_role(
+            conn,
+            assignment=UserWorkspaceRoleUpsert(
+                tenant_id=tenant_id,
+                workspace=workspace,
+                user_id=user_id,
+                role_id=role_id,
+                granted_by=(
+                    str(binding.get("granted_by"))
+                    if binding.get("granted_by") is not None
+                    else None
+                ),
+            ),
+        )
+        applied.append(
+            {
+                "user_id": user_id,
+                "role_id": role_id,
+                "source_workspace": source_workspace,
+                "workspace": workspace,
+                "granted_at": (assignment or {}).get("granted_at"),
+            }
+        )
+    return applied
 
 
 def bootstrap_rbac_scope(
@@ -717,29 +1336,12 @@ def check_permission(
     permission_id: str,
 ) -> bool:
     """Return True when a user has the requested permission in scope."""
-    row = fetch_one_dict_conn(
+    return permission_id in get_user_permissions(
         conn,
-        """
-        SELECT 1 AS allowed
-        FROM user_workspace_roles uwr
-        JOIN users u
-          ON u.tenant_id = uwr.tenant_id
-         AND u.workspace = uwr.workspace
-         AND u.user_id = uwr.user_id
-        JOIN role_permissions rp
-          ON rp.tenant_id = uwr.tenant_id
-         AND rp.workspace = uwr.workspace
-         AND rp.role_id = uwr.role_id
-        WHERE uwr.tenant_id = %s
-          AND uwr.workspace = %s
-          AND uwr.user_id = %s
-          AND rp.permission_id = %s
-          AND u.is_active = TRUE
-        LIMIT 1
-        """,
-        (tenant_id, workspace, user_id, permission_id),
+        tenant_id=tenant_id,
+        workspace=workspace,
+        user_id=user_id,
     )
-    return bool(row and row.get("allowed") == 1)
 
 
 def touch_user_last_login(conn: Any, *, tenant_id: str, workspace: str, user_id: str) -> None:
@@ -883,6 +1485,76 @@ def get_user_by_api_key_hash(
     )
 
 
+def get_inherited_user_by_api_key_hash(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    key_hash: str,
+) -> dict[str, Any] | None:
+    """Resolve inherited user context from API key hash for a target workspace."""
+    return fetch_one_dict_conn(
+        conn,
+        """
+        SELECT
+          trb.tenant_id,
+          %s AS workspace,
+          u.user_id,
+          u.email,
+          u.full_name,
+          u.auth_provider,
+          u.is_active,
+          u.is_superadmin,
+          ak.key_id,
+          trb.source_workspace,
+          'inherited' AS assignment_source
+        FROM tenant_role_bindings trb
+        JOIN api_keys ak
+          ON ak.tenant_id = trb.tenant_id
+         AND ak.workspace = trb.source_workspace
+         AND ak.user_id = trb.user_id
+        JOIN users u
+          ON u.tenant_id = ak.tenant_id
+         AND u.workspace = ak.workspace
+         AND u.user_id = ak.user_id
+        WHERE trb.tenant_id = %s
+          AND trb.workspace = %s
+          AND trb.applies_to_future_workspaces = TRUE
+          AND ak.key_hash = %s
+          AND ak.is_active = TRUE
+          AND (ak.expires_at IS NULL OR ak.expires_at > now())
+          AND u.is_active = TRUE
+          AND (
+            EXISTS (
+              SELECT 1
+              FROM tenant_workspaces tw
+              WHERE tw.tenant_id = %s
+                AND tw.workspace = %s
+                AND tw.status <> 'archived'
+            )
+            OR EXISTS (
+              SELECT 1
+              FROM roles r
+              WHERE r.tenant_id = %s
+                AND r.workspace = %s
+            )
+          )
+        ORDER BY trb.user_id ASC
+        LIMIT 1
+        """,
+        (
+            workspace,
+            tenant_id,
+            TENANT_POLICY_WORKSPACE,
+            key_hash,
+            tenant_id,
+            workspace,
+            tenant_id,
+            workspace,
+        ),
+    )
+
+
 def get_user_by_session_hash(
     conn: Any,
     *,
@@ -921,6 +1593,76 @@ def get_user_by_session_hash(
     )
 
 
+def get_inherited_user_by_session_hash(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    session_token_hash: str,
+) -> dict[str, Any] | None:
+    """Resolve inherited user context from session token hash for a target workspace."""
+    return fetch_one_dict_conn(
+        conn,
+        """
+        SELECT
+          trb.tenant_id,
+          %s AS workspace,
+          u.user_id,
+          u.email,
+          u.full_name,
+          u.auth_provider,
+          u.is_active,
+          u.is_superadmin,
+          s.session_id,
+          s.expires_at,
+          trb.source_workspace,
+          'inherited' AS assignment_source
+        FROM tenant_role_bindings trb
+        JOIN user_sessions s
+          ON s.tenant_id = trb.tenant_id
+         AND s.workspace = trb.source_workspace
+         AND s.user_id = trb.user_id
+        JOIN users u
+          ON u.tenant_id = s.tenant_id
+         AND u.workspace = s.workspace
+         AND u.user_id = s.user_id
+        WHERE trb.tenant_id = %s
+          AND trb.workspace = %s
+          AND trb.applies_to_future_workspaces = TRUE
+          AND s.session_token_hash = %s
+          AND s.expires_at > now()
+          AND u.is_active = TRUE
+          AND (
+            EXISTS (
+              SELECT 1
+              FROM tenant_workspaces tw
+              WHERE tw.tenant_id = %s
+                AND tw.workspace = %s
+                AND tw.status <> 'archived'
+            )
+            OR EXISTS (
+              SELECT 1
+              FROM roles r
+              WHERE r.tenant_id = %s
+                AND r.workspace = %s
+            )
+          )
+        ORDER BY trb.user_id ASC
+        LIMIT 1
+        """,
+        (
+            workspace,
+            tenant_id,
+            TENANT_POLICY_WORKSPACE,
+            session_token_hash,
+            tenant_id,
+            workspace,
+            tenant_id,
+            workspace,
+        ),
+    )
+
+
 def get_user_permissions(
     conn: Any,
     *,
@@ -929,25 +1671,32 @@ def get_user_permissions(
     user_id: str,
 ) -> list[str]:
     """Return all effective scoped permissions for a user."""
-    rows = fetch_all_dict_conn(
+    effective_role = get_effective_workspace_role(
         conn,
-        """
-        SELECT DISTINCT rp.permission_id
-        FROM user_workspace_roles uwr
-        JOIN role_permissions rp
-          ON rp.tenant_id = uwr.tenant_id
-         AND rp.workspace = uwr.workspace
-         AND rp.role_id = uwr.role_id
-        JOIN users u
-          ON u.tenant_id = uwr.tenant_id
-         AND u.workspace = uwr.workspace
-         AND u.user_id = uwr.user_id
-        WHERE uwr.tenant_id = %s
-          AND uwr.workspace = %s
-          AND uwr.user_id = %s
-          AND u.is_active = TRUE
-        ORDER BY rp.permission_id ASC
-        """,
-        (tenant_id, workspace, user_id),
+        tenant_id=tenant_id,
+        workspace=workspace,
+        user_id=user_id,
     )
-    return [str(row["permission_id"]) for row in rows if row.get("permission_id")]
+    if effective_role is None:
+        return []
+
+    role_id = str(effective_role.get("role_id") or "")
+    source_workspace = str(effective_role.get("source_workspace") or workspace)
+    permissions = get_role_permissions(
+        conn,
+        tenant_id=tenant_id,
+        workspace=workspace,
+        role_id=role_id,
+    )
+    if permissions:
+        return permissions
+
+    if source_workspace != workspace:
+        return get_role_permissions(
+            conn,
+            tenant_id=tenant_id,
+            workspace=source_workspace,
+            role_id=role_id,
+        )
+
+    return []

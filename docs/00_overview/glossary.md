@@ -27,6 +27,72 @@ If a term is not defined here, it should not be relied upon as stable.
 
 ## Core concepts
 
+### Tenant
+
+A **Tenant** is the top-level customer boundary in the SaaS platform.
+
+It typically represents:
+
+- one company,
+- one business entity,
+- or one isolated customer organization.
+
+A tenant owns:
+
+- users
+- workspaces
+- findings
+- recommendations
+- remediations
+- coverage history
+- configuration and policy overlays
+
+Rules:
+
+- `tenant_id` is the primary SaaS isolation boundary
+- data must never leak across tenants
+- administration may span multiple workspaces inside one tenant
+
+---
+
+### Workspace
+
+A **Workspace** is the operational cloud scope inside a tenant.
+
+For product semantics, a workspace should represent **one managed cloud
+boundary**, such as:
+
+- one AWS account
+- one Azure subscription
+- one GCP project
+
+In the future, a workspace may also carry friendly metadata such as:
+
+- display name
+- cloud/provider
+- environment
+- business owner
+- lifecycle state
+
+Important distinction:
+
+- `tenant` = customer / organization boundary
+- `workspace` = one cloud management scope inside that tenant
+
+This means a tenant usually contains multiple workspaces, and tenant
+administration should support:
+
+- workspace creation and activation
+- inherited access across workspaces
+- future-workspace access policies
+
+The current engine already uses `workspace` as a strict scope key.  
+The glossary now makes the intended product meaning explicit: a workspace is
+not just a label like `prod` or `dev`, but the durable unit representing a
+cloud account/subscription/project scope.
+
+---
+
 ### Finding
 
 A **Finding** is a deterministic, run-scoped observation about a cloud resource that indicates:

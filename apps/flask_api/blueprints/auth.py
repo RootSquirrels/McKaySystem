@@ -157,6 +157,8 @@ def _serialize_context(context: AuthContext) -> dict[str, Any]:
         "auth_method": context.auth_method,
         "session_id": context.session_id,
         "key_id": context.key_id,
+        "assignment_source": context.assignment_source,
+        "source_workspace": context.source_workspace,
         "permissions": sorted(context.permissions),
     }
 

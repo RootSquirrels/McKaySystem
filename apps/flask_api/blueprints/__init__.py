@@ -10,6 +10,7 @@ This package contains Flask Blueprint modules for each API domain:
 - findings: Finding query and management endpoints
 - recommendations: Recommendation endpoints
 - teams: Team management endpoints
+- tenant_admin: Tenant administration endpoints
 - sla_policies: SLA policy management endpoints
 - lifecycle: Finding lifecycle action endpoints
 - remediations: Remediation action approval/list endpoints
@@ -30,6 +31,7 @@ from apps.flask_api.blueprints.recommendations import recommendations_bp
 from apps.flask_api.blueprints.remediations import remediations_bp
 from apps.flask_api.blueprints.runs import runs_bp
 from apps.flask_api.blueprints.sla_policies import sla_policies_bp
+from apps.flask_api.blueprints.tenant_admin import tenant_admin_bp
 from apps.flask_api.blueprints.teams import teams_bp
 from apps.flask_api.blueprints.users import users_bp
 
@@ -43,6 +45,7 @@ __all__ = [
     "findings_bp",
     "recommendations_bp",
     "teams_bp",
+    "tenant_admin_bp",
     "sla_policies_bp",
     "lifecycle_bp",
     "remediations_bp",

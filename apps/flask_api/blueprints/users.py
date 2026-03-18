@@ -235,6 +235,8 @@ class _TenantRoleAssignmentRequest:
     tenant_id: str
     user_id: str
     role_id: str
+    source_workspace: str
+    apply_to_future_workspaces: bool
     granted_by: str | None
 
 
@@ -252,6 +254,12 @@ def _tenant_role_request_from_payload(
     if not role_id:
         raise ValueError("role_id is required")
     granted_by = _coerce_optional_text(payload.get("granted_by"))
+    apply_to_future_workspaces = _parse_bool(
+        payload.get("apply_to_future_workspaces"),
+        field_name="apply_to_future_workspaces",
+        default=False,
+    )
+    source_workspace = _coerce_optional_text(payload.get("source_workspace")) or workspace
     workspaces = _optional_workspace_list(payload)
     return (
         tenant_id,
@@ -261,6 +269,8 @@ def _tenant_role_request_from_payload(
             tenant_id=tenant_id,
             user_id=uid,
             role_id=role_id,
+            source_workspace=source_workspace,
+            apply_to_future_workspaces=apply_to_future_workspaces,
             granted_by=granted_by,
         ),
     )
@@ -478,6 +488,49 @@ def api_users_set_tenant_role(user_id: str) -> Any:
                 assignment_request=assignment_request,
             )
             assigned_workspaces, skipped_workspaces = _workspace_outcomes(items)
+            future_binding_payload: dict[str, Any] | None = None
+            if assignment_request.apply_to_future_workspaces:
+                source_user = db_rbac.get_user_by_id(
+                    conn,
+                    tenant_id=tenant_id,
+                    workspace=assignment_request.source_workspace,
+                    user_id=assignment_request.user_id,
+                )
+                if source_user is None:
+                    return _err("not_found", "source user not found", status=404)
+                source_role = db_rbac.get_role_by_id(
+                    conn,
+                    tenant_id=tenant_id,
+                    workspace=assignment_request.source_workspace,
+                    role_id=assignment_request.role_id,
+                )
+                if source_role is None:
+                    return _err(
+                        "not_found",
+                        "role not found in source workspace",
+                        status=404,
+                    )
+                binding = db_rbac.upsert_tenant_role_binding(
+                    conn,
+                    binding=db_rbac.TenantRoleBindingUpsert(
+                        tenant_id=tenant_id,
+                        user_id=assignment_request.user_id,
+                        role_id=assignment_request.role_id,
+                        source_workspace=assignment_request.source_workspace,
+                        granted_by=assignment_request.granted_by,
+                        applies_to_future_workspaces=True,
+                    ),
+                )
+                future_binding_payload = {
+                    "user_id": (binding or {}).get("user_id"),
+                    "role_id": (binding or {}).get("role_id"),
+                    "source_workspace": (binding or {}).get("source_workspace"),
+                    "applies_to_future_workspaces": bool(
+                        (binding or {}).get("applies_to_future_workspaces")
+                    ),
+                    "granted_by": (binding or {}).get("granted_by"),
+                    "granted_at": (binding or {}).get("granted_at"),
+                }
             append_audit_event(
                 conn,
                 event=AuditEvent(
@@ -496,6 +549,8 @@ def api_users_set_tenant_role(user_id: str) -> Any:
                         "skipped": len(workspaces) - assigned_count,
                         "assigned_workspaces": assigned_workspaces,
                         "skipped_workspaces": skipped_workspaces,
+                        "apply_to_future_workspaces": assignment_request.apply_to_future_workspaces,
+                        "source_workspace": assignment_request.source_workspace,
                     },
                     actor_id=auth_context.user_id,
                     actor_email=auth_context.email,
@@ -519,6 +574,7 @@ def api_users_set_tenant_role(user_id: str) -> Any:
                     "assigned": assigned_count,
                     "skipped": len(workspaces) - assigned_count,
                 },
+                "future_workspace_binding": future_binding_payload,
                 "items": items,
             }
         )

@@ -58,6 +58,7 @@ from apps.flask_api.blueprints import recommendations as recommendations_module
 from apps.flask_api.blueprints import remediations as remediations_module
 from apps.flask_api.blueprints import runs as runs_module
 from apps.flask_api.blueprints import sla_policies as sla_policies_module
+from apps.flask_api.blueprints import tenant_admin as tenant_admin_module
 from apps.flask_api.blueprints import teams as teams_module
 from apps.flask_api.blueprints import users as users_module
 from apps.flask_api import graph_context as graph_context_module
@@ -882,6 +883,7 @@ def _install_blueprint_backcompat_shims() -> None:
         recommendations_module,
         remediations_module,
         teams_module,
+        tenant_admin_module,
         sla_policies_module,
         lifecycle_module,
         groups_module,
@@ -948,6 +950,7 @@ app.register_blueprint(findings_module.findings_bp)
 app.register_blueprint(recommendations_module.recommendations_bp)
 app.register_blueprint(remediations_module.remediations_bp)
 app.register_blueprint(teams_module.teams_bp)
+app.register_blueprint(tenant_admin_module.tenant_admin_bp)
 app.register_blueprint(sla_policies_module.sla_policies_bp)
 app.register_blueprint(lifecycle_module.lifecycle_bp)
 app.register_blueprint(groups_module.groups_bp)

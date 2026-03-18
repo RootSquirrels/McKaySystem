@@ -33,6 +33,8 @@ class AuthContext:
     auth_method: str
     session_id: str | None = None
     key_id: str | None = None
+    assignment_source: str = "direct"
+    source_workspace: str | None = None
     permissions: frozenset[str] = frozenset()
 
 
@@ -66,7 +68,25 @@ def _build_context(
         auth_method=auth_method,
         session_id=str(row.get("session_id") or "") or None,
         key_id=str(row.get("key_id") or "") or None,
+        assignment_source=str(row.get("assignment_source") or "direct"),
+        source_workspace=str(row.get("source_workspace") or "") or None,
         permissions=frozenset(str(p) for p in permissions if p),
+    )
+
+
+def _effective_permissions(
+    conn: Any,
+    *,
+    tenant_id: str,
+    workspace: str,
+    user_id: str,
+) -> list[str]:
+    """Return effective permissions for one user in one workspace."""
+    return db_rbac.get_user_permissions(
+        conn,
+        tenant_id=tenant_id,
+        workspace=workspace,
+        user_id=user_id,
     )
 
 
@@ -96,6 +116,17 @@ def authenticate_user(
             workspace=workspace,
             email=email,
         )
+        assignment_source = "direct"
+        source_workspace: str | None = None
+        if user is None:
+            user = db_rbac.get_inherited_user_by_email(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                email=email,
+            )
+            assignment_source = str((user or {}).get("assignment_source") or "inherited")
+            source_workspace = str((user or {}).get("source_workspace") or "") or None
         if user is None:
             return None
         if not bool(user.get("is_active")):
@@ -119,7 +150,7 @@ def authenticate_user(
             conn,
             session=db_rbac.SessionUpsert(
                 tenant_id=tenant_id,
-                workspace=workspace,
+                workspace=source_workspace or workspace,
                 session_id=session_id,
                 session_token_hash=session_token_hash,
                 user_id=str(user.get("user_id") or ""),
@@ -129,7 +160,7 @@ def authenticate_user(
         db_rbac.touch_user_last_login(
             conn,
             tenant_id=tenant_id,
-            workspace=workspace,
+            workspace=source_workspace or workspace,
             user_id=str(user.get("user_id") or ""),
         )
         permissions = db_rbac.get_user_permissions(
@@ -140,7 +171,12 @@ def authenticate_user(
         )
         conn.commit()
     context = _build_context(
-        row={**user, "session_id": session_id},
+        row={
+            **user,
+            "session_id": session_id,
+            "assignment_source": assignment_source,
+            "source_workspace": source_workspace,
+        },
         auth_method="session",
         permissions=permissions,
     )
@@ -162,6 +198,17 @@ def authenticate_api_key(
             workspace=workspace,
             key_hash=key_hash,
         )
+        assignment_source = "direct"
+        source_workspace: str | None = None
+        if user is None:
+            user = db_rbac.get_inherited_user_by_api_key_hash(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                key_hash=key_hash,
+            )
+            assignment_source = str((user or {}).get("assignment_source") or "inherited")
+            source_workspace = str((user or {}).get("source_workspace") or "") or None
         if user is None:
             return None
         db_rbac.bootstrap_rbac_scope(
@@ -174,17 +221,25 @@ def authenticate_api_key(
             db_rbac.touch_api_key_last_used(
                 conn,
                 tenant_id=tenant_id,
-                workspace=workspace,
+                workspace=source_workspace or workspace,
                 key_id=key_id,
             )
-        permissions = db_rbac.get_user_permissions(
+        permissions = _effective_permissions(
             conn,
             tenant_id=tenant_id,
             workspace=workspace,
             user_id=str(user.get("user_id") or ""),
         )
         conn.commit()
-    return _build_context(row=user, auth_method="api_key", permissions=permissions)
+    return _build_context(
+        row={
+            **user,
+            "assignment_source": assignment_source,
+            "source_workspace": source_workspace,
+        },
+        auth_method="api_key",
+        permissions=permissions,
+    )
 
 
 def authenticate_session_token(
@@ -202,15 +257,34 @@ def authenticate_session_token(
             workspace=workspace,
             session_token_hash=token_hash,
         )
+        assignment_source = "direct"
+        source_workspace: str | None = None
+        if user is None:
+            user = db_rbac.get_inherited_user_by_session_hash(
+                conn,
+                tenant_id=tenant_id,
+                workspace=workspace,
+                session_token_hash=token_hash,
+            )
+            assignment_source = str((user or {}).get("assignment_source") or "inherited")
+            source_workspace = str((user or {}).get("source_workspace") or "") or None
         if user is None:
             return None
-        permissions = db_rbac.get_user_permissions(
+        permissions = _effective_permissions(
             conn,
             tenant_id=tenant_id,
             workspace=workspace,
             user_id=str(user.get("user_id") or ""),
         )
-    return _build_context(row=user, auth_method="session", permissions=permissions)
+    return _build_context(
+        row={
+            **user,
+            "assignment_source": assignment_source,
+            "source_workspace": source_workspace,
+        },
+        auth_method="session",
+        permissions=permissions,
+    )
 
 
 def logout_session(
@@ -226,6 +300,24 @@ def logout_session(
             conn,
             tenant_id=tenant_id,
             workspace=workspace,
+            session_token_hash=token_hash,
+        )
+        conn.commit()
+        if removed:
+            return removed
+
+        inherited = db_rbac.get_inherited_user_by_session_hash(
+            conn,
+            tenant_id=tenant_id,
+            workspace=workspace,
+            session_token_hash=token_hash,
+        )
+        if inherited is None:
+            return False
+        removed = db_rbac.delete_session_by_hash(
+            conn,
+            tenant_id=tenant_id,
+            workspace=str(inherited.get("source_workspace") or workspace),
             session_token_hash=token_hash,
         )
         conn.commit()

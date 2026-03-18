@@ -250,15 +250,11 @@ def test_revoke_api_key_returns_false_when_no_rows_updated() -> None:
 
 def test_check_permission_uses_scoped_join(monkeypatch: Any) -> None:
     captured: dict[str, Any] = {}
-
-    def _fake_fetch_one(
-        _conn: object, sql: str, params: Sequence[Any] | None = None
-    ) -> dict[str, Any]:
-        captured["sql"] = sql
-        captured["params"] = params
-        return {"allowed": 1}
-
-    monkeypatch.setattr(db_rbac, "fetch_one_dict_conn", _fake_fetch_one)
+    monkeypatch.setattr(
+        db_rbac,
+        "get_user_permissions",
+        lambda _conn, **kwargs: captured.update(kwargs) or ["findings:read"],
+    )
     allowed = db_rbac.check_permission(
         object(),
         tenant_id="acme",
@@ -268,12 +264,11 @@ def test_check_permission_uses_scoped_join(monkeypatch: Any) -> None:
     )
 
     assert allowed is True
-    assert captured["params"] == ("acme", "prod", "user-1", "findings:read")
-    sql = str(captured["sql"]).lower()
-    assert "from user_workspace_roles" in sql
-    assert "join role_permissions" in sql
-    assert "uwr.tenant_id = %s" in sql
-    assert "uwr.workspace = %s" in sql
+    assert captured == {
+        "tenant_id": "acme",
+        "workspace": "prod",
+        "user_id": "user-1",
+    }
 
 
 def test_get_role_by_id_includes_scope(monkeypatch: Any) -> None:
@@ -320,12 +315,10 @@ def test_list_tenant_workspaces_uses_anchor_scope(monkeypatch: Any) -> None:
     )
 
     assert rows == ["dev", "prod"]
-    assert captured["params"] == ("acme", "prod")
+    assert captured["params"] == ("acme", "acme", "prod")
     sql = str(captured["sql"]).lower()
-    assert "from roles r_anchor" in sql
-    assert "join roles r_all" in sql
-    assert "r_anchor.tenant_id = %s" in sql
-    assert "r_anchor.workspace = %s" in sql
+    assert "from tenant_workspaces tw" in sql
+    assert "from tenant_workspaces anchor" in sql
 
 
 def test_upsert_user_workspace_role_is_idempotent_and_scoped() -> None:
@@ -355,6 +348,101 @@ def test_upsert_user_workspace_role_is_idempotent_and_scoped() -> None:
     assert cursor.executed_params == ("acme", "prod", "u-1", "editor", "admin@acme.io")
     sql = str(cursor.executed_sql).lower()
     assert "insert into user_workspace_roles" in sql
+    assert "on conflict (tenant_id, workspace, user_id)" in sql
+
+
+def test_list_registered_tenant_workspaces_uses_anchor_scope(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_fetch_all(
+        _conn: object, sql: str, params: Sequence[Any] | None = None
+    ) -> list[dict[str, Any]]:
+        captured["sql"] = sql
+        captured["params"] = params
+        return [{"workspace": "dev"}, {"workspace": "prod"}]
+
+    monkeypatch.setattr(db_rbac, "fetch_all_dict_conn", _fake_fetch_all)
+
+    rows = db_rbac.list_registered_tenant_workspaces(
+        object(),
+        tenant_id="acme",
+        anchor_workspace="prod",
+    )
+
+    assert rows == [{"workspace": "dev"}, {"workspace": "prod"}]
+    assert captured["params"] == ("acme", "acme", "prod")
+    sql = str(captured["sql"]).lower()
+    assert "from tenant_workspaces tw" in sql
+    assert "from tenant_workspaces anchor" in sql
+
+
+def test_upsert_tenant_workspace_is_idempotent_and_scoped() -> None:
+    cursor = _FakeCursor(
+        row=("acme", "prod", "Production"),
+        description=(("tenant_id",), ("workspace",), ("display_name",)),
+    )
+    conn = _FakeConn(cursor)
+
+    row = db_rbac.upsert_tenant_workspace(
+        conn,
+        workspace_entry=db_rbac.TenantWorkspaceUpsert(
+            tenant_id="acme",
+            workspace="prod",
+            display_name="Production",
+            provider="aws",
+            scope_kind="account",
+            status="active",
+            updated_by="admin@acme.io",
+        ),
+    )
+
+    assert row == {
+        "tenant_id": "acme",
+        "workspace": "prod",
+        "display_name": "Production",
+    }
+    assert cursor.executed_params is not None
+    assert tuple(cursor.executed_params)[0:2] == ("acme", "prod")
+    sql = str(cursor.executed_sql).lower()
+    assert "insert into tenant_workspaces" in sql
+    assert "on conflict (tenant_id, workspace)" in sql
+
+
+def test_upsert_tenant_role_binding_is_idempotent_and_scoped() -> None:
+    cursor = _FakeCursor(
+        row=("acme", db_rbac.TENANT_POLICY_WORKSPACE, "u-1", "admin"),
+        description=(("tenant_id",), ("workspace",), ("user_id",), ("role_id",)),
+    )
+    conn = _FakeConn(cursor)
+
+    row = db_rbac.upsert_tenant_role_binding(
+        conn,
+        binding=db_rbac.TenantRoleBindingUpsert(
+            tenant_id="acme",
+            user_id="u-1",
+            role_id="admin",
+            source_workspace="prod",
+            granted_by="admin@acme.io",
+        ),
+    )
+
+    assert row == {
+        "tenant_id": "acme",
+        "workspace": db_rbac.TENANT_POLICY_WORKSPACE,
+        "user_id": "u-1",
+        "role_id": "admin",
+    }
+    assert cursor.executed_params == (
+        "acme",
+        db_rbac.TENANT_POLICY_WORKSPACE,
+        "u-1",
+        "admin",
+        "prod",
+        True,
+        "admin@acme.io",
+    )
+    sql = str(cursor.executed_sql).lower()
+    assert "insert into tenant_role_bindings" in sql
     assert "on conflict (tenant_id, workspace, user_id)" in sql
 
 
