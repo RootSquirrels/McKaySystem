@@ -27,7 +27,7 @@ Detect load balancer hygiene and cost waste signals for ALB/NLB resources.
 
 - Idle ALB/NLB traffic pattern over lookback window.
 - Load balancers without listeners.
-- Target groups without registered or healthy targets.
+- Target groups without registered or healthy targets, with clearer optimization focus for delete candidate vs fix health checks vs register targets.
 - Informational findings for permission gaps on inventory/health/metrics.
 
 ## Configuration and defaults
@@ -54,6 +54,7 @@ Optional for improved cost-confidence:
 ## Determinism and limitations
 
 - Metrics and target health are best-effort and can be partially visible due to IAM.
+- Recommendation focus is strengthened using the same listener, target-group, target-health, and CloudWatch data already collected; no extra API calls are added.
 - Cost estimates are directional and not a billing replacement.
 - Permission denials are emitted as informational findings.
 

@@ -146,6 +146,27 @@ def _csv_join(values: Sequence[str]) -> str:
     return ",".join(sorted({str(value).strip() for value in values if str(value).strip()}))
 
 
+def _idle_optimization_focus(*, scheme: str) -> str:
+    """Return the primary optimization focus for an idle ELB."""
+    if str(scheme or "").strip().lower() == "internal":
+        return "consolidation_review"
+    return "decommission_review"
+
+
+def _no_targets_optimization_focus(*, is_idle: bool) -> str:
+    """Return the primary optimization focus for an ELB with no registered targets."""
+    if is_idle:
+        return "delete_candidate"
+    return "register_targets_or_delete"
+
+
+def _no_healthy_optimization_focus(*, is_idle: bool) -> str:
+    """Return the primary optimization focus for an ELB with no healthy targets."""
+    if is_idle:
+        return "decommission_or_fix_health_checks"
+    return "fix_health_checks"
+
+
 def _load_balancer_dimensions(
     lb: Mapping[str, Any],
     *,
@@ -614,7 +635,11 @@ class ElbV2LoadBalancersChecker:
                         estimate_notes=pricing_notes,
                         tags=tags,
                         issue_key={"check_id": "aws.elbv2.load.balancers.no.listeners", "lb_arn": arn},
-                        dimensions=lb_dimensions,
+                        dimensions={
+                            **lb_dimensions,
+                            "optimization_focus": "delete_candidate",
+                            "listener_count": "0",
+                        },
                     )
                 continue
 
@@ -632,6 +657,7 @@ class ElbV2LoadBalancersChecker:
             idle_finding: FindingDraft | None = None
             if is_idle:
                 metric = "RequestCount" if lb_type == "application" else "NewFlowCount"
+                optimization_focus = _idle_optimization_focus(scheme=scheme)
                 idle_finding = FindingDraft(
                     check_id="aws.elbv2.load.balancers.idle",
                     check_name=self._CHECK_NAME,
@@ -650,7 +676,12 @@ class ElbV2LoadBalancersChecker:
                     estimate_notes=pricing_notes,
                     tags=tags,
                     issue_key={"check_id": "aws.elbv2.load.balancers.idle", "lb_arn": arn},
-                    dimensions=lb_dimensions,
+                    dimensions={
+                        **lb_dimensions,
+                        "optimization_focus": optimization_focus,
+                        "idle_metric": metric,
+                        "p95_daily_activity": f"{p95_val:.2f}",
+                    },
                 )
 
             # Orphaned targets / unhealthy targets (best-effort)
@@ -664,6 +695,7 @@ class ElbV2LoadBalancersChecker:
 
             any_targets = False
             any_healthy = False
+            target_count = 0
             for tg_arn in referenced_tgs:
                 tg = tg_by_arn.get(tg_arn)
                 if not tg:
@@ -710,6 +742,7 @@ class ElbV2LoadBalancersChecker:
                 desc = th.get("TargetHealthDescriptions", []) or []
                 if desc:
                     any_targets = True
+                    target_count += len(desc)
                 for d in desc:
                     st = str(((d or {}).get("TargetHealth") or {}).get("State") or "")
                     if st == "healthy":
@@ -717,6 +750,7 @@ class ElbV2LoadBalancersChecker:
 
             if not any_targets and emitted["orphan_no_targets"] < cfg.max_findings_per_type:
                 emitted["orphan_no_targets"] += 1
+                optimization_focus = _no_targets_optimization_focus(is_idle=is_idle)
                 yield FindingDraft(
                     check_id="aws.elbv2.load.balancers.no.registered.targets",
                     check_name=self._CHECK_NAME,
@@ -735,12 +769,17 @@ class ElbV2LoadBalancersChecker:
                     estimate_notes=pricing_notes,
                     tags=tags,
                     issue_key={"check_id": "aws.elbv2.load.balancers.no.registered.targets", "lb_arn": arn},
-                    dimensions=lb_dimensions,
+                    dimensions={
+                        **lb_dimensions,
+                        "optimization_focus": optimization_focus,
+                        "target_count": "0",
+                    },
                 )
                 idle_finding = None
 
             if any_targets and not any_healthy and emitted["no_healthy_targets"] < cfg.max_findings_per_type:
                 emitted["no_healthy_targets"] += 1
+                optimization_focus = _no_healthy_optimization_focus(is_idle=is_idle)
                 yield FindingDraft(
                     check_id="aws.elbv2.load.balancers.no.healthy.targets",
                     check_name=self._CHECK_NAME,
@@ -756,7 +795,11 @@ class ElbV2LoadBalancersChecker:
                     recommendation="Investigate target group health checks, security groups, and target configuration.",
                     tags=tags,
                     issue_key={"check_id": "aws.elbv2.load.balancers.no.healthy.targets", "lb_arn": arn},
-                    dimensions=lb_dimensions,
+                    dimensions={
+                        **lb_dimensions,
+                        "optimization_focus": optimization_focus,
+                        "target_count": str(target_count),
+                    },
                 )
 
             if idle_finding is not None and emitted["idle"] < cfg.max_findings_per_type:

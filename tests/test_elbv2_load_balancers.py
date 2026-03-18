@@ -161,6 +161,7 @@ def test_no_listeners_emits(monkeypatch: pytest.MonkeyPatch) -> None:
     assert hits[0].scope.resource_arn == arn
     assert hits[0].dimensions["vpc_id"] == "vpc-123"
     assert hits[0].dimensions["subnet_ids"] == "subnet-a,subnet-b"
+    assert hits[0].dimensions["optimization_focus"] == "delete_candidate"
 
 
 def test_idle_alb_emits(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -202,6 +203,8 @@ def test_idle_alb_emits(monkeypatch: pytest.MonkeyPatch) -> None:
     hits = [f for f in findings if f.check_id == "aws.elbv2.load.balancers.idle"]
     assert len(hits) == 1
     assert hits[0].scope.resource_id == "idle"
+    assert hits[0].dimensions["optimization_focus"] == "consolidation_review"
+    assert hits[0].dimensions["idle_metric"] == "RequestCount"
 
 
 def test_no_registered_targets_emits(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -246,6 +249,7 @@ def test_no_registered_targets_emits(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(hits) == 1
     assert hits[0].scope.resource_id == "notargets"
     assert hits[0].dimensions["target_group_arns"] == "tg-1"
+    assert hits[0].dimensions["optimization_focus"] == "register_targets_or_delete"
 
 
 def test_no_registered_targets_suppresses_duplicate_idle_savings(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -285,6 +289,8 @@ def test_no_registered_targets_suppresses_duplicate_idle_savings(monkeypatch: py
 
     assert len([f for f in findings if f.check_id == "aws.elbv2.load.balancers.no.registered.targets"]) == 1
     assert len([f for f in findings if f.check_id == "aws.elbv2.load.balancers.idle"]) == 0
+    hit = next(f for f in findings if f.check_id == "aws.elbv2.load.balancers.no.registered.targets")
+    assert hit.dimensions["optimization_focus"] == "delete_candidate"
 
 
 def test_no_healthy_targets_emits(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -325,6 +331,47 @@ def test_no_healthy_targets_emits(monkeypatch: pytest.MonkeyPatch) -> None:
     hits = [f for f in findings if f.check_id == "aws.elbv2.load.balancers.no.healthy.targets"]
     assert len(hits) == 1
     assert hits[0].scope.resource_id == "unhealthy"
+    assert hits[0].dimensions["optimization_focus"] == "fix_health_checks"
+    assert hits[0].dimensions["target_count"] == "1"
+
+
+def test_idle_with_no_healthy_targets_prefers_decommission_or_fix(monkeypatch: pytest.MonkeyPatch) -> None:
+    import checks.aws.elbv2_load_balancers as mod
+
+    now = datetime(2026, 1, 24, 12, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(mod, "now_utc", lambda: now)
+
+    arn = _lb_arn("app/unhealthy-idle/123")
+    lb = {
+        "LoadBalancerArn": arn,
+        "LoadBalancerName": "unhealthy-idle",
+        "Type": "application",
+        "Scheme": "internet-facing",
+        "CreatedTime": now - timedelta(days=10),
+    }
+
+    listener = {"ListenerArn": "lst-1", "DefaultActions": [{"Type": "forward", "TargetGroupArn": "tg-1"}]}
+    tg = {"TargetGroupArn": "tg-1", "TargetType": "instance"}
+
+    elbv2 = FakeElbv2(
+        region="eu-west-3",
+        pages_by_op={
+            "describe_load_balancers": [{"LoadBalancers": [lb]}],
+            "describe_listeners": [{"Listeners": [listener]}],
+            "describe_target_groups": [{"TargetGroups": [tg]}],
+        },
+    )
+    elbv2.set_target_health("tg-1", [{"TargetHealth": {"State": "unhealthy"}}])
+
+    cw = FakeCloudWatch(by_id={"m0": [0.0] * 14})
+    ctx = _mk_ctx(elbv2=elbv2, cloudwatch=cw, pricing=FakePricing())
+
+    cfg = ElbV2LoadBalancersConfig(lookback_days=14, idle_p95_daily_requests_threshold=1.0)
+    checker = ElbV2LoadBalancersChecker(account_id="123", billing_account_id="123", cfg=cfg)
+    findings = list(checker.run(ctx))
+
+    hit = next(f for f in findings if f.check_id == "aws.elbv2.load.balancers.no.healthy.targets")
+    assert hit.dimensions["optimization_focus"] == "decommission_or_fix_health_checks"
 
 
 def test_access_denied_emits_access_error(monkeypatch: pytest.MonkeyPatch) -> None:
