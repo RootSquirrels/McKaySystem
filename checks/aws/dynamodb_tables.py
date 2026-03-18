@@ -15,7 +15,11 @@ from checks.aws.defaults import (
     DYNAMODB_LOOKBACK_DAYS,
     DYNAMODB_MAX_FINDINGS_PER_TYPE,
     DYNAMODB_MIN_DATAPOINTS,
+    DYNAMODB_MOVE_TO_ON_DEMAND_UTIL_THRESHOLD_PCT,
+    DYNAMODB_STANDARD_IA_MAX_UTIL_THRESHOLD_PCT,
+    DYNAMODB_STANDARD_IA_MIN_TABLE_SIZE_GIB,
     DYNAMODB_UNDERUTILIZED_UTIL_THRESHOLD_PCT,
+    DYNAMODB_UNUSED_GSI_MAX_P95_CAPACITY_UNITS,
 )
 from checks.registry import Bootstrap, register_checker
 from contracts.finops_checker_pattern import Checker, FindingDraft, RunContext, Severity
@@ -30,6 +34,10 @@ class DynamoDbTablesConfig:
     lookback_days: int = DYNAMODB_LOOKBACK_DAYS
     min_datapoints: int = DYNAMODB_MIN_DATAPOINTS
     underutilized_util_threshold_pct: float = DYNAMODB_UNDERUTILIZED_UTIL_THRESHOLD_PCT
+    move_to_on_demand_util_threshold_pct: float = DYNAMODB_MOVE_TO_ON_DEMAND_UTIL_THRESHOLD_PCT
+    unused_gsi_max_p95_capacity_units: float = DYNAMODB_UNUSED_GSI_MAX_P95_CAPACITY_UNITS
+    standard_ia_max_util_threshold_pct: float = DYNAMODB_STANDARD_IA_MAX_UTIL_THRESHOLD_PCT
+    standard_ia_min_table_size_gib: float = DYNAMODB_STANDARD_IA_MIN_TABLE_SIZE_GIB
     max_findings_per_type: int = DYNAMODB_MAX_FINDINGS_PER_TYPE
 
 
@@ -123,6 +131,60 @@ def _p95(values: Sequence[float]) -> float | None:
     return common.percentile(values, 95.0, method="floor")
 
 
+def _table_underutilized_focus(*, util_pct: float, cfg: DynamoDbTablesConfig) -> tuple[str, str]:
+    """Return the best-fit optimization focus for an underutilized table."""
+
+    if util_pct <= float(cfg.move_to_on_demand_util_threshold_pct):
+        return (
+            "move_to_on_demand_review",
+            "Review on-demand billing or a much lower provisioned baseline if the current usage pattern is steady.",
+        )
+    return (
+        "downsize_or_auto_scale_capacity",
+        "Lower provisioned read/write capacity or enable Application Auto Scaling if peaks do not justify the current baseline.",
+    )
+
+
+def _gsi_focus(
+    *,
+    util_pct: float,
+    p95_read: float,
+    p95_write: float,
+    cfg: DynamoDbTablesConfig,
+) -> tuple[str, str, str]:
+    """Return check identity and guidance for a low-utilization GSI."""
+
+    if (
+        util_pct <= float(cfg.move_to_on_demand_util_threshold_pct)
+        and p95_read <= float(cfg.unused_gsi_max_p95_capacity_units)
+        and p95_write <= float(cfg.unused_gsi_max_p95_capacity_units)
+    ):
+        return (
+            "aws.dynamodb.gsi.possibly.unused",
+            "delete_or_consolidate_gsi",
+            "Review whether this GSI is still required. If query patterns no longer depend on it, delete it; otherwise sharply reduce provisioned capacity or enable auto scaling.",
+        )
+    return (
+        "aws.dynamodb.gsi.provisioned.underutilized",
+        "downsize_or_auto_scale_gsi",
+        "Review GSI provisioned read/write capacity or enable auto scaling if current throughput materially exceeds observed demand.",
+    )
+
+
+def _table_class_is_standard(table: Mapping[str, Any]) -> bool:
+    """Return whether the table is using the Standard table class."""
+
+    table_class = str(((table.get("TableClassSummary") or {}).get("TableClass")) or "STANDARD").upper()
+    return table_class == "STANDARD"
+
+
+def _table_size_gib(table: Mapping[str, Any]) -> float:
+    """Return table size in GiB."""
+
+    size_bytes = _to_int(table.get("TableSizeBytes"))
+    return float(size_bytes) / float(1024**3)
+
+
 class DynamoDbTablesChecker(Checker):
     """Detect provisioned DynamoDB tables and GSIs with low observed utilization."""
 
@@ -214,6 +276,10 @@ class DynamoDbTablesChecker(Checker):
                 if emitted >= self._cfg.max_findings_per_type:
                     return
                 emitted += 1
+                optimization_focus, focus_recommendation = _table_underutilized_focus(
+                    util_pct=table_util_pct,
+                    cfg=self._cfg,
+                )
                 yield FindingDraft(
                     check_id="aws.dynamodb.table.provisioned.underutilized",
                     check_name="DynamoDB provisioned table underutilized",
@@ -234,10 +300,7 @@ class DynamoDbTablesChecker(Checker):
                         f"Observed p95 provisioned-capacity utilization is {table_util_pct:.2f}% over the last "
                         f"{self._cfg.lookback_days} days."
                     ),
-                    recommendation=(
-                        "Review provisioned read/write capacity or enable Application Auto Scaling if workload "
-                        "peaks do not justify the current baseline."
-                    ),
+                    recommendation=focus_recommendation,
                     dimensions={
                         "table_name": table_name,
                         "billing_mode": billing_mode,
@@ -246,9 +309,56 @@ class DynamoDbTablesChecker(Checker):
                         "p95_consumed_read_units": f"{utilization['p95_read']:.2f}",
                         "p95_consumed_write_units": f"{utilization['p95_write']:.2f}",
                         "p95_utilization_pct": f"{table_util_pct:.2f}",
+                        "optimization_focus": optimization_focus,
                     },
                     issue_key={"signal": "table_underutilized", "table_name": table_name},
                 )
+                table_size_gib = _table_size_gib(table)
+                if (
+                    _table_class_is_standard(table)
+                    and table_size_gib >= float(self._cfg.standard_ia_min_table_size_gib)
+                    and table_util_pct <= float(self._cfg.standard_ia_max_util_threshold_pct)
+                ):
+                    if emitted >= self._cfg.max_findings_per_type:
+                        return
+                    emitted += 1
+                    yield FindingDraft(
+                        check_id="aws.dynamodb.table.class.standard_ia.review",
+                        check_name="DynamoDB Standard-IA table class review",
+                        category="cost",
+                        status="info",
+                        severity=Severity(level="low", score=250),
+                        title=f"DynamoDB table may fit Standard-IA pricing better: {table_name}",
+                        scope=build_scope(
+                            ctx,
+                            account=self._account,
+                            region=region,
+                            service="dynamodb",
+                            resource_type="table",
+                            resource_id=table_name,
+                            resource_arn=table_arn,
+                        ),
+                        message=(
+                            f"Table size is {table_size_gib:.2f} GiB and observed p95 provisioned-capacity utilization "
+                            f"is {table_util_pct:.2f}% over the last {self._cfg.lookback_days} days."
+                        ),
+                        recommendation=(
+                            "Review whether the Standard-IA table class fits this storage-heavy, low-traffic table "
+                            "better than Standard pricing."
+                        ),
+                        dimensions={
+                            "table_name": table_name,
+                            "billing_mode": billing_mode,
+                            "table_class": "STANDARD",
+                            "table_size_gib": f"{table_size_gib:.2f}",
+                            "item_count": str(_to_int(table.get("ItemCount"))),
+                            "p95_consumed_read_units": f"{utilization['p95_read']:.2f}",
+                            "p95_consumed_write_units": f"{utilization['p95_write']:.2f}",
+                            "p95_utilization_pct": f"{table_util_pct:.2f}",
+                            "optimization_focus": "standard_ia_review",
+                        },
+                        issue_key={"signal": "table_class_review", "table_name": table_name},
+                    )
 
             for gsi in table.get("GlobalSecondaryIndexes", []) or []:
                 if not isinstance(gsi, Mapping):
@@ -292,13 +402,30 @@ class DynamoDbTablesChecker(Checker):
                 if emitted >= self._cfg.max_findings_per_type:
                     return
                 emitted += 1
+                check_id, optimization_focus, focus_recommendation = _gsi_focus(
+                    util_pct=gsi_util_pct,
+                    p95_read=float(gsi_utilization.get("p95_read") or 0.0),
+                    p95_write=float(gsi_utilization.get("p95_write") or 0.0),
+                    cfg=self._cfg,
+                )
                 yield FindingDraft(
-                    check_id="aws.dynamodb.gsi.provisioned.underutilized",
-                    check_name="DynamoDB provisioned GSI underutilized",
+                    check_id=check_id,
+                    check_name=(
+                        "DynamoDB GSI possibly unused"
+                        if check_id == "aws.dynamodb.gsi.possibly.unused"
+                        else "DynamoDB provisioned GSI underutilized"
+                    ),
                     category="cost",
                     status="info",
-                    severity=Severity(level="low", score=270),
-                    title=f"DynamoDB GSI provisioned throughput appears underutilized: {index_name}",
+                    severity=Severity(
+                        level="low",
+                        score=290 if check_id == "aws.dynamodb.gsi.possibly.unused" else 270,
+                    ),
+                    title=(
+                        f"DynamoDB GSI may be unused: {index_name}"
+                        if check_id == "aws.dynamodb.gsi.possibly.unused"
+                        else f"DynamoDB GSI provisioned throughput appears underutilized: {index_name}"
+                    ),
                     scope=build_scope(
                         ctx,
                         account=self._account,
@@ -312,10 +439,7 @@ class DynamoDbTablesChecker(Checker):
                         f"Observed p95 provisioned-capacity utilization for GSI '{index_name}' is "
                         f"{gsi_util_pct:.2f}% over the last {self._cfg.lookback_days} days."
                     ),
-                    recommendation=(
-                        "Review GSI provisioned read/write capacity or auto scaling if current throughput "
-                        "materially exceeds observed demand."
-                    ),
+                    recommendation=focus_recommendation,
                     dimensions={
                         "table_name": table_name,
                         "gsi_name": index_name,
@@ -324,9 +448,10 @@ class DynamoDbTablesChecker(Checker):
                         "p95_consumed_read_units": f"{gsi_utilization['p95_read']:.2f}",
                         "p95_consumed_write_units": f"{gsi_utilization['p95_write']:.2f}",
                         "p95_utilization_pct": f"{gsi_util_pct:.2f}",
+                        "optimization_focus": optimization_focus,
                     },
                     issue_key={
-                        "signal": "gsi_underutilized",
+                        "signal": "gsi_possibly_unused" if check_id == "aws.dynamodb.gsi.possibly.unused" else "gsi_underutilized",
                         "table_name": table_name,
                         "gsi_name": index_name,
                     },
