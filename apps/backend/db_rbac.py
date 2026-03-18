@@ -423,36 +423,80 @@ def list_users_page(conn: Any, *, query: UserListQuery) -> tuple[list[dict[str, 
         params.extend([pattern, pattern, pattern])
 
     sql_items = f"""
+        WITH base_users AS (
+          SELECT
+            u.tenant_id,
+            u.workspace,
+            u.user_id,
+            u.email,
+            u.full_name,
+            u.external_id,
+            u.auth_provider,
+            u.is_active,
+            u.is_superadmin,
+            u.last_login_at,
+            u.created_at,
+            u.updated_at,
+            uwr.role_id AS direct_role_id,
+            r_direct.name AS direct_role_name,
+            trb.role_id AS inherited_role_id,
+            r_inherited.name AS inherited_role_name,
+            trb.source_workspace AS inherited_source_workspace
+          FROM users u
+          LEFT JOIN user_workspace_roles uwr
+            ON uwr.tenant_id = u.tenant_id
+           AND uwr.workspace = u.workspace
+           AND uwr.user_id = u.user_id
+          LEFT JOIN roles r_direct
+            ON r_direct.tenant_id = uwr.tenant_id
+           AND r_direct.workspace = uwr.workspace
+           AND r_direct.role_id = uwr.role_id
+          LEFT JOIN tenant_role_bindings trb
+            ON trb.tenant_id = u.tenant_id
+           AND trb.workspace = %s
+           AND trb.user_id = u.user_id
+           AND trb.applies_to_future_workspaces = TRUE
+          LEFT JOIN roles r_inherited
+            ON r_inherited.tenant_id = trb.tenant_id
+           AND r_inherited.workspace = trb.source_workspace
+           AND r_inherited.role_id = trb.role_id
+          WHERE {" AND ".join(where)}
+        )
         SELECT
-          u.tenant_id,
-          u.workspace,
-          u.user_id,
-          u.email,
-          u.full_name,
-          u.external_id,
-          u.auth_provider,
-          u.is_active,
-          u.is_superadmin,
-          u.last_login_at,
-          u.created_at,
-          u.updated_at,
-          uwr.role_id,
-          r.name AS role_name
-        FROM users u
-        LEFT JOIN user_workspace_roles uwr
-          ON uwr.tenant_id = u.tenant_id
-         AND uwr.workspace = u.workspace
-         AND uwr.user_id = u.user_id
-        LEFT JOIN roles r
-          ON r.tenant_id = uwr.tenant_id
-         AND r.workspace = uwr.workspace
-         AND r.role_id = uwr.role_id
-        WHERE {" AND ".join(where)}
-        ORDER BY u.email ASC, u.user_id ASC
+          tenant_id,
+          workspace,
+          user_id,
+          email,
+          full_name,
+          external_id,
+          auth_provider,
+          is_active,
+          is_superadmin,
+          last_login_at,
+          created_at,
+          updated_at,
+          COALESCE(direct_role_id, inherited_role_id) AS role_id,
+          COALESCE(direct_role_name, inherited_role_name) AS role_name,
+          CASE
+            WHEN direct_role_id IS NOT NULL THEN 'direct'
+            WHEN inherited_role_id IS NOT NULL THEN 'inherited'
+            ELSE NULL
+          END AS assignment_source,
+          CASE
+            WHEN direct_role_id IS NOT NULL THEN workspace
+            WHEN inherited_role_id IS NOT NULL THEN inherited_source_workspace
+            ELSE NULL
+          END AS source_workspace
+        FROM base_users
+        ORDER BY email ASC, user_id ASC
         LIMIT %s OFFSET %s
     """
     sql_count = f"SELECT COUNT(*)::bigint AS n FROM users u WHERE {' AND '.join(where)}"
-    rows = fetch_all_dict_conn(conn, sql_items, tuple(params + [query.limit, query.offset]))
+    rows = fetch_all_dict_conn(
+        conn,
+        sql_items,
+        tuple([TENANT_POLICY_WORKSPACE] + params + [query.limit, query.offset]),
+    )
     count_row = fetch_one_dict_conn(conn, sql_count, tuple(params))
     total = int((count_row or {}).get("n") or 0)
     return rows, total
@@ -932,6 +976,98 @@ def list_tenant_role_bindings(
             anchor_workspace,
         ),
     )
+
+
+def list_tenant_admin_audit_events(
+    conn: Any,
+    *,
+    tenant_id: str,
+    anchor_workspace: str,
+    limit: int = 100,
+    offset: int = 0,
+) -> tuple[list[dict[str, Any]], int]:
+    """Return tenant administration audit history for one tenant."""
+    rows = fetch_all_dict_conn(
+        conn,
+        """
+        SELECT
+          al.id,
+          al.tenant_id,
+          al.workspace,
+          al.entity_type,
+          al.entity_id,
+          al.event_type,
+          al.event_category,
+          al.previous_value,
+          al.new_value,
+          al.actor_id,
+          al.actor_email,
+          al.actor_name,
+          al.source,
+          al.correlation_id,
+          al.created_at
+        FROM audit_log al
+        WHERE al.tenant_id = %s
+          AND (
+            al.event_category = 'tenant_admin'
+            OR al.event_type = 'users.role.assigned_tenant'
+          )
+          AND (
+            EXISTS (
+              SELECT 1
+              FROM tenant_workspaces anchor
+              WHERE anchor.tenant_id = %s
+                AND anchor.workspace = %s
+            )
+            OR EXISTS (
+              SELECT 1
+              FROM roles anchor_role
+              WHERE anchor_role.tenant_id = %s
+                AND anchor_role.workspace = %s
+            )
+          )
+        ORDER BY al.created_at DESC, al.id DESC
+        LIMIT %s OFFSET %s
+        """,
+        (
+            tenant_id,
+            tenant_id,
+            anchor_workspace,
+            tenant_id,
+            anchor_workspace,
+            limit,
+            offset,
+        ),
+    )
+    count_row = fetch_one_dict_conn(
+        conn,
+        """
+        SELECT COUNT(*)::bigint AS n
+        FROM audit_log al
+        WHERE al.tenant_id = %s
+          AND (
+            al.event_category = 'tenant_admin'
+            OR al.event_type = 'users.role.assigned_tenant'
+          )
+          AND (
+            EXISTS (
+              SELECT 1
+              FROM tenant_workspaces anchor
+              WHERE anchor.tenant_id = %s
+                AND anchor.workspace = %s
+            )
+            OR EXISTS (
+              SELECT 1
+              FROM roles anchor_role
+              WHERE anchor_role.tenant_id = %s
+                AND anchor_role.workspace = %s
+            )
+          )
+        """,
+        (tenant_id, tenant_id, anchor_workspace, tenant_id, anchor_workspace),
+    )
+    total = int((count_row or {}).get("n") or 0)
+    return rows, total
 
 
 def get_tenant_role_binding(

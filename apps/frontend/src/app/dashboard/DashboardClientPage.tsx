@@ -71,6 +71,7 @@ export function DashboardClientPage() {
   const canReadFindings = permissions.has("admin:full") || permissions.has("findings:read");
   const canReadRuns = permissions.has("admin:full") || permissions.has("runs:read");
   const canReadUsers = permissions.has("admin:full") || permissions.has("users:read");
+  const isAdminFull = permissions.has("admin:full");
 
   const dashboard = useInitialValueKpis(canReadFindings);
 
@@ -135,6 +136,14 @@ export function DashboardClientPage() {
               {canReadUsers ? (
                 <Link className="rounded-full border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:bg-white/80" href="/users">
                   Users
+                </Link>
+              ) : null}
+              {isAdminFull ? (
+                <Link
+                  className="rounded-full border border-slate-300 px-4 py-2 text-sm text-slate-700 hover:bg-white/80"
+                  href="/tenant-admin"
+                >
+                  Tenant Admin
                 </Link>
               ) : null}
             </div>

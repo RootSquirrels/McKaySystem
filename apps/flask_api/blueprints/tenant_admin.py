@@ -21,6 +21,7 @@ from apps.flask_api.utils import (
     _err,
     _ok,
     _parse_bool,
+    _parse_int,
     _q,
     _require_scope_from_json,
     _require_scope_from_query,
@@ -85,6 +86,29 @@ def _public_tenant_binding(row: dict[str, Any] | None) -> dict[str, Any] | None:
         "granted_by": row.get("granted_by"),
         "granted_at": row.get("granted_at"),
         "updated_at": row.get("updated_at"),
+    }
+
+
+def _public_audit_event(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return public tenant admin audit event payload."""
+    if row is None:
+        return None
+    return {
+        "id": row.get("id"),
+        "tenant_id": row.get("tenant_id"),
+        "workspace": row.get("workspace"),
+        "entity_type": row.get("entity_type"),
+        "entity_id": row.get("entity_id"),
+        "event_type": row.get("event_type"),
+        "event_category": row.get("event_category"),
+        "previous_value": row.get("previous_value"),
+        "new_value": row.get("new_value"),
+        "actor_id": row.get("actor_id"),
+        "actor_email": row.get("actor_email"),
+        "actor_name": row.get("actor_name"),
+        "source": row.get("source"),
+        "correlation_id": row.get("correlation_id"),
+        "created_at": row.get("created_at"),
     }
 
 
@@ -285,6 +309,36 @@ def api_tenant_admin_role_bindings_list() -> Any:
                 "workspace": workspace,
                 "total": len(rows),
                 "items": [_public_tenant_binding(row) for row in rows],
+            }
+        )
+    except ValueError as exc:
+        return _err("bad_request", str(exc), status=400)
+
+
+@tenant_admin_bp.route("/api/tenant-admin/audit", methods=["GET"])
+@require_permission("admin:full")
+def api_tenant_admin_audit_list() -> Any:
+    """List tenant administration audit events."""
+    try:
+        tenant_id, workspace = _require_scope_from_query()
+        limit = _parse_int(_q("limit"), default=50, min_v=1, max_v=500)
+        offset = _parse_int(_q("offset"), default=0, min_v=0, max_v=5_000_000)
+        with db_conn() as conn:
+            rows, total = db_rbac.list_tenant_admin_audit_events(
+                conn,
+                tenant_id=tenant_id,
+                anchor_workspace=workspace,
+                limit=limit,
+                offset=offset,
+            )
+        return _ok(
+            {
+                "tenant_id": tenant_id,
+                "workspace": workspace,
+                "limit": limit,
+                "offset": offset,
+                "total": total,
+                "items": [_public_audit_event(row) for row in rows],
             }
         )
     except ValueError as exc:

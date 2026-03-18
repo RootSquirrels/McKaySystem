@@ -58,6 +58,8 @@ def _public_user(row: dict[str, Any] | None) -> dict[str, Any] | None:
         "updated_at": row.get("updated_at"),
         "role_id": row.get("role_id"),
         "role_name": row.get("role_name"),
+        "assignment_source": row.get("assignment_source"),
+        "source_workspace": row.get("source_workspace"),
     }
 
 
@@ -742,7 +744,7 @@ def api_users_get_role(user_id: str) -> Any:
             if user is None:
                 return _err("not_found", "user not found", status=404)
 
-            assignment = db_rbac.get_user_workspace_role(
+            assignment = db_rbac.get_effective_workspace_role(
                 conn,
                 tenant_id=tenant_id,
                 workspace=workspace,
@@ -759,16 +761,17 @@ def api_users_get_role(user_id: str) -> Any:
                 )
 
             role_id = str(assignment.get("role_id") or "")
+            role_workspace = str(assignment.get("source_workspace") or workspace)
             role = db_rbac.get_role_by_id(
                 conn,
                 tenant_id=tenant_id,
-                workspace=workspace,
+                workspace=role_workspace,
                 role_id=role_id,
             )
             permissions = db_rbac.get_role_permissions(
                 conn,
                 tenant_id=tenant_id,
-                workspace=workspace,
+                workspace=role_workspace,
                 role_id=role_id,
             )
 
@@ -784,6 +787,8 @@ def api_users_get_role(user_id: str) -> Any:
                     "is_system": bool((role or {}).get("is_system")),
                     "granted_by": assignment.get("granted_by"),
                     "granted_at": assignment.get("granted_at"),
+                    "assignment_source": assignment.get("assignment_source"),
+                    "source_workspace": assignment.get("source_workspace"),
                     "permissions": permissions,
                 },
             }

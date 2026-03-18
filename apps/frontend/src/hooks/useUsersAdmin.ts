@@ -20,6 +20,8 @@ export interface UserItem {
   updated_at: string | null;
   role_id: string | null;
   role_name: string | null;
+  assignment_source: string | null;
+  source_workspace: string | null;
 }
 
 export interface UsersResponse {
@@ -39,6 +41,8 @@ export interface UserRole {
   is_system: boolean;
   granted_by: string | null;
   granted_at: string | null;
+  assignment_source: string | null;
+  source_workspace: string | null;
   permissions: string[];
 }
 

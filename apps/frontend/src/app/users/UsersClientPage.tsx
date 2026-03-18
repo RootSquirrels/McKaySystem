@@ -302,6 +302,17 @@ export function UsersClientPage() {
                 Recommendations
               </button>
             ) : null}
+            {isAdminFull ? (
+              <button
+                type="button"
+                className="finops-toolbar-btn rounded-lg px-3 py-2 text-sm font-medium transition"
+                onClick={() => {
+                  router.push("/tenant-admin");
+                }}
+              >
+                Tenant Admin
+              </button>
+            ) : null}
             <button
               type="button"
               className="rounded-lg border border-rose-300 bg-rose-50 px-3 py-2 text-sm font-medium text-rose-700 transition hover:border-rose-400 hover:bg-rose-100"
