@@ -55,6 +55,8 @@ from checks.aws._common import (
 )
 from checks.aws.defaults import (
     EFS_LOOKBACK_DAYS,
+    EFS_LOW_ACCESS_MAX_CLIENT_CONNECTIONS_THRESHOLD,
+    EFS_LOW_ACCESS_P95_DAILY_IO_BYTES_THRESHOLD,
     EFS_MAX_FINDINGS_PER_TYPE,
     EFS_MIN_DAILY_DATAPOINTS,
     EFS_PERCENT_IO_LIMIT_PERIOD_SECONDS,
@@ -82,6 +84,9 @@ class EFSFileSystemsConfig:
     unused_p95_daily_io_bytes_threshold: float = EFS_UNUSED_P95_DAILY_IO_BYTES_THRESHOLD
     # Max client connections over window must be <= this threshold
     unused_max_client_connections_threshold: float = EFS_UNUSED_MAX_CLIENT_CONNECTIONS_THRESHOLD
+    # "Low-access" heuristics for lifecycle tiering review
+    low_access_p95_daily_io_bytes_threshold: float = EFS_LOW_ACCESS_P95_DAILY_IO_BYTES_THRESHOLD
+    low_access_max_client_connections_threshold: float = EFS_LOW_ACCESS_MAX_CLIENT_CONNECTIONS_THRESHOLD
 
     # Provisioned throughput underutilization
     underutilized_p95_percent_io_limit_threshold: float = EFS_UNDERUTILIZED_P95_PERCENT_IO_LIMIT_THRESHOLD
@@ -127,6 +132,16 @@ def _extract_client_error_code(err: Exception) -> str:
         except (AttributeError, TypeError, ValueError):  # pragma: no cover
             return ""
     return ""
+
+
+def _suggest_throughput_mode(*, io_p95: float, conn_max: float, cfg: EFSFileSystemsConfig) -> str:
+    """Return the more specific throughput mode suggestion for low-demand filesystems."""
+    if (
+        io_p95 <= float(cfg.low_access_p95_daily_io_bytes_threshold)
+        and conn_max <= float(cfg.low_access_max_client_connections_threshold)
+    ):
+        return "elastic"
+    return "elastic_or_bursting"
 
 
 class EFSFileSystemsChecker(Checker):
@@ -358,11 +373,18 @@ class EFSFileSystemsChecker(Checker):
             ] if m.get("read") and m.get("write") else []
             io_p95 = _p95(daily_io) if daily_io else 0.0
             conn_max = max(m.get("conn", []) or [0.0])
-            if (
+            is_unused = (
                 len(daily_io) >= int(cfg.min_daily_datapoints)
                 and io_p95 <= float(cfg.unused_p95_daily_io_bytes_threshold)
                 and conn_max <= float(cfg.unused_max_client_connections_threshold)
-            ):
+            )
+            is_low_access = (
+                len(daily_io) >= int(cfg.min_daily_datapoints)
+                and not is_unused
+                and io_p95 <= float(cfg.low_access_p95_daily_io_bytes_threshold)
+                and conn_max <= float(cfg.low_access_max_client_connections_threshold)
+            )
+            if is_unused:
                 check_id = "aws.efs.filesystems.unused"
                 if not _cap(check_id):
                     yield FindingDraft(
@@ -393,7 +415,12 @@ class EFSFileSystemsChecker(Checker):
                 p95_vals = m.get("p95", []) or []
                 # We requested p95 over hourly periods; take max as a conservative "worst" p95 signal
                 p95_pct = max(p95_vals) if p95_vals else 0.0
-                if p95_vals and p95_pct <= float(cfg.underutilized_p95_percent_io_limit_threshold):
+                if (
+                    p95_vals
+                    and not is_unused
+                    and p95_pct <= float(cfg.underutilized_p95_percent_io_limit_threshold)
+                ):
+                    suggested_mode = _suggest_throughput_mode(io_p95=io_p95, conn_max=conn_max, cfg=cfg)
                     check_id = "aws.efs.filesystems.provisioned.throughput.underutilized"
                     if not _cap(check_id):
                         yield FindingDraft(
@@ -406,20 +433,22 @@ class EFSFileSystemsChecker(Checker):
                             scope=scope,
                             message=(
                                 "Provisioned throughput mode appears oversized for observed demand based on "
-                                "PercentIOLimit. Review whether elastic or bursting throughput would fit this "
+                                "PercentIOLimit. Review whether a lower-cost throughput mode would fit this "
                                 "filesystem better."
                             ),
                             recommendation=(
-                                "If performance allows, switch to elastic or bursting throughput, or reduce the "
-                                "provisioned throughput setting to lower cost."
+                                f"If performance allows, switch to {suggested_mode.replace('_', ' ')} throughput, "
+                                "or reduce the provisioned throughput setting to lower cost."
                             ),
                             tags=tags,
                             dimensions={
                                 "lookback_days": str(cfg.lookback_days),
                                 "p95_percent_io_limit_max": f"{p95_pct:.2f}",
+                                "p95_daily_io_bytes": f"{io_p95:.0f}",
+                                "max_client_connections": f"{conn_max:.0f}",
                                 "throughput_mode": throughput_mode,
                                 "provisioned_throughput_mibps": _safe_str(fs.get("ProvisionedThroughputInMibps")),
-                                "suggested_throughput_mode": "elastic_or_bursting",
+                                "suggested_throughput_mode": suggested_mode,
                             },
                             issue_key={"check_id": check_id, "file_system_id": fs_id},
                         )
@@ -454,7 +483,36 @@ class EFSFileSystemsChecker(Checker):
                             dimensions={"transition_to_ia": "true", "transition_to_archive": "false"},
                             issue_key={"check_id": archive_check_id, "file_system_id": fs_id},
                         )
-                if not has_ia and not has_archive:
+                if not has_ia and is_low_access:
+                    ia_review_check_id = "aws.efs.filesystems.lifecycle.ia.review"
+                    if not _cap(ia_review_check_id):
+                        yield FindingDraft(
+                            check_id=ia_review_check_id,
+                            check_name=self._CHECK_NAME,
+                            category=self._CATEGORY_COST,
+                            status="info",
+                            severity=Severity(level="low", score=390),
+                            title="EFS lifecycle may benefit from IA transition review",
+                            scope=scope,
+                            message=(
+                                "Observed activity is low enough to review EFS infrequent-access transitions, but the "
+                                "filesystem is not completely unused. Review whether colder files can move to IA first."
+                            ),
+                            recommendation=(
+                                "Review enabling an EFS IA lifecycle transition for colder files, then consider Archive "
+                                "transitions later if long-retention data remains infrequently accessed."
+                            ),
+                            tags=tags,
+                            dimensions={
+                                "transition_to_ia": "false",
+                                "transition_to_archive": "false" if not has_archive else "true",
+                                "p95_daily_io_bytes": f"{io_p95:.0f}",
+                                "max_client_connections": f"{conn_max:.0f}",
+                                "lookback_days": str(cfg.lookback_days),
+                            },
+                            issue_key={"check_id": ia_review_check_id, "file_system_id": fs_id},
+                        )
+                if not has_ia and not has_archive and not is_low_access:
                     if not _cap(check_id):
                         yield FindingDraft(
                             check_id=check_id,
@@ -474,7 +532,36 @@ class EFSFileSystemsChecker(Checker):
                 code = _extract_client_error_code(exc)
                 # PolicyNotFound => no lifecycle config set
                 if code in ("PolicyNotFound", "LifecyclePolicyNotFound", "NoSuchLifecycleConfiguration"):
-                    if not _cap(check_id):
+                    if is_low_access:
+                        ia_review_check_id = "aws.efs.filesystems.lifecycle.ia.review"
+                        if not _cap(ia_review_check_id):
+                            yield FindingDraft(
+                                check_id=ia_review_check_id,
+                                check_name=self._CHECK_NAME,
+                                category=self._CATEGORY_COST,
+                                status="info",
+                                severity=Severity(level="low", score=390),
+                                title="EFS lifecycle may benefit from IA transition review",
+                                scope=scope,
+                                message=(
+                                    "Observed activity is low enough to review EFS infrequent-access transitions, but the "
+                                    "filesystem is not completely unused. Review whether colder files can move to IA first."
+                                ),
+                                recommendation=(
+                                    "Review enabling an EFS IA lifecycle transition for colder files, then consider Archive "
+                                    "transitions later if long-retention data remains infrequently accessed."
+                                ),
+                                tags=tags,
+                                dimensions={
+                                    "transition_to_ia": "false",
+                                    "transition_to_archive": "false",
+                                    "p95_daily_io_bytes": f"{io_p95:.0f}",
+                                    "max_client_connections": f"{conn_max:.0f}",
+                                    "lookback_days": str(cfg.lookback_days),
+                                },
+                                issue_key={"check_id": ia_review_check_id, "file_system_id": fs_id},
+                            )
+                    elif not _cap(check_id):
                         yield FindingDraft(
                             check_id=check_id,
                             check_name=self._CHECK_NAME,

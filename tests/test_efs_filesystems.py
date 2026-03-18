@@ -174,7 +174,36 @@ def test_provisioned_throughput_underutilized_emits(monkeypatch: pytest.MonkeyPa
 
     hits = [f for f in findings if f.check_id == "aws.efs.filesystems.provisioned.throughput.underutilized"]
     assert len(hits) == 1
-    assert hits[0].dimensions.get("suggested_throughput_mode") == "elastic_or_bursting"
+    assert hits[0].dimensions.get("suggested_throughput_mode") == "elastic"
+    assert hits[0].dimensions.get("p95_daily_io_bytes") == "2000"
+    assert hits[0].dimensions.get("max_client_connections") == "1"
+
+
+def test_low_access_without_lifecycle_emits_ia_review(monkeypatch: pytest.MonkeyPatch) -> None:
+    import checks.aws.efs_filesystems as mod
+
+    monkeypatch.setattr(mod, "now_utc", lambda: datetime(2026, 1, 27, 12, 0, 0, tzinfo=timezone.utc))
+
+    efs = FakeEFS(region="eu-west-1", file_systems=[_fs(fs_id="fs-1")], lifecycle_policy_not_found={"fs-1"})
+    cw = FakeCloudWatch(
+        values_by_id={
+            "m0r": [1024.0] * 10,
+            "m0w": [1024.0] * 10,
+            "m0c": [2.0] * 10,
+            "m0p": [0.0] * 10,
+        }
+    )
+    ctx = _mk_ctx(efs=efs, cloudwatch=cw)
+
+    checker = EFSFileSystemsChecker(account_id="111111111111", cfg=EFSFileSystemsConfig())
+    findings = list(checker.run(ctx))
+
+    ia_hits = [f for f in findings if f.check_id == "aws.efs.filesystems.lifecycle.ia.review"]
+    assert len(ia_hits) == 1
+    assert ia_hits[0].dimensions["transition_to_ia"] == "false"
+    assert ia_hits[0].dimensions["transition_to_archive"] == "false"
+    assert ia_hits[0].dimensions["max_client_connections"] == "2"
+    assert [f for f in findings if f.check_id == "aws.efs.filesystems.lifecycle.missing"] == []
 
 
 def test_archive_review_emits_when_ia_exists_without_archive(monkeypatch: pytest.MonkeyPatch) -> None:
