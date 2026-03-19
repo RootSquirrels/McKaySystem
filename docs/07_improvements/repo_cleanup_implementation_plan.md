@@ -159,3 +159,19 @@ Success criteria:
 - public-doc cleanup
 - compatibility cleanup in the API/backend layer
 - comment cleanup in touched modules
+
+## Progress snapshot
+
+Completed in the current cleanup track:
+
+- public API and overview docs now use plainer, more product-facing wording
+- leaked personal filesystem paths were removed from repo docs
+- several Flask API blueprints now use shared audit helpers instead of local copies
+- small API endpoints such as health and facets now follow the shared response style
+- package and module headers in the Flask API layer were simplified
+
+Still open:
+
+- broader compatibility-path review across the remaining API surface
+- cleanup of stale comments and transitional wording outside the Flask API layer
+- a final sweep for encoding and formatting issues in older docs

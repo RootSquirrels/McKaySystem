@@ -1,14 +1,4 @@
-"""Flask API utilities package.
-
-This package contains shared utilities for the Flask API, organized into focused modules:
-- responses: Standardized HTTP response helpers
-- params: Query and payload parameter parsing
-- payload: Payload extraction and transformation helpers
-- db_utils: Database and state management helpers (when needed)
-- openapi: OpenAPI specification generation
-"""
-
-# Re-export commonly used functions for convenience
+"""Shared Flask API utility exports."""
 from apps.flask_api.utils.params import (
     _MISSING,
     _coerce_non_negative_int,

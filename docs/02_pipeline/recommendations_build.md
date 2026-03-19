@@ -78,7 +78,7 @@ Invoke-RestMethod `
 3. `recommendations API item`:
    - normalized plan (`recommendation_type`, `action_type`, `target`, `priority`, `requires_approval`)
    - confidence model v1 with:
-     - `confidence` / `confidence_label` for backward compatibility
+     - `confidence` / `confidence_label` for compatibility with older clients
      - `confidence_model.issue`
      - `confidence_model.savings`
      - `confidence_model.action_safety`

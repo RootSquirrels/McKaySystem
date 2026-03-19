@@ -51,7 +51,7 @@ Related:
 | Teams | Yes | Yes | `beta` | Public collaboration surface, but still needs stronger contract polish |
 | SLA policies | Yes | Yes | `beta` | Admin surface with usable semantics, but not yet formally stabilized |
 | Audit query | Yes | Yes | `beta` | Public/admin-support surface, but field contract and export behavior remain to be stabilized |
-| Lifecycle mutations | Yes | Yes | `compatibility` | Still uses older payload and error conventions; public but not the target contract style |
+| Lifecycle mutations | Yes | Yes | `compatibility` | Still uses older payload and error conventions; public, but not the target contract style |
 
 ---
 

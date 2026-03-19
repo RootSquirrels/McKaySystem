@@ -72,7 +72,7 @@ _API_ROUTE_SLOS_MS: dict[str, int] = {
 
 
 def _canonical_api_path(path: str) -> str:
-    """Normalize versioned API paths to canonical /api/* paths."""
+    """Normalize versioned API paths to the canonical /api/* form."""
     value = str(path or "")
     if not value.startswith("/api/"):
         return value
@@ -86,7 +86,7 @@ def _canonical_api_path(path: str) -> str:
 
 
 def _rule_to_openapi_path(path: str) -> str:
-    """Convert Flask route params (<id>, <int:id>) to OpenAPI style ({id})."""
+    """Convert Flask route params to OpenAPI-style path parameters."""
     return re.sub(r"<(?:[^:>]+:)?([^>]+)>", r"{\1}", str(path or ""))
 
 
@@ -642,11 +642,11 @@ def _build_openapi_spec() -> dict[str, Any]:
         "info": {
             "title": "McKaySystem API",
             "version": _API_VERSION,
-            "description": "Generated from Flask routes; versioned and legacy API bases are both supported.",
+            "description": "Generated from Flask routes. Both versioned and compatibility API bases are exposed.",
         },
         "servers": [
             {"url": _API_PREFIX, "description": f"Versioned API base ({_API_VERSION})"},
-            {"url": "/api", "description": "Legacy API base (compatibility)"},
+            {"url": "/api", "description": "Compatibility API base"},
         ],
         "paths": dict(sorted(paths.items(), key=lambda kv: kv[0])),
         "components": {
@@ -685,10 +685,6 @@ def api_version() -> Any:
         }
     )
 
-
-# --------------------
-# Small parsing helpers
-# --------------------
 
 def _now_utc() -> datetime:
     return datetime.now(UTC)
@@ -849,7 +845,7 @@ _apply_finding_sla_extension = findings_module._apply_finding_sla_extension
 
 
 def _install_blueprint_backcompat_shims() -> None:
-    """Bind blueprint internals to flask_app symbols for monkeypatch compatibility."""
+    """Bind shared symbols onto blueprint modules for test monkeypatching."""
 
     def _db_conn_proxy() -> Any:
         return db_conn()

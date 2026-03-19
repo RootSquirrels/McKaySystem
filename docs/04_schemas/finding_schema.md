@@ -116,7 +116,7 @@ The architecture follows a **lakehouse-inspired 3-layer model**:
 | `title` | string | Short title |
 | `message` | string | Detailed description |
 | `advice` | string | Checker-authored guidance text (canonical) |
-| `recommendation` | string | Legacy alias of `advice` (backward compatibility) |
+| `recommendation` | string | Compatibility alias of `advice` |
 | `remediation` | string | Step-by-step guidance |
 | `links` | list<struct> | Console, docs, tickets |
 

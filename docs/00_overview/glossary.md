@@ -102,7 +102,8 @@ cloud account/subscription/project scope.
 
 ### Finding
 
-A **Finding** is a deterministic, run-scoped observation about a cloud resource that indicates:
+A **Finding** is a deterministic, run-scoped observation about a cloud
+resource that indicates:
 
 - a policy violation,
 - a risk,
@@ -110,7 +111,8 @@ A **Finding** is a deterministic, run-scoped observation about a cloud resource 
 
 A finding describes **what is true**, not what should be done.
 
-It is factual, measurable, and derived solely from observed infrastructure state, metrics, and rules defined in the system.
+It is factual, measurable, and based solely on observed infrastructure state,
+metrics, and system rules.
 
 #### Examples
 
@@ -121,7 +123,7 @@ It is factual, measurable, and derived solely from observed infrastructure state
 
 #### Immutability Rule
 
-A finding is **immutable within a given run**.
+A finding is immutable within a given run.
 
 - Its content (rule result, metrics, computed values) cannot be modified once written.
 - Any user actions (ignore, snooze, resolve, owner assignment, notes) are stored in a separate lifecycle overlay keyed by the finding fingerprint.
@@ -137,7 +139,7 @@ This guarantees:
 
 Each finding may include checker-authored guidance text in payload field:
 - `advice` (canonical)
-- `recommendation` (legacy alias, backward-compatibility only)
+- `recommendation` (compatibility alias only)
 
 This text explains context and suggested direction, but it is **free text** and
 must not be used as the workflow contract for approvals/execution logic.
@@ -146,15 +148,17 @@ must not be used as the workflow contract for approvals/execution logic.
 
 ### Recommendation
 
-A **Recommendation** is a derived, strategic proposal associated with a finding that suggests a specific action to improve cost efficiency, reduce risk, or correct a violation.
+A **Recommendation** is a curated action proposal associated with a finding
+that suggests a specific action to improve cost efficiency, reduce risk, or
+correct a violation.
 
 A recommendation describes **what should be done**, based on the finding.
 
-It is prescriptive and may evolve as:
-- pricing models change,
-- optimization strategies improve,
-- risk tolerance shifts,
-- or new business logic is introduced.
+It may evolve as:
+- pricing models change
+- optimization strategies improve
+- risk tolerance shifts
+- new business logic is introduced
 
 #### Examples
 
@@ -172,8 +176,8 @@ It is prescriptive and may evolve as:
 - It does not exist independently of findings.
 - It is represented as a normalized action-plan object in `/api/recommendations`.
 
-A finding represents the **diagnosis**.  
-A recommendation represents the **treatment plan**.
+A finding represents the diagnosis.  
+A recommendation represents the treatment plan.
 
 #### Recommendation Action Plan (API object)
 
@@ -184,7 +188,7 @@ The recommendations API is the normalized execution contract for product/workflo
 - financial estimates and confidence
 
 Rule:
-- `advice`/`recommendation` text is explanatory.
+- `advice` and `recommendation` text are explanatory.
 - recommendation action-plan fields drive queueing, approvals, and remediations.
 
 ---

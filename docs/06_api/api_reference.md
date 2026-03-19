@@ -494,7 +494,7 @@ Scope query required: `tenant_id`, `workspace`.
 `/api/groups/{group_key}` optional:
 - `state`, `q`, `limit`, `offset`
 
-## Lifecycle mutation routes (legacy payload style)
+## Lifecycle mutation routes (compatibility payload style)
 
 Stability: `compatibility`
 

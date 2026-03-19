@@ -1,9 +1,10 @@
 """Centralized application configuration with schema validation.
 
-This module is intentionally compatibility-first:
-- Supports legacy flat environment names (for example ``DB_URL``).
-- Supports nested names (for example ``DB__URL``) for future consistency.
-- Optionally reads a local ``.env`` file before process env values.
+This module supports both:
+- flat environment names such as ``DB_URL``
+- nested names such as ``DB__URL``
+
+It can also read a local ``.env`` file before process environment values.
 """
 
 from __future__ import annotations
