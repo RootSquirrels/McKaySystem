@@ -14,6 +14,14 @@ Reference scope:
 - Canonical tier-1 domain semantics:
   - [api_domain_contracts.md](/McKaySystem/docs/06_api/api_domain_contracts.md)
 
+How to read this document:
+
+- this page focuses on routes, request shapes, and endpoint-specific behavior
+- [api_domain_contracts.md](/McKaySystem/docs/06_api/api_domain_contracts.md)
+  defines the meaning of the main API objects
+- [product_surface_contract.md](/McKaySystem/docs/00_overview/product_surface_contract.md)
+  explains how findings, recommendations, coverage, and savings relate
+
 ## Architecture
 
 The API is organized into Flask Blueprints, each handling a specific domain:
@@ -159,11 +167,9 @@ Stability: `stable`
 
 ## Runs
 
-Stability: `beta`
-
-Canonical domain contract:
-- [api_domain_contracts.md](/McKaySystem/docs/06_api/api_domain_contracts.md)
-  - Runs and Coverage Contract
+Stability: `beta`  
+Contract: `Runs and Coverage Contract` in
+[api_domain_contracts.md](/McKaySystem/docs/06_api/api_domain_contracts.md)
 
 Response normalization note:
 - latest run and latest diff routes now use the standard public success/error
@@ -181,11 +187,9 @@ Query for both: `tenant_id`, `workspace` (required).
 
 ## Findings read model
 
-Stability: `beta`
-
-Canonical domain contract:
-- [api_domain_contracts.md](/McKaySystem/docs/06_api/api_domain_contracts.md)
-  - Findings Contract
+Stability: `beta`  
+Contract: `Findings Contract` in
+[api_domain_contracts.md](/McKaySystem/docs/06_api/api_domain_contracts.md)
 
 | Method | Path | Description |
 |---|---|---|
@@ -211,11 +215,9 @@ Common optional filters:
 
 ## Recommendations
 
-Stability: `beta`
-
-Canonical domain contract:
-- [api_domain_contracts.md](/McKaySystem/docs/06_api/api_domain_contracts.md)
-  - Recommendations Contract
+Stability: `beta`  
+Contract: `Recommendations Contract` in
+[api_domain_contracts.md](/McKaySystem/docs/06_api/api_domain_contracts.md)
 
 | Method | Path | Description |
 |---|---|---|
@@ -225,8 +227,8 @@ Canonical domain contract:
 | POST | `/api/recommendations/preview` | Alias for /estimate |
 
 Notes:
-- Recommendations are derived from `finding_current` at read time (not a separate worker table yet).
-- Recommendation semantics should be read together with:
+- Recommendations are derived from `finding_current` at read time.
+- For recommendation semantics and build details, see:
   - [product_surface_contract.md](/McKaySystem/docs/00_overview/product_surface_contract.md)
   - [recommendations_build.md](/McKaySystem/docs/02_pipeline/recommendations_build.md)
 - Response items include normalized action-plan fields and `checker_advice` (from finding payload `advice`, with a compatibility fallback to payload `recommendation`).
@@ -252,11 +254,9 @@ Body params for `/api/recommendations/estimate`:
 
 ## Remediations
 
-Stability: `beta`
-
-Canonical domain contract:
-- [api_domain_contracts.md](/McKaySystem/docs/06_api/api_domain_contracts.md)
-  - Remediations Contract
+Stability: `beta`  
+Contract: `Remediations Contract` in
+[api_domain_contracts.md](/McKaySystem/docs/06_api/api_domain_contracts.md)
 
 | Method | Path | Description |
 |---|---|---|
@@ -670,11 +670,9 @@ Errors:
 
 ## KPIs
 
-Stability: `beta`
-
-Canonical domain contract:
-- [api_domain_contracts.md](/McKaySystem/docs/06_api/api_domain_contracts.md)
-  - KPI Contract
+Stability: `beta`  
+Contract: `KPI Contract` in
+[api_domain_contracts.md](/McKaySystem/docs/06_api/api_domain_contracts.md)
 
 | Method | Path | Description |
 |---|---|---|
@@ -682,7 +680,7 @@ Canonical domain contract:
 
 Notes:
 
-- KPI semantics should be read together with:
+- For KPI semantics, see:
   - [product_surface_contract.md](/McKaySystem/docs/00_overview/product_surface_contract.md)
   - [glossary.md](/McKaySystem/docs/00_overview/glossary.md)
 - The current `recommendations` KPI family represents recommendation candidates.
@@ -690,11 +688,9 @@ Notes:
 
 ## Tenant admin
 
-Stability: `beta`
-
-Canonical domain contract:
-- [api_domain_contracts.md](/McKaySystem/docs/06_api/api_domain_contracts.md)
-  - Tenant Administration Contract
+Stability: `beta`  
+Contract: `Tenant Administration Contract` in
+[api_domain_contracts.md](/McKaySystem/docs/06_api/api_domain_contracts.md)
 
 | Method | Path | Description |
 |---|---|---|
@@ -710,8 +706,8 @@ Canonical domain contract:
 Notes:
 
 - This is a public product-admin surface, but it is still considered `beta`.
-- The canonical product meaning of tenant/workspace and inherited tenant access is documented in:
-  - [glossary.md](/McKaySystem/docs/00_overview/glossary.md)
+- Tenant, workspace, and inherited tenant access are defined in
+  [glossary.md](/McKaySystem/docs/00_overview/glossary.md).
 
 ## Smoke testing
 

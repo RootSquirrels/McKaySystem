@@ -9,6 +9,7 @@ from apps.backend.db import db_conn, execute_conn, fetch_all_dict_conn, fetch_on
 from apps.flask_api.audit import AuditEvent, append_audit_event
 from apps.flask_api.auth_middleware import require_permission
 from apps.flask_api.graph_context import graph_resource_key_from_payload, load_graph_context
+from apps.flask_api.utils.lookups import finding_exists, team_exists
 from apps.flask_api.utils import (
     _MISSING,
     _coerce_optional_text,
@@ -86,32 +87,22 @@ def _audit_log_event(
 
 def _finding_exists(conn: Any, *, tenant_id: str, workspace: str, fingerprint: str) -> bool:
     """Check whether a finding exists in scope."""
-    row = fetch_one_dict_conn(
+    return finding_exists(
         conn,
-        """
-        SELECT 1 AS ok
-        FROM finding_latest
-        WHERE tenant_id = %s AND workspace = %s AND fingerprint = %s
-        LIMIT 1
-        """,
-        (tenant_id, workspace, fingerprint),
+        tenant_id=tenant_id,
+        workspace=workspace,
+        fingerprint=fingerprint,
     )
-    return bool(row and row.get("ok") == 1)
 
 
 def _team_exists(conn: Any, *, tenant_id: str, workspace: str, team_id: str) -> bool:
     """Check whether a team exists in scope."""
-    row = fetch_one_dict_conn(
+    return team_exists(
         conn,
-        """
-        SELECT 1 AS ok
-        FROM teams
-        WHERE tenant_id = %s AND workspace = %s AND team_id = %s
-        LIMIT 1
-        """,
-        (tenant_id, workspace, team_id),
+        tenant_id=tenant_id,
+        workspace=workspace,
+        team_id=team_id,
     )
-    return bool(row and row.get("ok") == 1)
 
 
 def _ensure_finding_governance_row(conn: Any, *, tenant_id: str, workspace: str, fingerprint: str) -> None:

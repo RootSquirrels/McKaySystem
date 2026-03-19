@@ -1,13 +1,14 @@
 # Documentation Contract
 
 Status: Canonical  
-Last reviewed: 2026-02-01
+Last reviewed: 2026-03-19
 
 This repository contains an AWS-centric FinOps engine (checkers → findings → correlation → exports).
-Documentation is treated like an API: **few canonical contracts** define the truth, and all other docs must
-*reference* those contracts instead of redefining them.
+Documentation is treated like an API. A small set of canonical contracts
+defines the truth, and other docs should reference those contracts instead of
+redefining them.
 
-## Canonical documents (source of truth)
+## Canonical documents
 
 - `00_overview/glossary.md` — vocabulary and core concepts
 - `01_architecture/architecture.md` — boundaries and responsibilities
@@ -36,8 +37,9 @@ Disallowed duplication:
 ## Document header standard
 
 All docs start with:
-- `Status: Canonical|Derived`
+- `Status: Canonical|Reference|Active`
 - `Last reviewed: YYYY-MM-DD`
 
 Canonical docs change rarely and should be reviewed carefully.
-Derived docs can evolve quickly, but must not redefine contracts.
+Reference docs can evolve more quickly, but must not redefine contracts.
+Active plans can track ongoing work and implementation sequencing.

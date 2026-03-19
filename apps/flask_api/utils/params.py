@@ -1,13 +1,10 @@
-"""Query and payload parameter parsing helpers for Flask API.
-
-Provides utilities for extracting and validating request parameters
-from query strings and JSON payloads.
-"""
+"""Query and payload parameter parsing helpers for Flask API."""
 
 from datetime import UTC, datetime
 from typing import Any
 
 from flask import request
+from werkzeug.exceptions import BadRequest
 
 # Sentinel value for missing optional parameters
 _MISSING = object()
@@ -83,21 +80,25 @@ def _require_scope_from_json(payload: dict[str, Any]) -> tuple[str, str]:
 
 
 def _safe_scope_from_request() -> tuple[str | None, str | None]:
-    """Safely extract tenant_id and workspace from request.
-
-    Does not raise - returns None values if not present.
-    Useful for logging or optional scoping.
+    """Safely extract tenant_id and workspace from query or JSON request data.
 
     Returns:
-        Tuple of (tenant_id or None, workspace or None)
+        Tuple of tenant_id and workspace, or ``None`` values when absent.
     """
-    tenant_id = _q("tenant_id") or _q("tenant") or None
-    workspace = _q("workspace") or _q("ws") or None
-    if tenant_id:
-        tenant_id = tenant_id.strip() or None
-    if workspace:
-        workspace = workspace.strip() or None
-    return tenant_id, workspace
+    tenant_id = _q("tenant_id") or _q("tenant")
+    workspace = _q("workspace") or _q("ws")
+    if tenant_id and workspace:
+        return tenant_id.strip() or None, workspace.strip() or None
+    try:
+        if request.is_json:
+            payload = request.get_json(silent=True) or {}
+            payload_tenant = payload.get("tenant_id") or payload.get("tenant")
+            payload_workspace = payload.get("workspace") or payload.get("ws")
+            if payload_tenant and payload_workspace:
+                return str(payload_tenant).strip() or None, str(payload_workspace).strip() or None
+    except (BadRequest, TypeError, ValueError):
+        pass
+    return None, None
 
 
 def _parse_int(

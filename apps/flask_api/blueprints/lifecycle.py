@@ -8,6 +8,7 @@ from flask import Blueprint, request
 from apps.backend.db import db_conn, execute_conn, fetch_one_dict_conn
 from apps.flask_api.audit import AuditEvent, append_audit_event
 from apps.flask_api.auth_middleware import require_permission
+from apps.flask_api.utils.lookups import finding_exists
 from apps.flask_api.utils import (
     _err,
     _ok,
@@ -217,17 +218,12 @@ def _upsert_group_state(
 
 def _finding_exists(conn: Any, *, tenant_id: str, workspace: str, fingerprint: str) -> bool:
     """Check if finding exists."""
-    row = fetch_one_dict_conn(
+    return finding_exists(
         conn,
-        """
-        SELECT 1 AS ok
-        FROM finding_latest
-        WHERE tenant_id = %s AND workspace = %s AND fingerprint = %s
-        LIMIT 1
-        """,
-        (tenant_id, workspace, fingerprint),
+        tenant_id=tenant_id,
+        workspace=workspace,
+        fingerprint=fingerprint,
     )
-    return bool(row and row.get("ok") == 1)
 
 
 # Group lifecycle endpoints

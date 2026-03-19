@@ -169,9 +169,14 @@ Completed in the current cleanup track:
 - several Flask API blueprints now use shared audit helpers instead of local copies
 - small API endpoints such as health and facets now follow the shared response style
 - package and module headers in the Flask API layer were simplified
+- duplicate request/response helpers were removed from `flask_app.py` in favor of `apps/flask_api/utils/`
+- stale OpenAPI/version routes were removed from the health blueprint so those endpoints now live in one place only
+- repeated scoped lookup SQL for finding/team existence was moved into a shared helper module
 
 Still open:
 
 - broader compatibility-path review across the remaining API surface
 - cleanup of stale comments and transitional wording outside the Flask API layer
 - a final sweep for encoding and formatting issues in older docs
+- further doc de-duplication between `api_reference.md` and `api_domain_contracts.md`
+- cleanup of bad historical character encoding in a few older docs such as `docs_contract.md` and `glossary.md`

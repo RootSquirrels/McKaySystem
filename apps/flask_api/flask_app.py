@@ -20,8 +20,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, Response, abort, jsonify, request
-from werkzeug.exceptions import BadRequest
+from flask import Flask, Response, abort, request
 
 from apps.backend.db import (
     db_conn,
@@ -45,6 +44,22 @@ from apps.flask_api.blueprints import tenant_admin as tenant_admin_module
 from apps.flask_api.blueprints import teams as teams_module
 from apps.flask_api.blueprints import users as users_module
 from apps.flask_api import graph_context as graph_context_module
+from apps.flask_api.utils import (
+    _MISSING,
+    _coerce_optional_text,
+    _coerce_positive_int,
+    _err,
+    _json,
+    _ok,
+    _parse_csv_list,
+    _parse_int,
+    _parse_iso8601_dt,
+    _payload_optional_text,
+    _q,
+    _require_scope_from_json,
+    _require_scope_from_query,
+    _safe_scope_from_request,
+)
 from infra.config import get_settings
 
 app = Flask(__name__)
@@ -199,23 +214,6 @@ def _handle_cors_preflight() -> Response | None:
     if not _cors_origin_allowed(origin):
         return None
     return _apply_cors_headers(Response(status=204))
-
-
-def _safe_scope_from_request() -> tuple[str | None, str | None]:
-    tenant_id = _q("tenant_id") or _q("tenant")
-    workspace = _q("workspace")
-    if tenant_id and workspace:
-        return tenant_id, workspace
-    try:
-        if request.is_json:
-            payload = request.get_json(silent=True) or {}
-            t = payload.get("tenant_id") or payload.get("tenant")
-            w = payload.get("workspace")
-            if t and w:
-                return str(t), str(w)
-    except (BadRequest, TypeError, ValueError):
-        pass
-    return None, None
 
 
 def _api_route_perf_context(resp: Response, *, ms: int | None) -> dict[str, Any] | None:
@@ -381,20 +379,6 @@ def _enforce_rate_limit() -> None:
     if not allowed:
         _log("WARN", "rate_limited", {"key": key, "path": path})
         abort(429)
-
-
-def _ok(data: dict[str, Any] | None = None, *, status: int = 200) -> Any:
-    payload: dict[str, Any] = {"ok": True}
-    if data:
-        payload.update(data)
-    return jsonify(payload), status
-
-
-def _err(code: str, message: str, *, status: int, extra: dict[str, Any] | None = None) -> Any:
-    payload: dict[str, Any] = {"ok": False, "error": code, "message": message}
-    if extra:
-        payload.update(extra)
-    return jsonify(payload), status
 
 
 def _api_internal_error_response(exc: Exception) -> Any:
@@ -663,19 +647,19 @@ def _build_openapi_spec() -> dict[str, Any]:
 
 @app.get("/openapi.json")
 def api_openapi_public() -> Any:
-    """OpenAPI 3.0 specification (public endpoint)."""
+    """Return the public OpenAPI document."""
     return _json(_build_openapi_spec())
 
 
 @app.get("/api/openapi.json")
 def api_openapi_scoped() -> Any:
-    """OpenAPI 3.0 specification under API base."""
+    """Return the OpenAPI document under the API base."""
     return _json(_build_openapi_spec())
 
 
 @app.get("/api/version")
 def api_version() -> Any:
-    """API version metadata and supported versions."""
+    """Return API version metadata."""
     return _json(
         {
             "version": _API_VERSION,
@@ -688,103 +672,6 @@ def api_version() -> Any:
 
 def _now_utc() -> datetime:
     return datetime.now(UTC)
-
-
-def _q(name: str, default: str | None = None) -> str | None:
-    v = request.args.get(name)
-    if v is None or v == "":
-        return default
-    return v
-
-
-def _require_scope_from_query() -> tuple[str, str]:
-    tenant_id = _q("tenant_id") or _q("tenant") or ""
-    workspace = _q("workspace") or ""
-    if not tenant_id or not workspace:
-        raise ValueError("tenant_id and workspace are required")
-    return tenant_id, workspace
-
-
-def _require_scope_from_json(payload: dict[str, Any]) -> tuple[str, str]:
-    tenant_id = str(payload.get("tenant_id") or payload.get("tenant") or "").strip()
-    workspace = str(payload.get("workspace") or "").strip()
-    if not tenant_id or not workspace:
-        raise ValueError("tenant_id and workspace are required")
-    return tenant_id, workspace
-
-
-def _parse_int(value: str | None, *, default: int, min_v: int, max_v: int) -> int:
-    if value is None or value == "":
-        return default
-    try:
-        n = int(value)
-    except ValueError as exc:
-        raise ValueError(f"Invalid integer: {value}") from exc
-    return max(min_v, min(max_v, n))
-
-
-def _parse_csv_list(value: str | None) -> list[str] | None:
-    if not value:
-        return None
-    items = [x.strip() for x in value.split(",") if x.strip()]
-    return items or None
-
-
-def _json(payload: dict[str, Any], *, status: int = 200) -> Any:
-    """Return a JSON response with an explicit status code.
-
-    Backward-compatible helper. If 'ok' is missing, it is inferred from status.
-    Prefer using _ok() / _err() for new code.
-    """
-    if "ok" not in payload:
-        payload = dict(payload)
-        payload["ok"] = status < 400
-    return jsonify(payload), status
-
-
-def _parse_iso8601_dt(value: str | None, *, field_name: str = "timestamp") -> datetime | None:
-    """Parse an ISO-8601 timestamp (accepts trailing 'Z') into an aware UTC datetime."""
-    if value is None:
-        return None
-    s = str(value).strip()
-    if not s:
-        return None
-    try:
-        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise ValueError(f"Invalid {field_name} (expected ISO-8601): {s!r}") from exc
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
-    return dt.astimezone(UTC)
-
-
-_MISSING = object()
-
-
-def _coerce_optional_text(value: Any) -> str | None:
-    """Normalize optional API text values to trimmed strings or None."""
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
-
-
-def _payload_optional_text(payload: dict[str, Any], key: str) -> Any:
-    """Return normalized payload value for a key or _MISSING when absent."""
-    if key not in payload:
-        return _MISSING
-    return _coerce_optional_text(payload.get(key))
-
-
-def _coerce_positive_int(value: Any, *, field_name: str) -> int:
-    """Parse a required positive integer field from JSON payload data."""
-    try:
-        n = int(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{field_name} must be an integer") from exc
-    if n <= 0:
-        raise ValueError(f"{field_name} must be > 0")
-    return n
 
 def _register_versioned_api_aliases() -> None:
     """Register `/api/<version>/...` aliases for all existing `/api/...` routes."""
@@ -923,7 +810,6 @@ def _install_blueprint_backcompat_shims() -> None:
     findings_module._audit_log_event = lambda *args, **kwargs: _audit_log_event(*args, **kwargs)
 
 
-health_module.init_blueprint(_API_VERSION, _API_PREFIX)
 _install_blueprint_backcompat_shims()
 
 # Register blueprints - each handles its own route definitions.

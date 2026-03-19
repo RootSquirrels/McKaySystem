@@ -12,6 +12,7 @@ from apps.backend.db import (
 )
 from apps.flask_api.audit import AuditEvent, append_audit_event
 from apps.flask_api.auth_middleware import require_permission
+from apps.flask_api.utils.lookups import team_exists
 from apps.flask_api.utils import (
     _MISSING,
     _coerce_optional_text,
@@ -29,17 +30,12 @@ teams_bp = Blueprint("teams", __name__)
 
 def _team_exists(conn: Any, *, tenant_id: str, workspace: str, team_id: str) -> bool:
     """Check if a team exists."""
-    row = fetch_one_dict_conn(
+    return team_exists(
         conn,
-        """
-        SELECT 1 AS ok
-        FROM teams
-        WHERE tenant_id = %s AND workspace = %s AND team_id = %s
-        LIMIT 1
-        """,
-        (tenant_id, workspace, team_id),
+        tenant_id=tenant_id,
+        workspace=workspace,
+        team_id=team_id,
     )
-    return bool(row and row.get("ok") == 1)
 
 
 def _fetch_team(conn: Any, *, tenant_id: str, workspace: str, team_id: str) -> dict[str, Any] | None:
