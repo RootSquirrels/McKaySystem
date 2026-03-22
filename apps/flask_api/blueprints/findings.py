@@ -335,7 +335,8 @@ def api_findings() -> Any:
         tenant_id, workspace = _require_scope_from_query()
 
         limit = _parse_int(_q("limit"), default=100, min_v=1, max_v=1000)
-        offset = _parse_int(_q("offset"), default=0, min_v=0, max_v=5_000_000)
+        cursor = _q("cursor")  # Base64-encoded cursor for keyset pagination
+        offset = _parse_int(_q("offset"), default=0, min_v=0, max_v=5_000_000)  # Deprecated, use cursor
 
         # Filters
         effective_states = _parse_csv_list(_q("state"))
@@ -378,6 +379,23 @@ def api_findings() -> Any:
             else "detected_at DESC"
         )
 
+        # Build cursor-based filter if cursor is provided
+        # Cursor format: base64(detected_at|fingerprint) for detected_desc
+        # For savings_desc: base64(estimated_monthly_savings|detected_at|fingerprint)
+        if cursor and order == "detected_desc":
+            try:
+                import base64
+                cursor_decoded = base64.b64decode(cursor).decode("utf-8")
+                parts = cursor_decoded.split("|")
+                if len(parts) == 2:
+                    curs_detected, curs_fingerprint = parts
+                    where.append("(detected_at < %s OR (detected_at = %s AND fingerprint < %s))")
+                    params.extend([curs_detected, curs_detected, curs_fingerprint])
+            except (ValueError, ImportError, base64.binascii.Error):
+                raise ValueError("Invalid cursor format")
+
+        # Build the SQL query
+        # Use limit+1 to check if there are more results
         sql = f"""
             SELECT
               tenant_id, workspace, fingerprint, run_id,
@@ -396,25 +414,53 @@ def api_findings() -> Any:
             FROM finding_current
             WHERE {' AND '.join(where)}
             ORDER BY {order_sql}
-            LIMIT %s OFFSET %s
+            LIMIT %s
         """
-        params2 = params + [limit, offset]
+
+        # Build parameters with limit (fetch limit+1 to check for more results)
+        params_with_limit = params + [limit + 1]
+
+        # For offset-based pagination (deprecated), apply after cursor logic
+        if offset > 0 and not cursor:
+            sql = sql.rstrip() + f" OFFSET {offset}"
+            params_with_limit = params + [limit, offset]
 
         with db_conn() as conn:
-            rows = fetch_all_dict_conn(conn, sql, params2)
-            count_row = fetch_one_dict_conn(
-                conn,
-                f"SELECT COUNT(*) AS n FROM finding_current WHERE {' AND '.join(where)}",
-                params,
-            )
+            rows = fetch_all_dict_conn(conn, sql, params_with_limit)
+
+            # Check if there are more results
+            has_more = len(rows) > limit
+            if has_more:
+                rows = rows[:limit]  # Remove the extra row
+
+            # Generate next cursor from last row
+            next_cursor = None
+            if rows and has_more:
+                import base64
+                last = rows[-1]
+                detected_val = str(last.get("detected_at") or "")
+                fingerprint_val = str(last.get("fingerprint") or "")
+                cursor_data = f"{detected_val}|{fingerprint_val}"
+                next_cursor = base64.b64encode(cursor_data.encode("utf-8")).decode("utf-8")
+
+            # Get total count only for first page (when not using cursor)
+            total = None
+            if not cursor and offset == 0:
+                count_row = fetch_one_dict_conn(
+                    conn,
+                    f"SELECT COUNT(*) AS n FROM finding_current WHERE {' AND '.join(where)}",
+                    params,
+                )
+                total = int((count_row or {}).get("n") or 0)
 
         return _ok(
             {
                 "tenant_id": tenant_id,
                 "workspace": workspace,
                 "limit": limit,
-                "offset": offset,
-                "total": int((count_row or {}).get("n") or 0),
+                "total": total,
+                "has_more": has_more,
+                "next_cursor": next_cursor,
                 "items": rows,
             }
         )

@@ -130,6 +130,26 @@ def _iso_z(dt: datetime) -> str:
     return dt.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
+def _get_request_id() -> str:
+    """Get or generate a request ID for tracing.
+
+    Checks X-Request-Id header first, falls back to X-Correlation-Id,
+    then generates a new UUID if neither is present.
+    """
+    # Check standard headers
+    request_id = str(
+        request.headers.get("X-Request-Id") or
+        request.headers.get("X-Correlation-Id") or
+        ""
+    ).strip()
+    if request_id:
+        return request_id
+
+    # Generate new ID for this request
+    import uuid
+    return str(uuid.uuid4())
+
+
 def _log(level: str, event: str, fields: dict[str, Any]) -> None:
     """Emit a single-line JSON log via the standard logging pipeline."""
     level_u = (level or "INFO").upper()
@@ -205,6 +225,16 @@ def _start_timer() -> None:
 
 
 @app.before_request
+def _capture_request_id() -> None:
+    """Capture or generate request ID for tracing.
+
+    Stores the request ID in environ for use in logging and propagation.
+    """
+    request_id = _get_request_id()
+    request.environ["_mckay_request_id"] = request_id
+
+
+@app.before_request
 def _handle_cors_preflight() -> Response | None:
     """Short-circuit API preflight requests for allowed CORS origins."""
     path = _canonical_api_path(request.path or "")
@@ -265,6 +295,8 @@ def _log_request(resp: Response) -> Response:
         t0 = float(request.environ.get("_mckay_t0") or 0.0)
         ms = int(max(0.0, (time.monotonic() - t0) * 1000.0)) if t0 else None
         tenant_id, workspace = _safe_scope_from_request()
+        request_id = str(request.environ.get("_mckay_request_id") or "")
+
         _log(
             "INFO",
             "http_request",
@@ -277,10 +309,12 @@ def _log_request(resp: Response) -> Response:
                 "ua": request.headers.get("User-Agent", ""),
                 "tenant_id": tenant_id,
                 "workspace": workspace,
+                "request_id": request_id,
             },
         )
         perf_context = _api_route_perf_context(resp, ms=ms)
         if perf_context is not None:
+            perf_context["request_id"] = request_id
             _log("INFO", "api_route_perf", perf_context)
             slo_ms = int(perf_context.get("slo_ms") or 0)
             if ms is not None and slo_ms > 0 and ms > slo_ms:
@@ -295,6 +329,10 @@ def _log_request(resp: Response) -> Response:
         resp.headers["Pragma"] = "no-cache"
         resp.headers["Expires"] = "0"
         resp.headers["Vary"] = _merge_vary_header(resp.headers.get("Vary"), "Authorization")
+        # Propagate request ID for tracing
+        request_id = str(request.environ.get("_mckay_request_id") or "")
+        if request_id:
+            resp.headers["X-Request-Id"] = request_id
     return _apply_cors_headers(resp)
 
 
@@ -341,7 +379,10 @@ def _rate_limits() -> tuple[float | None, float | None]:
 def _rate_key() -> str:
     ip = request.headers.get("X-Forwarded-For", request.remote_addr) or "unknown"
     path = _canonical_api_path(request.path or "")
-    if path.startswith("/api/lifecycle/"):
+    if path.startswith("/api/auth/"):
+        # Auth endpoints are rate-limited separately to prevent brute force attacks
+        group = "/api/auth"
+    elif path.startswith("/api/lifecycle/"):
         group = "/api/lifecycle"
     elif path.startswith("/api/findings"):
         group = "/api/findings"
@@ -484,9 +525,24 @@ def _err_500(exc: Exception) -> Any:
 #   Authorization: Bearer <token>
 _API_BEARER_TOKEN = str(_SETTINGS.api.bearer_token or "").strip()
 
+# Fail-fast: if debug_errors is False (production) and bearer token is empty,
+# the application is misconfigured and should fail immediately rather than
+# silently allowing unauthenticated access.
+_API_DEBUG_ERRORS = bool(_SETTINGS.api.debug_errors)
+
 
 def _is_auth_required() -> bool:
     return bool(_API_BEARER_TOKEN)
+
+
+def _check_bearer_token_config() -> None:
+    """Fail fast if bearer auth is required but token is not configured."""
+    if not _API_DEBUG_ERRORS and not _API_BEARER_TOKEN:
+        raise RuntimeError(
+            "API_BEARER_TOKEN is not set but API is running in production mode "
+            "(debug_errors=False). Set API_BEARER_TOKEN environment variable to "
+            "secure the API endpoints."
+        )
 
 
 def _check_bearer_token() -> None:
@@ -834,4 +890,6 @@ _register_versioned_api_aliases()
 
 
 if __name__ == "__main__":
+    # Fail-fast: ensure bearer token is configured in production mode
+    _check_bearer_token_config()
     app.run(host=str(_SETTINGS.api.host), port=int(_SETTINGS.api.port))

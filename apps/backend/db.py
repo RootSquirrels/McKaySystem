@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import atexit
 import json
+import os
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from typing import Any
@@ -88,10 +89,15 @@ def db_conn() -> Iterator[Any]:
     - Reuses connections (pool) instead of reconnecting on every query.
     - Callers should NOT close the connection; it is returned to the pool.
     - Always ends any open transaction before returning the connection to pool.
+    - Sets statement_timeout to prevent runaway queries (default: 30 seconds).
     """
     pool = _get_pool()
     conn = pool.getconn()
     try:
+        # Set statement_timeout to prevent runaway queries.
+        # Default 30 seconds. Override via DB__STATEMENT_TIMEOUT_MS or DB_STATEMENT_TIMEOUT_MS env var.
+        timeout_ms = int(os.environ.get("DB_STATEMENT_TIMEOUT_MS", "30000"))
+        conn.execute(f"SET statement_timeout = '{timeout_ms}ms'")
         yield conn
     finally:
         # Prevent "idle in transaction" pooled connections from reusing stale
