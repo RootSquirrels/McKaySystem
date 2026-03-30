@@ -15,6 +15,7 @@ def test_settings_reads_legacy_env_keys() -> None:
         "DB_URL": "postgres://legacy/db",
         "DB_POOL_MAXCONN": "15",
         "DB_CONNECT_TIMEOUT": "9",
+        "DB_STATEMENT_TIMEOUT_MS": "12000",
         "AWS_REGIONS": "us-east-1,eu-west-1",
         "AWS_MAX_RETRIES": "7",
         "API_VERSION": "v2",
@@ -26,6 +27,7 @@ def test_settings_reads_legacy_env_keys() -> None:
     assert settings.db.url == "postgres://legacy/db"
     assert settings.db.pool_maxconn == 15
     assert settings.db.connect_timeout == 9
+    assert settings.db.statement_timeout_ms == 12000
     assert settings.aws.regions == ["us-east-1", "eu-west-1"]
     assert settings.aws.max_retries == 7
     assert settings.api.version == "v2"
@@ -101,6 +103,14 @@ def test_settings_invalid_db_metrics_threshold_falls_back_to_default() -> None:
 def test_settings_invalid_pool_size_raises_validation_error() -> None:
     """Invalid constrained values should fail schema validation."""
     env = {"DB_POOL_MAXCONN": "0"}
+
+    with pytest.raises(ValidationError):
+        Settings.from_env(env=env, env_file=".missing.env")
+
+
+def test_settings_invalid_statement_timeout_raises_validation_error() -> None:
+    """Invalid DB statement timeout values should fail schema validation."""
+    env = {"DB_STATEMENT_TIMEOUT_MS": "0"}
 
     with pytest.raises(ValidationError):
         Settings.from_env(env=env, env_file=".missing.env")

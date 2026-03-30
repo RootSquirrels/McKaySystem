@@ -80,6 +80,16 @@ def _close_pool() -> None:
 atexit.register(_close_pool)
 
 
+def _apply_connection_settings(conn: Any) -> None:
+    """Apply per-checkout session settings to a pooled psycopg2 connection."""
+    timeout_ms = get_settings(reload=True).db.statement_timeout_ms
+    if timeout_ms is None:
+        return
+
+    with conn.cursor() as cur:
+        cur.execute("SET statement_timeout = %s", (int(timeout_ms),))
+
+
 @contextmanager
 def db_conn() -> Iterator[Any]:
     """Yield a pooled psycopg2 connection.
@@ -92,6 +102,7 @@ def db_conn() -> Iterator[Any]:
     pool = _get_pool()
     conn = pool.getconn()
     try:
+        _apply_connection_settings(conn)
         yield conn
     finally:
         # Prevent "idle in transaction" pooled connections from reusing stale

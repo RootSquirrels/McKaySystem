@@ -36,6 +36,7 @@ class DatabaseConfig(BaseModel):
     url: str | None = Field(default=None, description="Postgres connection URL")
     pool_maxconn: int = Field(default=10, ge=1, le=100)
     connect_timeout: int = Field(default=5, ge=1, le=60)
+    statement_timeout_ms: int | None = Field(default=None, ge=1, le=3_600_000)
 
 
 class AWSConfig(BaseModel):
@@ -295,6 +296,9 @@ def _build_payload(env: Mapping[str, str]) -> dict[str, object]:
         "url": _first_non_empty(env, "DB__URL", "DB_URL"),
         "pool_maxconn": _first_non_empty(env, "DB__POOL_MAXCONN", "DB_POOL_MAXCONN"),
         "connect_timeout": _first_non_empty(env, "DB__CONNECT_TIMEOUT", "DB_CONNECT_TIMEOUT"),
+        "statement_timeout_ms": _first_non_empty(
+            env, "DB__STATEMENT_TIMEOUT_MS", "DB_STATEMENT_TIMEOUT_MS"
+        ),
     }
     aws = {
         "regions": _first_non_empty(env, "AWS__REGIONS", "AWS_REGIONS"),
