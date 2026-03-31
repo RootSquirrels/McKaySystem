@@ -55,9 +55,9 @@ from typing import Any
 
 import boto3
 
+import checks  # IMPORTANT: used for module discovery
 from apps.worker.coverage_model import CoverageIssue, CoverageResult, write_coverage_bundle
 from apps.worker.resource_graph_model import build_graph_from_findings, write_graph_bundle
-import checks  # IMPORTANT: used for module discovery
 from checks.registry import get_factory, list_specs
 from contracts.finops_checker_pattern import Checker, CheckerRunner, RunContext
 from contracts.services import Services, ServicesFactory
@@ -135,6 +135,38 @@ def _coverage_confidence(*, invalid_findings: int) -> str:
     if invalid_findings > 0:
         return "medium"
     return "high"
+
+
+def _is_permission_gap_finding(record: dict[str, Any]) -> bool:
+    """Return True when a validated finding represents a missing-permission signal."""
+    check_id = str(record.get("check_id") or "").strip().lower()
+    if check_id.endswith(".missing.permission") or check_id.endswith(".access.error"):
+        return True
+
+    issue_key = record.get("issue_key")
+    if isinstance(issue_key, dict):
+        issue_values = {str(value).strip().lower() for value in issue_key.values() if value is not None}
+        if "access_error" in issue_values:
+            return True
+
+    text = " ".join(
+        [
+            str(record.get("title") or "").strip().lower(),
+            str(record.get("message") or "").strip().lower(),
+            check_id,
+        ]
+    )
+    return (
+        "access denied" in text
+        or "missing permission" in text
+        or "unauthorizedoperation" in text
+        or "unable to list" in text and ".access.error" in check_id
+    )
+
+
+def _permission_gap_findings_count(records: Sequence[dict[str, Any]]) -> int:
+    """Count validated findings that indicate missing coverage due to permissions."""
+    return sum(1 for record in records if _is_permission_gap_finding(record))
 
 
 def _coverage_error_class(exc: Exception) -> tuple[str, bool, str | None]:
@@ -648,6 +680,7 @@ def main(argv: Sequence[str]) -> int:
             writer.extend(result.valid_findings)
             graph_wire_records.extend(dict(item) for item in result.valid_findings)
             valid_count = len(result.valid_findings)
+            permission_gap_count = _permission_gap_findings_count(result.valid_findings)
             total_valid += valid_count
             total_invalid_count += int(result.invalid_findings)
             total_invalid_errors.extend(result.invalid_errors or [])
@@ -665,7 +698,7 @@ def main(argv: Sequence[str]) -> int:
                 duration_ms=int((perf_counter() - perf_started) * 1000),
                 confidence=_coverage_confidence(invalid_findings=result.invalid_findings),
                 completeness_pct=100.0,
-                permission_gap_count=0,
+                permission_gap_count=permission_gap_count,
                 started_at=_iso_z(checker_started),
                 finished_at=_iso_z(_utc_now()),
             )
@@ -740,6 +773,7 @@ def main(argv: Sequence[str]) -> int:
                 writer.extend(result.valid_findings)
                 graph_wire_records.extend(dict(item) for item in result.valid_findings)
                 valid_count = len(result.valid_findings)
+                permission_gap_count = _permission_gap_findings_count(result.valid_findings)
                 region_valid_total += valid_count
                 total_valid += valid_count
                 total_invalid_count += int(result.invalid_findings)
@@ -758,7 +792,7 @@ def main(argv: Sequence[str]) -> int:
                     duration_ms=int((perf_counter() - perf_started) * 1000),
                     confidence=_coverage_confidence(invalid_findings=result.invalid_findings),
                     completeness_pct=100.0,
-                    permission_gap_count=0,
+                    permission_gap_count=permission_gap_count,
                     started_at=_iso_z(checker_started),
                     finished_at=_iso_z(_utc_now()),
                 )
